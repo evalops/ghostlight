@@ -143,7 +143,7 @@ function composeConfig() {
 }
 
 function chromiumConfig() {
-  const chromiumCommand = "/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --enable-automation --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage";
+  const chromiumCommand = "/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --enable-automation --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage";
   const command = CDP_MODE === "pipe"
     ? `/usr/bin/python3 /usr/local/bin/ghostlight-performance-cdp-pipe.py --bind 0.0.0.0 --port 9222 -- ${chromiumCommand} --remote-debugging-pipe`
     : `${chromiumCommand} --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*`;
