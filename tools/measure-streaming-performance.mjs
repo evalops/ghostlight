@@ -109,7 +109,7 @@ function composeConfig() {
       - ${yamlQuote(`${BIND_ADDRESS}:${VIEWER_PORT}:8080/tcp`)}
       - ${yamlQuote(`${BIND_ADDRESS}:${WEBRTC_PORT}:${WEBRTC_PORT}/udp`)}
       - ${yamlQuote(`${BIND_ADDRESS}:${WEBRTC_PORT}:${WEBRTC_PORT}/tcp`)}
-      - ${yamlQuote(`${BIND_ADDRESS}:${CDP_PORT}:9222/tcp`)}
+      - ${yamlQuote(`${BIND_ADDRESS}:${CDP_PORT}:9223/tcp`)}
     volumes:
       - ${yamlQuote(`${REMOTE_DIR}/profile:/home/neko/.config/chromium`)}
       - ${yamlQuote(`${REMOTE_DIR}/neko.yaml:/etc/neko/neko.yaml:ro`)}
@@ -244,6 +244,20 @@ function startRemoteStats(containerId) {
   let stderr = "";
   sampler.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   return { marker, statsPath, sampler, stream, getStderr: () => stderr };
+}
+
+function startRemoteCdpBridge(containerId) {
+  const containerPid = remoteCommand(`docker inspect --format '{{.State.Pid}}' ${shellQuote(containerId)}`).trim();
+  if (!/^\d+$/.test(containerPid)) throw new Error(`invalid viewer container PID for CDP bridge: ${containerPid}`);
+  const logPath = `${REMOTE_DIR}/cdp-bridge.log`;
+  const bridgePid = remoteCommand(`sudo -n sh -c ${shellQuote(`exec nsenter -t ${containerPid} -n -- /usr/bin/socat TCP-LISTEN:9223,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:9222 >${logPath} 2>&1`)} & echo $!`).trim();
+  if (!/^\d+$/.test(bridgePid)) throw new Error(`invalid CDP bridge PID: ${bridgePid}`);
+  return { containerPid, bridgePid, logPath };
+}
+
+function stopRemoteCdpBridge(bridge) {
+  if (!bridge) return;
+  try { remoteCommand(`sudo -n kill ${shellQuote(bridge.bridgePid)}`); } catch { /* bridge may already have exited */ }
 }
 
 function startSshTunnel() {
@@ -889,6 +903,7 @@ async function main() {
   let remote;
   let remoteProvisioned = false;
   let tunnel;
+  let cdpBridge;
   let stats;
   let clientBrowser;
   let remotePage;
@@ -901,6 +916,7 @@ async function main() {
     await writeRemoteFiles();
     remoteProvisioned = true;
     remote = await startRemote();
+    cdpBridge = startRemoteCdpBridge(remote.containerId);
     tunnel = startSshTunnel();
     processStart = await processSnapshot(remote.containerId, "start");
     await waitForHTTP(`${VIEWER_URL}/health`);
@@ -944,6 +960,7 @@ async function main() {
     await stopRemoteStats(stats).catch(() => {});
     if (tunnel?.getStderr?.()) await fs.writeFile(join(OUTPUT_DIR, "ssh-tunnel.stderr"), tunnel.getStderr(), { mode: 0o600 });
     await stopSshTunnel(tunnel).catch(() => {});
+    stopRemoteCdpBridge(cdpBridge);
     if (remote?.containerId) await captureRemoteLogs(remote.containerId).catch(() => {});
     if (remoteProvisioned) {
       try { remoteCommand(`docker compose --project-name ${shellQuote(PROJECT)} --file ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} down --remove-orphans --volumes`); } catch { /* cleanup receipt records the run even if teardown fails */ }
