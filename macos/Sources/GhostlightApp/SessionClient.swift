@@ -40,12 +40,14 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
         return .server(statusCode: statusCode, message: payload?.bestMessage)
     }
 
-    public static func mapTransportError(_ error: Error) -> SessionClientError {
+    public static func mapTransportError(_ error: Error) throws -> SessionClientError {
         guard let urlError = error as? URLError else {
             return .transportFailure
         }
 
         switch urlError.code {
+        case .cancelled:
+            throw CancellationError()
         case .notConnectedToInternet,
              .networkConnectionLost,
              .cannotFindHost,
@@ -66,6 +68,9 @@ protocol ViewerDiscovering {
 }
 
 public final class SessionClient: ViewerDiscovering {
+    static let discoveryRequestTimeout: TimeInterval = 10
+    static let maxDiscoveryResponseBytes = 16 * 1024
+
     private let session: URLSession
     private let decoder: JSONDecoder
 
@@ -102,15 +107,23 @@ public final class SessionClient: ViewerDiscovering {
         )
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = Self.discoveryRequestTimeout
 
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            // Read the body with a hard cap so a misbehaving control plane
+            // cannot buffer an unbounded response in memory; the cap covers
+            // both the success payload and any error body fed to the decoder.
+            let (bytes, urlResponse) = try await session.bytes(for: request)
+            response = urlResponse
+            data = try await Self.readBoundedBody(from: bytes, limit: Self.maxDiscoveryResponseBytes)
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as SessionClientError {
+            throw error
         } catch {
-            throw SessionClientError.mapTransportError(error)
+            throw try SessionClientError.mapTransportError(error)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -133,5 +146,19 @@ public final class SessionClient: ViewerDiscovering {
         }
 
         return discoveryResponse
+    }
+
+    private static func readBoundedBody(
+        from bytes: URLSession.AsyncBytes,
+        limit: Int
+    ) async throws -> Data {
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+            guard data.count <= limit else {
+                throw SessionClientError.invalidResponse
+            }
+        }
+        return data
     }
 }

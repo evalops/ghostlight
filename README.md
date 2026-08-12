@@ -35,7 +35,7 @@ macOS client:
 - Swift 5.10 or later for local builds
 - access to the Linux control, viewer, and WebRTC ports
 
-Repository verification uses a Go 1.24-compatible module, a Go 1.26.5 container builder, and ShellCheck.
+Repository verification uses a Go 1.26-compatible module, a Go 1.26.5 container builder, and ShellCheck.
 
 Live browser acceptance requires Node.js with npm, Python 3, `shasum`, and Tesseract OCR. The reviewed container-update commands require Docker Buildx, `jq`, and Perl.
 
@@ -48,6 +48,8 @@ shasum -a 256 --check SHA256SUMS
 ```
 
 Extract the ZIP, move `Ghostlight.app` to `/Applications`, and complete the Linux runtime setup below. The alpha package has an ad-hoc code signature and no notarization ticket. For the first launch, Control-click the app, select **Open**, and confirm the prompt if macOS blocks a normal double-click.
+
+Release automation upgrades the package to a Developer ID signature with a notarized, stapled ticket when these repository secrets are configured: `APPLE_CERTIFICATE` (base64-encoded Developer ID Application `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_SPECIFIC_PASSWORD`. When any of them is missing, the release workflow emits a warning and ships the ad-hoc signed package described above.
 
 ## Start the Linux runtime
 
@@ -279,7 +281,7 @@ Check `runtime/data/chromium` ownership, permissions, and free disk space. Resto
 
 ## Scope
 
-The alpha has no control authentication, TLS termination, TURN service, multi-host scheduler, account system, billing, automatic browser upgrade, Developer ID-signed macOS package, notarized distribution, or public-internet deployment path.
+The alpha has no control authentication, TLS termination, TURN service, multi-host scheduler, account system, billing, automatic browser upgrade, or public-internet deployment path. The macOS package is ad-hoc signed unless the Apple signing secrets described above are configured.
 
 Changes required by the seven-day acceptance path remain in the current milestone. Multi-user control, fleet scheduling, and production deployment remain gated on that acceptance result.
 

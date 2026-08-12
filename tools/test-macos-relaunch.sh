@@ -51,6 +51,14 @@ EOF
 # First launch obtains the URL from the explicitly scoped environment. The app
 # itself persists it only after successful discovery. The second launch omits
 # the environment, so reaching Viewer loaded proves automatic saved-URL reuse.
+FIRST_PID=""
+SECOND_PID=""
+cleanup_relaunch() {
+  osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+  [[ -z "$FIRST_PID" ]] || kill "$FIRST_PID" 2>/dev/null || true
+  [[ -z "$SECOND_PID" ]] || kill "$SECOND_PID" 2>/dev/null || true
+}
+trap cleanup_relaunch EXIT
 osascript -e "tell application id \"$BUNDLE_ID\" to quit" 2>/dev/null || true
 sleep 2
 GHOSTLIGHT_CONTROL_URL="$CONTROL_URL" "$APP_PATH/Contents/MacOS/GhostlightApp" >>"$OUTPUT_DIR/first-launch-app.log" 2>&1 &

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +46,16 @@ type handler struct {
 	viewerHealthURL string
 	viewerClient    *http.Client
 	viewerTimeout   time.Duration
+
+	// probeMu guards the in-flight readiness probe so concurrent /readyz
+	// requests share one upstream health check instead of one per request.
+	probeMu sync.Mutex
+	flight  *probeFlight
+}
+
+type probeFlight struct {
+	done   chan struct{}
+	result bool
 }
 
 func loadConfig() (Config, error) {
@@ -93,23 +105,29 @@ func NewHandler(viewerURL string) http.Handler {
 }
 
 func newHandler(viewerURL string, client *http.Client) *handler {
-	return newHandlerWithHealthURL(viewerURL, viewerURL, client)
+	h, err := newHandlerWithHealthURL(viewerURL, viewerURL, client)
+	if err != nil {
+		panic(err)
+	}
+	return h
 }
 
-func newHandlerWithHealthURL(viewerURL, viewerHealthURL string, client *http.Client) *handler {
-	if client != nil {
-		clientCopy := *client
+func newHandlerWithHealthURL(viewerURL, viewerHealthURL string, client *http.Client) (*handler, error) {
+	if client == nil {
+		return nil, errors.New("viewer HTTP client must not be nil")
+	}
+	clientCopy := *client
+	if clientCopy.CheckRedirect == nil {
 		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}
-		client = &clientCopy
 	}
 	return &handler{
 		viewerURL:       viewerURL,
 		viewerHealthURL: healthURL(viewerHealthURL),
-		viewerClient:    client,
+		viewerClient:    &clientCopy,
 		viewerTimeout:   viewerHealthTimeout,
-	}
+	}, nil
 }
 
 func healthURL(viewerURL string) string {
@@ -174,6 +192,29 @@ func (h *handler) viewerReady(r *http.Request) bool {
 	if h.viewerHealthURL == "" || h.viewerClient == nil || h.viewerTimeout <= 0 {
 		return false
 	}
+
+	h.probeMu.Lock()
+	if h.flight != nil {
+		flight := h.flight
+		h.probeMu.Unlock()
+		<-flight.done
+		return flight.result
+	}
+	flight := &probeFlight{done: make(chan struct{})}
+	h.flight = flight
+	h.probeMu.Unlock()
+
+	result := h.probeViewer(r)
+
+	h.probeMu.Lock()
+	flight.result = result
+	close(flight.done)
+	h.flight = nil
+	h.probeMu.Unlock()
+	return result
+}
+
+func (h *handler) probeViewer(r *http.Request) bool {
 	ctx, cancel := context.WithTimeout(r.Context(), h.viewerTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.viewerHealthURL, nil)
@@ -185,6 +226,8 @@ func (h *handler) viewerReady(r *http.Request) bool {
 		return false
 	}
 	defer response.Body.Close()
+	// Drain the body so the connection can be reused by keep-alive.
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	return response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
 }
 

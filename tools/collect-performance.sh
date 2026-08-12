@@ -38,8 +38,10 @@ npm ci --prefix "$TEST_DIR"
 docker exec "$VIEWER_CONTAINER" sh -c \
   'if [ -f /var/log/neko/neko.log ]; then tail -100 /var/log/neko/neko.log; else printf "Neko pipeline log is not present in this image\\n"; fi' \
   >"$OUTPUT_DIR/neko-pipeline.log"
-node "$TEST_DIR/performance.mjs" "$VIEWER_URL" "$DISPLAY_NAME" "$NEKO_PASSWORD" "$OUTPUT_DIR/webrtc.json" &
+GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD="$NEKO_PASSWORD" \
+  node "$TEST_DIR/performance.mjs" "$VIEWER_URL" "$DISPLAY_NAME" "$OUTPUT_DIR/webrtc.json" &
 PERF_PID=$!
+trap 'kill "$PERF_PID" 2>/dev/null' EXIT
 : >"$OUTPUT_DIR/container-stats.jsonl"
 while kill -0 "$PERF_PID" 2>/dev/null; do
   docker stats --no-stream --format '{{json .}}' "$VIEWER_CONTAINER" >>"$OUTPUT_DIR/container-stats.jsonl"

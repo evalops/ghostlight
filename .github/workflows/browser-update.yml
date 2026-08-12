@@ -16,6 +16,8 @@ name: Browser update safety
       - scripts/test-image-safety.sh
       - scripts/update-control-base-images.sh
       - scripts/update-neko-image.sh
+      - compose.yaml
+      - runtime/bin/**
       - tests/acceptance/**
   schedule:
     - cron: "17 4 * * 1"
@@ -58,15 +60,21 @@ jobs:
       - name: Enforce immutable repository inputs
         run: |
           set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes ripgrep
+          fi
           bash scripts/check-container-pins.sh
           bash scripts/test-image-safety.sh
           bash scripts/check-image-safety.sh
 
       - name: Detect Neko and control-base digest drift
         id: base-drift
-        continue-on-error: true
         env:
           GHOSTLIGHT_NEKO_CANDIDATE_IMAGE: ${{ env.CANDIDATE_REF }}
+          # Pull requests fail only on unresolvable references; upstream drift
+          # stays informational there and gates the scheduled/update runs.
+          GHOSTLIGHT_DRIFT_STRICT: ${{ github.event_name != 'pull_request' && '1' || '0' }}
         shell: bash
         run: |
           set -o pipefail

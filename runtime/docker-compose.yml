@@ -7,6 +7,9 @@ services:
     hostname: ghostlight-chromium
     restart: unless-stopped
     shm_size: "2gb"
+    pids_limit: 512
+    # Must exceed shm_size: the 2gb /dev/shm tmpfs counts toward the memory limit.
+    mem_limit: 4gb
     ports:
       - target: 8080
         published: "${VIEWER_PORT:-8081}"
@@ -27,8 +30,8 @@ services:
       # Neko defaults to container-local loopback; control readiness uses the private Compose network.
       NEKO_SERVER_BIND: "0.0.0.0:8080"
       NEKO_DESKTOP_SCREEN: "${NEKO_DESKTOP_SCREEN:-1920x1080@30}"
-      NEKO_MEMBER_MULTIUSER_USER_PASSWORD: "${NEKO_USER_PASSWORD:-__GENERATE_AT_INSTALL__}"
-      NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: "${NEKO_ADMIN_PASSWORD:-__GENERATE_AT_INSTALL__}"
+      NEKO_MEMBER_MULTIUSER_USER_PASSWORD: "${NEKO_USER_PASSWORD:?generate NEKO_USER_PASSWORD and set it in runtime/.env}"
+      NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: "${NEKO_ADMIN_PASSWORD:?generate NEKO_ADMIN_PASSWORD and set it in runtime/.env}"
       NEKO_WEBRTC_UDPMUX: "${NEKO_WEBRTC_UDPMUX:-52000}"
       NEKO_WEBRTC_TCPMUX: "${NEKO_WEBRTC_TCPMUX:-52000}"
       NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-0}"
@@ -46,6 +49,13 @@ services:
       dockerfile: Dockerfile
     init: true
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    pids_limit: 128
+    mem_limit: 256m
     ports:
       - target: 8080
         published: "${CONTROL_PORT:-8080}"

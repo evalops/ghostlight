@@ -28,12 +28,12 @@ require_text() {
   }
 }
 
-require_text 'continue-on-error: true'
+dollar='$'
+require_text "GHOSTLIGHT_DRIFT_STRICT: ${dollar}{{ github.event_name != 'pull_request' && '1' || '0' }}"
 require_text 'bash scripts/update-neko-image.sh'
 require_text 'bash scripts/update-control-base-images.sh'
 require_text 'needs: candidate'
 require_text "if: github.event_name != 'pull_request'"
-dollar='$'
 require_text "CANDIDATE_IMAGE: ${dollar}{{ needs.candidate.outputs.neko-image }}"
 require_text "GO_BASE_IMAGE: ${dollar}{{ needs.candidate.outputs.go-image }}"
 require_text "ALPINE_BASE_IMAGE: ${dollar}{{ needs.candidate.outputs.alpine-image }}"

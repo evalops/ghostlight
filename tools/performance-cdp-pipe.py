@@ -164,7 +164,12 @@ class PipeBridge:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bind", default="0.0.0.0")
+    parser.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help="listen address (default: 127.0.0.1; the CDP socket is unauthenticated,"
+        " so a wider bind such as 0.0.0.0 must be requested explicitly)",
+    )
     parser.add_argument("--port", type=int, default=9222)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()

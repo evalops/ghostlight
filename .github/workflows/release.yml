@@ -16,6 +16,8 @@ concurrency:
 jobs:
   package:
     runs-on: macos-14
+    outputs:
+      archive-sha256: ${{ steps.archive.outputs.sha256 }}
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -33,10 +35,67 @@ jobs:
       - name: Test the macOS client
         run: swift test --package-path macos
 
+      - name: Detect Apple signing credentials
+        id: signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$APPLE_CERTIFICATE" && -n "$APPLE_CERTIFICATE_PASSWORD" && -n "$APPLE_ID" && -n "$APPLE_TEAM_ID" && -n "$APPLE_APP_SPECIFIC_PASSWORD" ]]; then
+            echo "available=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "available=false" >>"$GITHUB_OUTPUT"
+            echo "::warning::Apple signing secrets are not configured; packaging falls back to an ad-hoc signature without notarization."
+          fi
+
+      - name: Import the Developer ID certificate
+        if: steps.signing.outputs.available == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/ghostlight-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          certificate_path="$RUNNER_TEMP/ghostlight-signing.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >"$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path" >/dev/null
+          security list-keychain -d user -s "$keychain_path" login.keychain-db
+          rm -f "$certificate_path"
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+          [[ -n "$identity" ]] || {
+            printf 'no Developer ID Application identity found in %s\n' "$keychain_path" >&2
+            exit 1
+          }
+          {
+            printf 'GHOSTLIGHT_KEYCHAIN_PATH=%s\n' "$keychain_path"
+            printf 'GHOSTLIGHT_KEYCHAIN_PASSWORD=%s\n' "$keychain_password"
+            printf 'GHOSTLIGHT_SIGNING_IDENTITY=%s\n' "$identity"
+          } >>"$GITHUB_ENV"
+
       - name: Build the universal release archive
         env:
           GHOSTLIGHT_SOURCE_REVISION: ${{ github.sha }}
-        run: macos/package-release.sh dist
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.signing.outputs.available }}" == true ]]; then
+            security unlock-keychain -p "$GHOSTLIGHT_KEYCHAIN_PASSWORD" "$GHOSTLIGHT_KEYCHAIN_PATH"
+          fi
+          macos/package-release.sh dist
 
       - name: Verify the packaged application
         shell: bash
@@ -53,6 +112,15 @@ jobs:
           [[ "$architectures" == *arm64* ]]
           [[ "$architectures" == *x86_64* ]]
 
+      - name: Record the archive digest
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(awk -F= '$1 == "archive_sha256" { print $2; exit }' dist/BUILD-INFO.txt)"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          printf 'sha256=%s\n' "$digest" >>"$GITHUB_OUTPUT"
+
       - name: Upload the package receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -61,10 +129,16 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Remove the temporary signing keychain
+        if: always() && steps.signing.outputs.available == 'true'
+        shell: bash
+        run: |
+          security delete-keychain "${GHOSTLIGHT_KEYCHAIN_PATH:-}" || true
+
   publish:
     if: github.ref_type == 'tag'
     needs: package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -78,7 +152,19 @@ jobs:
           path: dist
 
       - name: Verify the downloaded release assets
-        run: cd dist && sha256sum --check SHA256SUMS
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ needs.package.outputs.archive-sha256 }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/Ghostlight-*-macos-universal.zip)
+          [[ ${#archives[@]} == 1 ]]
+          actual="$(sha256sum "${archives[0]}" | awk '{print $1}')"
+          [[ "$actual" == "$EXPECTED_SHA256" ]] || {
+            printf 'archive digest mismatch: expected %s, downloaded %s\n' "$EXPECTED_SHA256" "$actual" >&2
+            exit 1
+          }
 
       - name: Publish the tagged GitHub release
         shell: bash

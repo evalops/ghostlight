@@ -17,7 +17,7 @@ concurrency:
 jobs:
   hygiene:
     name: License and prose hygiene
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         # actions/checkout v4.2.2
@@ -38,7 +38,7 @@ jobs:
 
   shell-and-compose:
     name: Shell and Compose checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         # actions/checkout v4.2.2
@@ -101,7 +101,7 @@ jobs:
 
   go-tests:
     name: Go tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         # actions/checkout v4.2.2
@@ -114,6 +114,17 @@ jobs:
           go-version-file: control/go.mod
           cache-dependency-path: control/go.mod
 
+      - name: Check Go formatting
+        working-directory: control
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'gofmt required for:\n%s\n' "$unformatted" >&2
+            exit 1
+          fi
+
       - name: Run control tests
         working-directory: control
         run: |
@@ -124,7 +135,7 @@ jobs:
 
   swift-tests:
     name: Swift tests
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - name: Check out source
         # actions/checkout v4.2.2
@@ -194,7 +205,10 @@ jobs:
           test -x macos/.build/Ghostlight.app/Contents/MacOS/GhostlightApp
           test "$(plutil -extract CFBundleIdentifier raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "org.evalops.Ghostlight"
           test "$(plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
-          test "$(plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
+          if plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - macos/.build/Ghostlight.app/Contents/Info.plist >/dev/null 2>&1; then
+            echo "NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent must not be set" >&2
+            exit 1
+          fi
 
       - name: Build and verify the universal release archive
         shell: bash
@@ -216,7 +230,7 @@ jobs:
 
   deterministic-harnesses:
     name: Deterministic harnesses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         # actions/checkout v4.2.2
@@ -285,6 +299,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes ripgrep
+          fi
           bash scripts/test-container-pins.sh
           bash runtime/tests/test_profile_backup.sh
           mapfile -d '' screenshots < <(find docs/acceptance -type f \( -name '*.png' -o -name '*.jpg' \) -print0)

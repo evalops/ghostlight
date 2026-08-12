@@ -4,9 +4,10 @@ import { basename, dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium } from "playwright";
 
-const [viewerURL, displayName, password, outputPath] = process.argv.slice(2);
+const [viewerURL, displayName, outputPath] = process.argv.slice(2);
+const password = process.env.GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD ?? "";
 if (!viewerURL || !displayName || !password || !outputPath) {
-  throw new Error("usage: performance.mjs <viewer-url> <display-name> <password> <output-json>");
+  throw new Error("usage: GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD=<password> performance.mjs <viewer-url> <display-name> <output-json>");
 }
 const requestedCodec = process.env.GHOSTLIGHT_PERFORMANCE_CODEC ?? "default";
 if (!new Set(["default", "h264"]).has(requestedCodec)) {
