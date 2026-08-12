@@ -88,6 +88,18 @@ grep -Fq -- 'if (( share_viewer_network == 1 )); then' "$acceptance" || {
   printf 'acceptance harness does not make the shared viewer network opt-in\n' >&2
   exit 1
 }
+# These are literal source-contract assertions, not shell expansions.
+# shellcheck disable=SC2016
+for setting in \
+  'NEKO_DESKTOP_SCREEN=1920x1080@30' \
+  'NEKO_WEBRTC_UDPMUX=$WEBRTC_PORT' \
+  'NEKO_WEBRTC_TCPMUX=$WEBRTC_PORT' \
+  'NEKO_WEBRTC_ICELITE=0'; do
+  grep -Fq -- "$setting" "$acceptance" || {
+    printf 'acceptance harness does not align rendered Neko setting: %s\n' "$setting" >&2
+    exit 1
+  }
+done
 # This is a literal source-contract assertion, not a shell expansion.
 # shellcheck disable=SC2016
 if grep -Fq -- 'down --remove-orphans >>"$TRANSCRIPT" 2>&1 || true' "$acceptance"; then
