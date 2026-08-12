@@ -16,46 +16,63 @@ async function listTargets() {
 
 function externallyReachableWebSocket(url) {
   const parsed = new URL(url);
-  parsed.hostname = new URL(endpoint).hostname;
-  parsed.port = new URL(endpoint).port;
+  const publicEndpoint = new URL(endpoint);
+  parsed.hostname = publicEndpoint.hostname;
+  parsed.port = publicEndpoint.port;
   return parsed.toString();
 }
 
-async function callTarget(webSocketDebuggerUrl, method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(webSocketDebuggerUrl);
-    const id = 1;
-    let opened = false;
-    const timer = setTimeout(() => {
-      socket.close();
-      reject(new Error(`CDP ${method} timed out (socket_opened=${opened})`));
-    }, 15000);
-    socket.once("open", () => {
-      opened = true;
-      socket.send(JSON.stringify({ id, method, params }));
-    });
+class CDPConnection {
+  constructor(socket) {
+    this.socket = socket;
+    this.nextID = 1;
+    this.pending = new Map();
     socket.on("message", (data) => {
       const message = JSON.parse(data.toString());
-      if (message.id !== id) return;
-      clearTimeout(timer);
-      socket.close();
-      if (message.error) reject(new Error(JSON.stringify(message.error)));
-      else resolve(message.result);
+      if (!message.id || !this.pending.has(message.id)) return;
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(JSON.stringify(message.error)));
+      else pending.resolve(message.result);
     });
-    socket.once("error", (error) => {
-      clearTimeout(timer);
-      reject(new Error(`CDP ${method} WebSocket error: ${error.message}`));
+  }
+
+  static async open() {
+    const response = await fetch(`${endpoint}/json/version`);
+    if (!response.ok) throw new Error(`CDP version request failed: ${response.status}`);
+    const version = await response.json();
+    const socket = new WebSocket(externallyReachableWebSocket(version.webSocketDebuggerUrl));
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
     });
-  });
+    return new CDPConnection(socket);
+  }
+
+  call(method, params = {}, sessionId) {
+    const id = this.nextID++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP ${method} timed out`));
+      }, 15000);
+      this.pending.set(id, { resolve, reject, timer });
+      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    });
+  }
+
+  close() {
+    this.socket.close();
+  }
 }
 
 async function waitForProofTargets(timeoutMilliseconds = 30000) {
   const deadline = Date.now() + timeoutMilliseconds;
-  let targets = [];
   while (Date.now() < deadline) {
     const allTargets = await listTargets();
-    targets = allTargets.filter((target) => target.type === "page" && proofURLs.includes(target.url));
-    if (targets.length === proofURLs.length) return { allTargets, proofTargets: targets };
+    const proofTargets = allTargets.filter((target) => target.type === "page" && proofURLs.includes(target.url));
+    if (proofTargets.length === proofURLs.length) return { allTargets, proofTargets };
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   const allTargets = await listTargets();
@@ -71,33 +88,34 @@ if (phase === "before") {
     const response = await fetch(`${endpoint}/json/new?${encodeURIComponent(url)}`, { method: "PUT" });
     if (!response.ok) throw new Error(`CDP target creation failed: ${response.status} ${await response.text()}`);
   }
-  await new Promise((resolve) => setTimeout(resolve, 1500));
 }
 
-await new Promise((resolve) => setTimeout(resolve, phase === "after" ? 5000 : 1500));
+if (phase === "after") await new Promise((resolve) => setTimeout(resolve, 5000));
 const { allTargets, proofTargets } = await waitForProofTargets();
 if (proofTargets.length !== 2) {
   throw new Error(`expected exactly two restored proof targets; found ${proofTargets.length}: ${allTargets.map((target) => target.url).join(", ")}`);
 }
 
 await fs.mkdir(outputDir, { recursive: true });
+const cdp = await CDPConnection.open();
 const evidence = [];
 for (const target of proofTargets.sort((left, right) => left.url.localeCompare(right.url))) {
-  const webSocketDebuggerUrl = externallyReachableWebSocket(target.webSocketDebuggerUrl);
-  const runtime = await callTarget(webSocketDebuggerUrl, "Runtime.evaluate", {
+  const attachment = await cdp.call("Target.attachToTarget", { targetId: target.id, flatten: true });
+  const runtime = await cdp.call("Runtime.evaluate", {
     expression: "JSON.stringify({title: document.title, url: location.href, cookie: document.cookie, localStorage: localStorage.getItem('ghostlight-acceptance-storage'), body: document.body.innerText})",
     returnByValue: true,
-  });
+  }, attachment.sessionId);
   const state = JSON.parse(runtime.result.value);
   if (!state.cookie.includes(`ghostlight_acceptance=${expectedMarker}`)) throw new Error(`cookie marker missing from ${state.url}`);
   if (state.localStorage !== expectedMarker) throw new Error(`local-storage marker missing from ${state.url}`);
-  const screenshot = await callTarget(webSocketDebuggerUrl, "Page.captureScreenshot", { format: "png", fromSurface: true });
+  const screenshot = await cdp.call("Page.captureScreenshot", { format: "png", fromSurface: true }, attachment.sessionId);
   const suffix = state.url.endsWith("state-a") ? "a" : "b";
   const screenshotPath = `${outputDir}/${phase}-tab-${suffix}.png`;
   await fs.writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
   evidence.push({ ...state, screenshot: `${phase}-tab-${suffix}.png` });
 }
+cdp.close();
 
-const result = { phase, pipeline: "version-neutral-cdp-over-loopback", proofTargetCount: proofTargets.length, evidence };
+const result = { phase, pipeline: "browser-target-cdp-over-loopback", proofTargetCount: proofTargets.length, evidence };
 await fs.writeFile(`${outputDir}/${phase}-evidence.json`, `${JSON.stringify(result, null, 2)}\n`);
 console.log(JSON.stringify(result, null, 2));
