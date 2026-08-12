@@ -23,11 +23,12 @@ final class SessionViewModel: ObservableObject {
     init(
         client: any SessionCreating = SessionClient(),
         defaults: UserDefaults = .standard,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         autoConnect: Bool = true
     ) {
         self.client = client
         self.defaults = defaults
-        let environmentURL = ProcessInfo.processInfo.environment["GHOSTLIGHT_CONTROL_URL"]
+        let environmentURL = environment["GHOSTLIGHT_CONTROL_URL"]
         let savedURL = defaults.string(forKey: Self.controlPlaneDefaultsKey)
         self.controlPlaneURL = environmentURL ?? savedURL ?? "http://localhost:8080"
 

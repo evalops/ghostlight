@@ -54,8 +54,16 @@ assert_contains "$RUNTIME_DIR/docker-compose.yml" 'wget -q -O /dev/null http://1
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '/v1/sessions'
 
 assert_contains "$RUNTIME_DIR/.env.example" '__GENERATE_AT_INSTALL__'
-assert_contains "$RUNTIME_DIR/chromium-policy.json" '"DefaultCookiesSetting": 1'
-assert_contains "$RUNTIME_DIR/chromium-policy.json" '"RestoreOnStartup": 1'
+python3 - "$RUNTIME_DIR/chromium-policy.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as policy_file:
+    policy = json.load(policy_file)
+
+assert policy.get("DefaultCookiesSetting") == 1
+assert policy.get("RestoreOnStartup") == 1
+PY
 assert_contains "$RUNTIME_DIR/README.md" 'Apache-2.0'
 assert_contains "$RUNTIME_DIR/README.md" 'UDP'
 assert_contains "$RUNTIME_DIR/README.md" 'TCP'

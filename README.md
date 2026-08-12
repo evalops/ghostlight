@@ -201,6 +201,8 @@ bash scripts/check-shell.sh
 
 The runtime test requires Docker Compose to render the Compose model. CI runs `go test ./...`, repository hygiene, ShellCheck, runtime regression tests, and Compose validation on Linux. It runs `swift test --package-path macos` and builds the local app bundle on macOS.
 
+The [2026-08-12 day-one receipt](docs/acceptance/2026-08-12/README.md) records a real Linux Compose recreation with changed container IDs, restored Chromium tabs, persisted cookie and local-storage values, and before-and-after screenshots. It does not replace the seven-day gate or the native macOS acceptance check.
+
 ## Troubleshooting
 
 ### Preflight reports install-time placeholders

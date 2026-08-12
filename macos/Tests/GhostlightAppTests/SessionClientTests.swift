@@ -124,6 +124,31 @@ final class SessionClientTests: XCTestCase {
         XCTAssertEqual(relaunchClient.requestedURLs, ["http://control.example.test:8080"])
     }
 
+    @MainActor
+    func testViewModelEnvironmentURLOverridesSavedURLAndReconnects() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://saved.example.test:8080", forKey: "GhostlightControlPlaneURL")
+
+        let client = StubSessionCreating(
+            response: CreateSessionResponse(
+                viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+            )
+        )
+        let viewModel = SessionViewModel(
+            client: client,
+            defaults: defaults,
+            environment: ["GHOSTLIGHT_CONTROL_URL": "http://environment.example.test:8080"],
+            autoConnect: true
+        )
+
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.viewerURL != nil }
+        XCTAssertEqual(viewModel.controlPlaneURL, "http://environment.example.test:8080")
+        XCTAssertEqual(client.requestedURLs, ["http://environment.example.test:8080"])
+    }
+
     private func makeStubSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]

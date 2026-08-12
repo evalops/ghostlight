@@ -175,3 +175,5 @@ jobs:
           macos/package-app.sh
           test -x macos/.build/Ghostlight.app/Contents/MacOS/GhostlightApp
           test "$(plutil -extract CFBundleIdentifier raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "org.evalops.Ghostlight"
+          test "$(plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
+          test "$(plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
