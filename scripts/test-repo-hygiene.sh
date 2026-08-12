@@ -43,6 +43,18 @@ expect_failure() {
   printf 'PASS: %s\n' "$label"
 }
 
+expect_success_without_argument() {
+  local label=$1
+  local output="$scratch_dir/output"
+
+  if ! (cd -- "$repo_root" && "$checker") >"$output" 2>&1; then
+    printf 'FAIL: %s\n' "$label" >&2
+    cat "$output" >&2
+    return 1
+  fi
+  printf 'PASS: %s\n' "$label"
+}
+
 valid_fixture="$scratch_dir/valid"
 mkdir -p "$valid_fixture/docs"
 cp "$repo_root/LICENSE" "$valid_fixture/LICENSE"
@@ -50,6 +62,7 @@ cp "$repo_root/THIRD_PARTY_NOTICES.md" "$valid_fixture/THIRD_PARTY_NOTICES.md"
 cp "$repo_root/docs/architecture.md" "$valid_fixture/docs/architecture.md"
 
 expect_success "current repository passes" "$repo_root"
+expect_success_without_argument "CI-style no-argument invocation passes"
 expect_success "valid fixture passes" "$valid_fixture"
 
 missing_license="$scratch_dir/missing-license"

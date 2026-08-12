@@ -18,13 +18,12 @@ Run the following from the repository root:
 ```sh
 bash scripts/check-repo-hygiene.sh
 bash scripts/test-repo-hygiene.sh
-if compgen -G 'scripts/*.sh' >/dev/null; then shellcheck scripts/*.sh; fi
-if compgen -G 'runtime/*.sh' >/dev/null; then shellcheck runtime/*.sh; fi
+bash scripts/check-shell.sh
 ```
 
-Run `go test ./...` from `control/` when `control/` contains a Go module. Run `swift test --package-path macos` or the repository's documented `xcodebuild test` command when `macos/` contains a Swift package or Xcode project. Run `docker compose -f <file> config --quiet` for each Compose file under `runtime/`; this command validates syntax without starting containers.
+Run `go test ./...` from `control/` when `control/go.mod` exists. Run `swift test --package-path macos` or the repository's documented `xcodebuild test` command when `macos/` contains a Swift package or Xcode project. Run `docker compose -f <file> config --quiet` for each Compose file under `runtime/`; this command validates syntax without starting containers.
 
-The CI workflow skips an optional module only when its path has no files. Once a module exists, its test command must pass.
+The CI workflow runs Go tests when `control/go.mod` exists. It runs Swift tests when `macos/` contains a Swift package or Xcode project. It validates Compose files when `runtime/` contains a Compose file. Each detected module must pass its test command.
 
 ## Pull requests
 

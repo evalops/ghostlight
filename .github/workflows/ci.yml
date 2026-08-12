@@ -31,12 +31,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -d control ]]; then
-            if find control -type f -print -quit | grep -q .; then
-              echo "has_control=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "has_control=false" >> "$GITHUB_OUTPUT"
-            fi
+          if [[ -f control/go.mod ]]; then
+            echo "has_control=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_control=false" >> "$GITHUB_OUTPUT"
           fi
@@ -72,27 +68,12 @@ jobs:
         # actions/checkout v4.2.2
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Install ShellCheck when shell scripts exist
+      - name: Install ShellCheck when script directories exist
         shell: bash
         run: |
           set -euo pipefail
-          shell_files=()
-          shell_pattern='^#!.*[[:space:]](ba)?sh([[:space:]]|$)'
-          for directory in scripts runtime; do
-            if [[ ! -d "$directory" ]]; then
-              continue
-            fi
-            while IFS= read -r -d '' file; do
-              if [[ "$file" == *.sh ]]; then
-                shell_files+=("$file")
-              elif grep -qE "$shell_pattern" "$file"; then
-                shell_files+=("$file")
-              fi
-            done < <(find "$directory" -type f -print0)
-          done
-
-          if (( ${#shell_files[@]} == 0 )); then
-            echo "No shell scripts found under scripts/ or runtime/;"
+          if [[ ! -d scripts && ! -d runtime ]]; then
+            echo "No scripts/ or runtime/ directory found."
             echo "Skipping ShellCheck."
             exit 0
           fi
@@ -101,7 +82,9 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes shellcheck
           fi
-          shellcheck "${shell_files[@]}"
+
+      - name: Run ShellCheck
+        run: bash scripts/check-shell.sh
 
       - name: Validate Docker Compose files without starting containers
         shell: bash
