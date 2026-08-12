@@ -39,7 +39,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   die "create runtime/.env with 'cp runtime/.env.example runtime/.env', then replace every __GENERATE_AT_INSTALL__ value"
 fi
 
-if grep --line-number --fixed-strings '__GENERATE_AT_INSTALL__' "$ENV_FILE"; then
+if "$SCRIPT_DIR/find-placeholders.sh" "$ENV_FILE"; then
   die "runtime/.env still contains install-time placeholders; generate passwords and set the reachable viewer address"
 fi
 

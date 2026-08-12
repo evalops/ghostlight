@@ -25,6 +25,7 @@ for path in \
   "$RUNTIME_DIR/docker-compose.yml" \
   "$RUNTIME_DIR/.env.example" \
   "$RUNTIME_DIR/README.md" \
+  "$RUNTIME_DIR/bin/find-placeholders.sh" \
   "$RUNTIME_DIR/bin/preflight.sh" \
   "$RUNTIME_DIR/bin/smoke.sh"; do
   assert_file "$path"
@@ -57,6 +58,17 @@ assert_contains "$RUNTIME_DIR/bin/smoke.sh" 'viewer'
 [[ -x "$RUNTIME_DIR/bin/preflight.sh" ]] || fail "preflight.sh must be executable"
 [[ -x "$RUNTIME_DIR/bin/smoke.sh" ]] || fail "smoke.sh must be executable"
 
+placeholder_fixture="$(mktemp)"
+trap 'rm -f "$placeholder_fixture"' EXIT
+printf '# __GENERATE_AT_INSTALL__ is allowed in comments\nNEKO_USER_PASSWORD=configured\n' >"$placeholder_fixture"
+if "$RUNTIME_DIR/bin/find-placeholders.sh" "$placeholder_fixture"; then
+  fail "comment-only placeholder must not block a configured environment"
+fi
+printf 'NEKO_USER_PASSWORD=__GENERATE_AT_INSTALL__\n' >"$placeholder_fixture"
+"$RUNTIME_DIR/bin/find-placeholders.sh" "$placeholder_fixture" >/dev/null \
+  || fail "assignment placeholder must be detected"
+
+bash -n "$RUNTIME_DIR/bin/find-placeholders.sh"
 bash -n "$RUNTIME_DIR/bin/preflight.sh"
 bash -n "$RUNTIME_DIR/bin/smoke.sh"
 
