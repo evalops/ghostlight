@@ -30,7 +30,7 @@ done
 
 (( $# == 1 )) || usage
 new_image=$1
-[[ "$new_image" =~ ^ghcr\.io/m1k1o/neko/chromium@sha256:[0-9a-f]{64}$ ]] || {
+[[ "$new_image" =~ ^ghcr\.io/(m1k1o/neko/chromium|evalops/ghostlight-viewer)@sha256:[0-9a-f]{64}$ ]] || {
   printf 'candidate is not a canonical Neko Chromium digest pin: %s\n' "$new_image" >&2
   exit 2
 }
@@ -58,7 +58,7 @@ for file in "${files[@]}"; do
 done
 
 current_image=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$env_file")
-[[ "$current_image" =~ ^ghcr\.io/m1k1o/neko/chromium@sha256:[0-9a-f]{64}$ ]] || {
+[[ "$current_image" =~ ^ghcr\.io/(m1k1o/neko/chromium|evalops/ghostlight-viewer)@sha256:[0-9a-f]{64}$ ]] || {
   printf 'current NEKO_IMAGE is not a canonical digest pin: %s\n' "$current_image" >&2
   exit 1
 }

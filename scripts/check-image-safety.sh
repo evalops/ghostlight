@@ -40,7 +40,7 @@ if (( failures > 0 )); then
 fi
 
 neko_image=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$repo_root/runtime/.env.example")
-if [[ ! "$neko_image" =~ ^ghcr\.io/m1k1o/neko/chromium@sha256:[0-9a-f]{64}$ ]]; then
+if [[ ! "$neko_image" =~ ^ghcr\.io/(m1k1o/neko/chromium|evalops/ghostlight-viewer)@sha256:[0-9a-f]{64}$ ]]; then
   printf 'runtime/.env.example NEKO_IMAGE is not a canonical digest pin: %s\n' "$neko_image" >&2
   failures=$((failures + 1))
 else
@@ -54,7 +54,7 @@ else
     printf 'tests/acceptance/run-linux-persistence.sh does not derive its default Neko image from runtime/.env.example\n' >&2
     failures=$((failures + 1))
   fi
-  if grep -Eq 'ghcr\.io/m1k1o/neko/chromium@sha256:[0-9a-f]{64}' "$repo_root/tests/acceptance/run-linux-persistence.sh"; then
+  if grep -Eq 'ghcr\.io/(m1k1o/neko/chromium|evalops/ghostlight-viewer)@sha256:[0-9a-f]{64}' "$repo_root/tests/acceptance/run-linux-persistence.sh"; then
     printf 'tests/acceptance/run-linux-persistence.sh contains a stale-prone hardcoded Neko digest\n' >&2
     failures=$((failures + 1))
   fi

@@ -15,7 +15,7 @@ MARKER="${GHOSTLIGHT_ACCEPTANCE_MARKER:-synthetic-$(date -u +%Y%m%dT%H%M%SZ)}"
 SKIP_PROFILE_CHECK="${GHOSTLIGHT_ACCEPTANCE_SKIP_PROFILE_CHECK:-0}"
 share_viewer_network="${GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK:-0}"
 DEFAULT_NEKO_IMAGE_REF="$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$ROOT_DIR/runtime/.env.example")"
-[[ "$DEFAULT_NEKO_IMAGE_REF" =~ ^ghcr\.io/m1k1o/neko/chromium@sha256:[0-9a-f]{64}$ ]] || {
+[[ "$DEFAULT_NEKO_IMAGE_REF" =~ ^ghcr\.io/(m1k1o/neko/chromium|evalops/ghostlight-viewer)@sha256:[0-9a-f]{64}$ ]] || {
   printf 'runtime/.env.example does not contain a canonical Neko image pin\n' >&2
   exit 1
 }

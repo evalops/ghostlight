@@ -119,4 +119,10 @@ grep -Fq -- 'runtime/.env.example' "$fixture/tests/acceptance/run-linux-persiste
 expect_failure 'mutable update candidate' "$updater" --root "$fixture" 'ghcr.io/m1k1o/neko/chromium:latest'
 expect_failure 'wrong update repository' "$updater" --root "$fixture" "ghcr.io/example/neko@sha256:$new_digest"
 
+owned_image="ghcr.io/evalops/ghostlight-viewer@sha256:$old_digest"
+"$updater" --root "$fixture" "$owned_image"
+grep -Fqx -- "NEKO_IMAGE=$owned_image" "$fixture/runtime/.env.example" \
+  || fail 'updater did not accept the owned hardened viewer namespace'
+"$checker" "$fixture"
+
 printf 'image safety tests passed\n'

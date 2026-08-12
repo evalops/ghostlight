@@ -56,7 +56,7 @@ for path in \
 done
 assert_file "$REPO_DIR/macos/package-app.sh"
 
-assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/evalops/ghostlight-viewer@sha256:97ab045bca283c21572f92bf25dd3ec3530163c0cac7a26cd5c04b9221959535'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'context: ../control'
 # This is a literal Compose interpolation expression, not a shell expansion.
 # shellcheck disable=SC2016
@@ -138,7 +138,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"${FAKE_DOCKER_LOG:?}"' \
   'if [[ "$*" == *"config --format json"* ]]; then' \
   '  cat <<'\''JSON'\''' \
-  '{"services":{"viewer":{"image":"ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"0","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
+  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:97ab045bca283c21572f92bf25dd3ec3530163c0cac7a26cd5c04b9221959535","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"0","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
   'JSON' \
   '  exit 0' \
   'fi' \
