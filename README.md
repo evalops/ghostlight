@@ -22,7 +22,7 @@ Today, the repository provides flag-free Compose startup and a script that build
 | --- | --- |
 | Linux browser | Neko runs Chromium from a digest-pinned multi-architecture container image. |
 | Browser persistence | Chromium writes its profile to `runtime/data/chromium` on the Linux host. |
-| Control API | A Go service creates, reads, and deletes session records in `runtime/data/control/sessions.json`. |
+| Control API | A Go service creates, reads, and deletes `/data/sessions.json` in the `ghostlight-control-data` Docker volume. |
 | macOS client | A native SwiftUI executable creates a session record and opens the returned Neko viewer URL in `WKWebView`. |
 | Connection | Neko negotiates browser video, audio, and input over WebRTC. |
 | Validation | Preflight checks configuration; smoke tests check control health, session creation, and viewer reachability. |
@@ -34,7 +34,7 @@ The control API records session metadata. It does not create or stop the Neko co
 ### Linux host
 
 - Docker Engine
-- Docker Compose v2
+- Docker Compose 2.20.0 or later
 - `curl`
 - `openssl`
 - a persistent filesystem for `runtime/data/`
@@ -83,21 +83,21 @@ Validate and start the stack from the repository root:
 
 ```sh
 runtime/bin/preflight.sh
-docker compose up --build -d
+docker compose up -d
 runtime/bin/smoke.sh
 ```
 
 Inspect service state and logs:
 
 ```sh
-docker compose --env-file runtime/.env -f runtime/docker-compose.yml ps
-docker compose --env-file runtime/.env -f runtime/docker-compose.yml logs --tail=100 viewer control
+docker compose ps
+docker compose logs --tail=100 viewer control
 ```
 
 Stop the containers without deleting the browser profile:
 
 ```sh
-docker compose --env-file runtime/.env -f runtime/docker-compose.yml down
+docker compose down
 ```
 
 `runtime/.env` and `runtime/data/` are excluded from Git. Back up `runtime/data/chromium` as credential-bearing browser data.
@@ -119,7 +119,7 @@ Sign in with `NEKO_USER_PASSWORD`. Website sessions, cookies, local storage, and
 
 After signing in to Gmail and opening two tabs, run the daily-driver acceptance path at the top of this README. Repeat the path after restarting the Compose stack.
 
-Record any lost login, missing tab, blank viewer, or reconnect failure with the error text shown in Ghostlight, the full `docker compose --env-file runtime/.env -f runtime/docker-compose.yml ps` output, and the last 100 lines from both container logs.
+Record any lost login, missing tab, blank viewer, or reconnect failure with the error text shown in Ghostlight, the full `docker compose ps` output, and the last 100 lines from both container logs.
 
 ## Architecture
 
@@ -209,7 +209,7 @@ Open `runtime/.env` and replace each `__GENERATE_AT_INSTALL__` assignment value.
 
 ### The Mac cannot reach the control API
 
-Run `curl http://<linux-host>:8080/healthz` from the Mac. Check the Linux firewall and confirm that `docker compose --env-file runtime/.env -f runtime/docker-compose.yml ps` publishes `0.0.0.0:8080->8080/tcp` or the intended private interface.
+Run `curl http://<linux-host>:8080/healthz` from the Mac. Check the Linux firewall and confirm that `docker compose ps` publishes `0.0.0.0:8080->8080/tcp` or the intended private interface.
 
 ### The viewer opens but video never connects
 
@@ -221,7 +221,7 @@ Confirm that `runtime/data/chromium` exists on the Linux host and is mounted at 
 
 ```sh
 docker inspect \
-  "$(docker compose --env-file runtime/.env -f runtime/docker-compose.yml ps -q viewer)" \
+  "$(docker compose ps -q viewer)" \
   --format '{{json .Mounts}}'
 ```
 
@@ -232,7 +232,7 @@ Check ownership and free disk space before changing or removing the profile dire
 Update `GHOSTLIGHT_VIEWER_URL` in `runtime/.env`, then recreate the control container:
 
 ```sh
-docker compose --env-file runtime/.env -f runtime/docker-compose.yml up -d --force-recreate control
+docker compose up -d --force-recreate control
 ```
 
 ## Repository layout
@@ -247,7 +247,7 @@ docker compose --env-file runtime/.env -f runtime/docker-compose.yml up -d --for
 
 ## Scope
 
-The alpha supports one user, one Neko browser, one Linux host, and one trusted LAN. It has no control authentication, TLS, TURN service, multi-host scheduler, account system, billing, automatic updates, signed macOS package, or public-internet deployment path.
+The alpha supports one user, one Neko browser, one Linux host, and one trusted LAN. It has no control authentication, TLS, TURN service, multi-host scheduler, account system, billing, automatic updates, Developer ID-signed or notarized macOS package, or public-internet deployment path.
 
 Changes that improve the daily-driver acceptance path belong in the current milestone. Multi-user control, Dex leases, fleet scheduling, and production deployment remain outside it.
 

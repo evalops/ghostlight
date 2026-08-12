@@ -20,7 +20,7 @@ The local bundle is ad-hoc signed with identifier `org.evalops.Ghostlight`; it i
 ## Test
 
 ```sh
-swift test
+swift test --package-path macos
 ```
 
 The test suite covers request JSON encoding, `viewer_url` response decoding,
