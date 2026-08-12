@@ -30,9 +30,13 @@ check_candidate() {
   fi
   if [[ "$pinned" == "$candidate_digest" || "$pinned" == *"@$candidate_digest" ]]; then
     printf '%s digest unchanged: %s\n' "$label" "$candidate_digest"
-  else
+  elif [[ "${GHOSTLIGHT_DRIFT_STRICT:-1}" == "1" ]]; then
     printf '%s digest drift detected: pinned=%s candidate=%s\n' "$label" "$pinned" "$candidate_digest"
     failures=$((failures + 10))
+  else
+    # Drift against upstream is the scheduled lane's signal to open a digest
+    # update; on pull requests only unresolvable references are fatal.
+    printf '%s digest drift detected (informational): pinned=%s candidate=%s\n' "$label" "$pinned" "$candidate_digest"
   fi
 }
 

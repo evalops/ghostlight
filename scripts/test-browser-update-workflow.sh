@@ -29,7 +29,7 @@ require_text() {
 }
 
 dollar='$'
-require_text "continue-on-error: ${dollar}{{ github.event_name == 'schedule' }}"
+require_text "GHOSTLIGHT_DRIFT_STRICT: ${dollar}{{ github.event_name != 'pull_request' && '1' || '0' }}"
 require_text 'bash scripts/update-neko-image.sh'
 require_text 'bash scripts/update-control-base-images.sh'
 require_text 'needs: candidate'

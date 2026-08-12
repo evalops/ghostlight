@@ -70,9 +70,11 @@ jobs:
 
       - name: Detect Neko and control-base digest drift
         id: base-drift
-        continue-on-error: ${{ github.event_name == 'schedule' }}
         env:
           GHOSTLIGHT_NEKO_CANDIDATE_IMAGE: ${{ env.CANDIDATE_REF }}
+          # Pull requests fail only on unresolvable references; upstream drift
+          # stays informational there and gates the scheduled/update runs.
+          GHOSTLIGHT_DRIFT_STRICT: ${{ github.event_name != 'pull_request' && '1' || '0' }}
         shell: bash
         run: |
           set -o pipefail
