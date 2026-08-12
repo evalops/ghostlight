@@ -546,9 +546,9 @@ class RemoteCdpPage {
     this.socket.on("message", (message) => {
       const packet = JSON.parse(message.toString());
       if (packet.id && this.pending.has(packet.id)) {
-        const { resolve, reject } = this.pending.get(packet.id);
+        const { resolve, reject, method } = this.pending.get(packet.id);
         this.pending.delete(packet.id);
-        if (packet.error) reject(new Error(`${packet.error.code}: ${packet.error.message}`));
+        if (packet.error) reject(new Error(`${method}: ${packet.error.code}: ${packet.error.message}`));
         else resolve(packet.result);
         return;
       }
@@ -577,6 +577,7 @@ class RemoteCdpPage {
         reject(new Error(`remote CDP command timed out after ${CDP_COMMAND_TIMEOUT_MS}ms: ${method}`));
       }, CDP_COMMAND_TIMEOUT_MS);
       this.pending.set(id, {
+        method,
         resolve: (value) => { clearTimeout(timeout); resolve(value); },
         reject: (error) => { clearTimeout(timeout); reject(error); },
       });
@@ -641,6 +642,7 @@ class RemoteCdpPipePage {
     this.nextId = 1;
     this.pending = new Map();
     this.events = new Map();
+    this.attachedTargets = new Map();
     this.sessionId = null;
     this.target = null;
   }
@@ -659,12 +661,19 @@ class RemoteCdpPipePage {
       for (const { reject } of this.pending.values()) reject(new Error("remote CDP pipe closed"));
       this.pending.clear();
     });
+    await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
     const created = await this.send("Target.createTarget", { url: REMOTE_FIXTURE_URL });
     const targetId = created.targetId;
     if (!targetId) throw new Error("remote CDP pipe did not return a target id");
     const targetInfos = (await this.send("Target.getTargets")).targetInfos ?? [];
     this.target = targetInfos.find((entry) => entry.targetId === targetId) ?? { targetId, type: "page", url: REMOTE_FIXTURE_URL };
-    const attached = await this.send("Target.attachToTarget", { targetId, flatten: true });
+    let attached = this.attachedTargets.get(targetId);
+    const deadline = Date.now() + CDP_COMMAND_TIMEOUT_MS;
+    while (!attached && Date.now() < deadline) {
+      await sleep(25);
+      attached = this.attachedTargets.get(targetId);
+    }
+    if (!attached) attached = await this.send("Target.attachToTarget", { targetId, flatten: true });
     if (!attached.sessionId) throw new Error("remote CDP pipe did not return a page session id");
     this.sessionId = attached.sessionId;
     await this.send("Target.activateTarget", { targetId });
@@ -683,11 +692,14 @@ class RemoteCdpPipePage {
       if (!payload) continue;
       const packet = JSON.parse(payload);
       if (packet.id !== undefined && this.pending.has(packet.id)) {
-        const { resolve, reject } = this.pending.get(packet.id);
+        const { resolve, reject, method } = this.pending.get(packet.id);
         this.pending.delete(packet.id);
-        if (packet.error) reject(new Error(`${packet.error.code}: ${packet.error.message}`));
+        if (packet.error) reject(new Error(`${method}: ${packet.error.code}: ${packet.error.message}`));
         else resolve(packet.result);
         continue;
+      }
+      if (packet.method === "Target.attachedToTarget" && packet.params?.targetInfo?.targetId && packet.params.sessionId) {
+        this.attachedTargets.set(packet.params.targetInfo.targetId, packet.params);
       }
       for (const listener of this.events.get(packet.method) ?? []) listener(packet.params ?? {});
     }
@@ -701,6 +713,7 @@ class RemoteCdpPipePage {
         reject(new Error(`remote CDP pipe command timed out after ${CDP_COMMAND_TIMEOUT_MS}ms: ${method}`));
       }, CDP_COMMAND_TIMEOUT_MS);
       this.pending.set(id, {
+        method,
         resolve: (value) => { clearTimeout(timeout); resolve(value); },
         reject: (error) => { clearTimeout(timeout); reject(error); },
       });
