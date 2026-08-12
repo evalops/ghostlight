@@ -66,6 +66,10 @@ services:
         published: "$CDP_PORT"
         host_ip: 127.0.0.1
         protocol: tcp
+      - target: 8082
+        published: "$CONTROL_PORT"
+        host_ip: 127.0.0.1
+        protocol: tcp
     environment:
       GHOSTLIGHT_ACCEPTANCE_MARKER: "$MARKER"
     volumes:
@@ -75,8 +79,17 @@ services:
       - "$FIXTURE_DIR/synthetic_server.py:/usr/local/bin/ghostlight-synthetic-server.py:ro"
       - "$FIXTURE_DIR/synthetic_server.conf:/etc/neko/supervisord/ghostlight-synthetic-server.conf:ro"
   control:
+    # The nested acceptance host drops sibling-container bridge traffic. Sharing the
+    # viewer namespace keeps the readiness request inside loopback for this test only.
+    network_mode: "service:viewer"
+    ports: !reset []
     security_opt:
       - apparmor=unconfined
+    environment:
+      GHOSTLIGHT_LISTEN_ADDR: "0.0.0.0:8082"
+      GHOSTLIGHT_VIEWER_HEALTH_URL: "http://127.0.0.1:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/readyz || exit 1"]
 EOF
 
 : >"$TRANSCRIPT"
