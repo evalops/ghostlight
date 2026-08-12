@@ -1,0 +1,48 @@
+Ghostlight day-one Linux browser persistence receipt
+Captured: 2026-08-12T11:22:25Z
+
+Test checkout:
+a4454a329de191d113d6d447809ba4b89121819e
+
+Runtime implementation under test:
+471c922b17ec725117eb59797edfc2cdc3da6104
+The diff from 471c922 to a4454a3 changed README files only.
+
+Test instrumentation:
+- Compose project: ghostlight_branch_471c922
+- Base file: compose.yaml
+- Test-only override: /home/developer/ghostlight-e2e.rOWwar/branch-override.yml
+- The override set apparmor=unconfined on the nested test host.
+- The override replaced Neko's Chromium supervisor entry only to enable CDP.
+- The override mounted a loopback CDP proxy and synthetic loopback page server.
+- COMPOSE_BAKE=false worked around the test host's Buildx 0.16.2.
+
+Commands:
+COMPOSE_BAKE=false docker compose -p ghostlight_branch_471c922 -f compose.yaml -f /home/developer/ghostlight-e2e.rOWwar/branch-override.yml down
+COMPOSE_BAKE=false docker compose -p ghostlight_branch_471c922 -f compose.yaml -f /home/developer/ghostlight-e2e.rOWwar/branch-override.yml up -d
+
+Before:
+viewer_id=f59ea1a1acaa93696ba66cfc7fe28b00517acc5e085bea0840c3c308461a23f2
+control_id=bea76daec4d233effb742087f7654ceaa437c6079223b1ac49ed0d9a0753fc6e
+restored-target candidates before down:
+- Ghostlight Persistence Proof A http://127.0.0.1:18083/state-a
+- Ghostlight Persistence Proof B http://127.0.0.1:18083/state-b
+
+After:
+viewer_id=175de06fb0cf9b8f1519080c929cc8eeccd6af9d9afcc830bf7cf88e209e89ea
+control_id=721814f0070d07416db512bf9ab29be4221db21eb21f4341842f68b993cf9347
+viewer_health=healthy
+control_health=healthy
+immediate restored targets:
+- Ghostlight Persistence Proof B http://127.0.0.1:18083/state-b
+- Ghostlight Persistence Proof A http://127.0.0.1:18083/state-a
+
+Post-recreation requests:
+2026-08-12T11:22:17.122261Z path=/state-b cookie=ghostlight_branch_persist=cookie-471c922-20260812T1100Z
+2026-08-12T11:22:17.148515Z path=/state-a cookie=ghostlight_branch_persist=cookie-471c922-20260812T1100Z
+
+Screenshot SHA-256:
+956fc1a775b89b3002396d47305dc211617e3b88341aaa974e1b230ed33ba33c  before-tab-a.png
+2e1eec592b36e30b405d6bbaff28541cafb363210561da276b2e53d522eeca2d  before-tab-b.png
+b0adf0cb08664b82fb2b24a35d6365f2b602b907c380c9ab8bd1421642316e47  after-tab-a.png
+f5820b9f3c5cfbcdf929838be39ebb9cf4e712d6efb99a05741c9041d1e3716c  after-tab-b.png

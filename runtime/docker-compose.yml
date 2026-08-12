@@ -4,6 +4,7 @@ services:
     # License: Apache-2.0 for the Neko repository; image dependencies retain their own notices.
     image: "${NEKO_IMAGE:-ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7}"
     init: true
+    hostname: ghostlight-chromium
     restart: unless-stopped
     shm_size: "2gb"
     ports:
@@ -12,6 +13,7 @@ services:
       - "${WEBRTC_MUX_PORT:-52000}:${WEBRTC_MUX_PORT:-52000}/tcp"
     volumes:
       - "${CHROMIUM_PROFILE_DIR:-./data/chromium}:/home/neko/.config/chromium"
+      - "./chromium-policy.json:/etc/chromium/policies/managed/policies.json:ro"
     environment:
       NEKO_DESKTOP_SCREEN: "${NEKO_DESKTOP_SCREEN:-1920x1080@30}"
       NEKO_MEMBER_MULTIUSER_USER_PASSWORD: "${NEKO_USER_PASSWORD:-__GENERATE_AT_INSTALL__}"
@@ -20,6 +22,7 @@ services:
       NEKO_WEBRTC_TCPMUX: "${NEKO_WEBRTC_TCPMUX:-52000}"
       NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-0}"
       NEKO_WEBRTC_NAT1TO1: "${NEKO_WEBRTC_NAT1TO1:-127.0.0.1}"
+      NEKO_SESSION_FILE: "/home/neko/.config/chromium/neko-sessions.json"
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/ >/dev/null || exit 1"]
       interval: 10s
@@ -38,9 +41,9 @@ services:
     environment:
       GHOSTLIGHT_LISTEN_ADDR: "0.0.0.0:8080"
       GHOSTLIGHT_VIEWER_URL: "${GHOSTLIGHT_VIEWER_URL:-http://127.0.0.1:8081}"
-      GHOSTLIGHT_STORE_PATH: "${GHOSTLIGHT_STORE_PATH:-/var/lib/ghostlight/sessions.json}"
+      GHOSTLIGHT_STORE_PATH: "${GHOSTLIGHT_STORE_PATH:-/data/sessions.json}"
     volumes:
-      - "${CONTROL_DATA_DIR:-./data/control}:/var/lib/ghostlight"
+      - "ghostlight-control-data:/data"
     depends_on:
       viewer:
         condition: service_healthy
@@ -51,3 +54,6 @@ services:
       start_period: 10s
       retries: 12
     # Control contract: POST /v1/sessions creates the persistent session record.
+
+volumes:
+  ghostlight-control-data:

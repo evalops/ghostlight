@@ -70,7 +70,7 @@ final class SessionClientTests: XCTestCase {
     func testHTTPErrorMappingPreservesStatusAndServerMessage() {
         let error = SessionClientError.mapHTTPFailure(
             statusCode: 503,
-            data: Data(#"{"message":"session capacity exhausted"}"#.utf8)
+            data: Data(#"{"error":{"code":"internal_error","message":"session capacity exhausted"}}"#.utf8)
         )
 
         XCTAssertEqual(
@@ -83,6 +83,70 @@ final class SessionClientTests: XCTestCase {
         let error = SessionClientError.mapTransportError(URLError(.notConnectedToInternet))
 
         XCTAssertEqual(error, .networkUnavailable)
+    }
+
+    @MainActor
+    func testViewModelPersistsSuccessfulControlPlaneAndReconnectsOnRelaunch() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let firstClient = StubSessionCreating(
+            response: CreateSessionResponse(
+                viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+            )
+        )
+        let firstLaunch = SessionViewModel(
+            client: firstClient,
+            defaults: defaults,
+            autoConnect: false
+        )
+        firstLaunch.controlPlaneURL = "http://control.example.test:8080"
+        firstLaunch.connect()
+
+        await fulfillment(of: [firstClient.requestExpectation], timeout: 1)
+        await waitUntil { firstLaunch.viewerURL != nil }
+
+        let relaunchClient = StubSessionCreating(
+            response: CreateSessionResponse(
+                viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+            )
+        )
+        let relaunched = SessionViewModel(
+            client: relaunchClient,
+            defaults: defaults,
+            autoConnect: true
+        )
+
+        await fulfillment(of: [relaunchClient.requestExpectation], timeout: 1)
+        await waitUntil { relaunched.viewerURL != nil }
+        XCTAssertEqual(relaunched.controlPlaneURL, "http://control.example.test:8080")
+        XCTAssertEqual(relaunchClient.requestedURLs, ["http://control.example.test:8080"])
+    }
+
+    @MainActor
+    func testViewModelEnvironmentURLOverridesSavedURLAndReconnects() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://saved.example.test:8080", forKey: "GhostlightControlPlaneURL")
+
+        let client = StubSessionCreating(
+            response: CreateSessionResponse(
+                viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+            )
+        )
+        let viewModel = SessionViewModel(
+            client: client,
+            defaults: defaults,
+            environment: ["GHOSTLIGHT_CONTROL_URL": "http://environment.example.test:8080"],
+            autoConnect: true
+        )
+
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.viewerURL != nil }
+        XCTAssertEqual(viewModel.controlPlaneURL, "http://environment.example.test:8080")
+        XCTAssertEqual(client.requestedURLs, ["http://environment.example.test:8080"])
     }
 
     private func makeStubSession() -> URLSession {
@@ -113,6 +177,34 @@ final class SessionClientTests: XCTestCase {
             data.append(buffer, count: count)
         }
         return data
+    }
+
+    @MainActor
+    private func waitUntil(
+        timeout: TimeInterval = 1,
+        condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            await Task.yield()
+        }
+        XCTAssertTrue(condition())
+    }
+}
+
+private final class StubSessionCreating: SessionCreating, @unchecked Sendable {
+    let requestExpectation = XCTestExpectation(description: "create session")
+    private let response: CreateSessionResponse
+    private(set) var requestedURLs: [String] = []
+
+    init(response: CreateSessionResponse) {
+        self.response = response
+    }
+
+    func createSession(controlPlaneURL: String) async throws -> CreateSessionResponse {
+        requestedURLs.append(controlPlaneURL)
+        requestExpectation.fulfill()
+        return response
     }
 }
 
