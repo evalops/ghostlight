@@ -31,7 +31,7 @@ for path in \
   assert_file "$path"
 done
 
-assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/m1k1o/neko/chromium:3.1.0'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'context: ../control'
 # These are literal Compose interpolation expressions, not shell expansions.
 # shellcheck disable=SC2016

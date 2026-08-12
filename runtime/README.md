@@ -4,10 +4,10 @@ This directory runs one Chromium browser stream and the Ghostlight control API.
 
 The Compose stack contains two services:
 
-- `viewer` runs `ghcr.io/m1k1o/neko/chromium:3.1.0` and stores the Chromium profile in `runtime/data/chromium`.
+- `viewer` runs Neko Chromium 3.1 from the multi-architecture image index at `sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7` and stores the Chromium profile in `runtime/data/chromium`.
 - `control` builds from `../control`, stores session records in `runtime/data/control`, and publishes the session API.
 
-The Neko repository is [Apache-2.0 licensed](https://github.com/m1k1o/neko/blob/master/LICENSE). Its documented image source is [GHCR](https://neko.m1k1o.net/docs/v3/installation/docker-images). The runtime pins release `3.1.0`; update the tag deliberately after checking the upstream release and image availability.
+The Neko repository is [Apache-2.0 licensed](https://github.com/m1k1o/neko/blob/master/LICENSE). Its [image documentation](https://neko.m1k1o.net/docs/v3/installation/docker-images) defines the GHCR naming and version scheme. The runtime pins the published `3.1` image index by digest; update the digest only after confirming the replacement manifest on GHCR.
 
 ## Install
 
