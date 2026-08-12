@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
+import { Socket } from "node:net";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +28,7 @@ const BITRATE_KBPS = Number(process.env.GHOSTLIGHT_PERFORMANCE_BITRATE_KBPS ?? 3
 const PHASE_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS ?? 30);
 const WARMUP_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_WARMUP_SECONDS ?? 10);
 const CDP_COMMAND_TIMEOUT_MS = Number(process.env.GHOSTLIGHT_PERFORMANCE_CDP_TIMEOUT_MS ?? 5000);
+const CDP_MODE = process.env.GHOSTLIGHT_PERFORMANCE_CDP_MODE ?? "pipe";
 const OUTPUT_DIR = process.env.GHOSTLIGHT_PERFORMANCE_OUTPUT_DIR ?? join(ROOT_DIR, "output", "playwright", "performance", `run-${Date.now()}`);
 const DISPLAY_NAME = process.env.GHOSTLIGHT_PERFORMANCE_DISPLAY_NAME ?? "Ghostlight Performance";
 const PASSWORD = process.env.GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD ?? "ghostlight-performance-user";
@@ -51,6 +53,7 @@ if (!Number.isInteger(CPU_USED) || CPU_USED < 0 || CPU_USED > 16) throw new Erro
 if (!Number.isInteger(BITRATE_KBPS) || BITRATE_KBPS < 128) throw new Error("GHOSTLIGHT_PERFORMANCE_BITRATE_KBPS must be at least 128");
 if (!Number.isInteger(PHASE_SECONDS) || PHASE_SECONDS < 5) throw new Error("GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS must be at least 5");
 if (!Number.isInteger(CDP_COMMAND_TIMEOUT_MS) || CDP_COMMAND_TIMEOUT_MS < 100 || CDP_COMMAND_TIMEOUT_MS > 60000) throw new Error("GHOSTLIGHT_PERFORMANCE_CDP_TIMEOUT_MS must be 100..60000");
+if (!new Set(["pipe", "tcp"]).has(CDP_MODE)) throw new Error("GHOSTLIGHT_PERFORMANCE_CDP_MODE must be pipe or tcp");
 
 const command = (program, args, options = {}) => execFileSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options });
 const remoteCommand = (script, options = {}) => command("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, script], options);
@@ -120,6 +123,7 @@ function composeConfig() {
       - ${yamlQuote(`${REMOTE_DIR}/profile:/home/neko/.config/chromium`)}
       - ${yamlQuote(`${REMOTE_DIR}/neko.yaml:/etc/neko/neko.yaml:ro`)}
       - ${yamlQuote(`${REMOTE_DIR}/chromium.conf:/etc/neko/supervisord/chromium.conf:ro`)}
+      - ${yamlQuote(`${REMOTE_DIR}/performance-cdp-pipe.py:/usr/local/bin/ghostlight-performance-cdp-pipe.py:ro`)}
       - ${yamlQuote(`${REMOTE_DIR}/performance.conf:/etc/neko/supervisord/ghostlight-performance.conf:ro`)}
       - ${yamlQuote(`${REMOTE_DIR}/performance-fixture.py:/usr/local/bin/ghostlight-performance-fixture.py:ro`)}
     environment:
@@ -139,10 +143,14 @@ function composeConfig() {
 }
 
 function chromiumConfig() {
+  const chromiumCommand = "/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage";
+  const command = CDP_MODE === "pipe"
+    ? `/usr/bin/python3 /usr/local/bin/ghostlight-performance-cdp-pipe.py --bind 0.0.0.0 --port 9222 -- ${chromiumCommand} --remote-debugging-pipe`
+    : `${chromiumCommand} --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*`;
   return [
     "[program:chromium]",
     "environment=HOME=\"/home/neko\",USER=\"neko\",DISPLAY=\":99.0\"",
-    "command=/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*",
+    `command=${command}`,
     "stopsignal=INT",
     "user=neko",
     "autostart=true",
@@ -202,15 +210,18 @@ async function writeRemoteFiles() {
   const localFixture = join(localConfigDir, "performance-fixture.py");
   await fs.copyFile(FIXTURE_PATH, localFixture);
   await fs.chmod(localFixture, 0o700);
+  const localCdpPipe = join(localConfigDir, "performance-cdp-pipe.py");
+  await fs.copyFile(join(ROOT_DIR, "tools", "performance-cdp-pipe.py"), localCdpPipe);
+  await fs.chmod(localCdpPipe, 0o700);
   const localCompose = join(localConfigDir, "compose.yaml");
   await fs.writeFile(localCompose, composeConfig(), { mode: 0o600 });
   await fs.writeFile(join(OUTPUT_DIR, "source.sha"), `${currentSource().sourceSha}\n`);
   await fs.writeFile(join(OUTPUT_DIR, "image.txt"), `${IMAGE}\n`);
 
   remoteCommand(`rm -rf -- ${shellQuote(REMOTE_DIR)} && mkdir -m 700 -p -- ${shellQuote(`${REMOTE_DIR}/profile`)}`);
-  const remoteFiles = [...localPaths, localFixture, localCompose];
+  const remoteFiles = [...localPaths, localFixture, localCdpPipe, localCompose];
   command("scp", ["-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...remoteFiles, `${REMOTE}:${REMOTE_DIR}/`]);
-  remoteCommand(`chmod 600 -- ${shellQuote(`${REMOTE_DIR}/neko.yaml`)} ${shellQuote(`${REMOTE_DIR}/chromium.conf`)} ${shellQuote(`${REMOTE_DIR}/performance.conf`)} ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} && chmod 700 -- ${shellQuote(`${REMOTE_DIR}/performance-fixture.py`)}`);
+  remoteCommand(`chmod 600 -- ${shellQuote(`${REMOTE_DIR}/neko.yaml`)} ${shellQuote(`${REMOTE_DIR}/chromium.conf`)} ${shellQuote(`${REMOTE_DIR}/performance.conf`)} ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} && chmod 700 -- ${shellQuote(`${REMOTE_DIR}/performance-fixture.py`)} ${shellQuote(`${REMOTE_DIR}/performance-cdp-pipe.py`)}`);
   return { localConfigDir, localCompose };
 }
 
@@ -623,7 +634,138 @@ class RemoteCdpPage {
   }
 }
 
+class RemoteCdpPipePage {
+  constructor() {
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
+    this.nextId = 1;
+    this.pending = new Map();
+    this.events = new Map();
+    this.sessionId = null;
+    this.target = null;
+  }
+
+  async connect() {
+    this.socket = new Socket();
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`remote CDP pipe connection timed out after ${CDP_COMMAND_TIMEOUT_MS}ms`)), CDP_COMMAND_TIMEOUT_MS);
+      this.socket.once("connect", () => { clearTimeout(timeout); resolve(); });
+      this.socket.once("error", (error) => { clearTimeout(timeout); reject(error); });
+      this.socket.connect(CDP_PORT, CLIENT_ADDRESS);
+    });
+    this.socket.setNoDelay(true);
+    this.socket.on("data", (chunk) => this.dispatch(chunk));
+    this.socket.once("close", () => {
+      for (const { reject } of this.pending.values()) reject(new Error("remote CDP pipe closed"));
+      this.pending.clear();
+    });
+    const created = await this.send("Target.createTarget", { url: REMOTE_FIXTURE_URL });
+    const targetId = created.targetId;
+    if (!targetId) throw new Error("remote CDP pipe did not return a target id");
+    const targetInfos = (await this.send("Target.getTargets")).targetInfos ?? [];
+    this.target = targetInfos.find((entry) => entry.targetId === targetId) ?? { targetId, type: "page", url: REMOTE_FIXTURE_URL };
+    const attached = await this.send("Target.attachToTarget", { targetId, flatten: true });
+    if (!attached.sessionId) throw new Error("remote CDP pipe did not return a page session id");
+    this.sessionId = attached.sessionId;
+    await this.send("Target.activateTarget", { targetId });
+    await this.sendPage("Page.enable");
+    await this.sendPage("Runtime.enable");
+    return this;
+  }
+
+  dispatch(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const end = this.buffer.indexOf(0);
+      if (end < 0) return;
+      const payload = this.buffer.subarray(0, end).toString();
+      this.buffer = this.buffer.subarray(end + 1);
+      if (!payload) continue;
+      const packet = JSON.parse(payload);
+      if (packet.id !== undefined && this.pending.has(packet.id)) {
+        const { resolve, reject } = this.pending.get(packet.id);
+        this.pending.delete(packet.id);
+        if (packet.error) reject(new Error(`${packet.error.code}: ${packet.error.message}`));
+        else resolve(packet.result);
+        continue;
+      }
+      for (const listener of this.events.get(packet.method) ?? []) listener(packet.params ?? {});
+    }
+  }
+
+  send(method, params = {}, sessionId = null) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`remote CDP pipe command timed out after ${CDP_COMMAND_TIMEOUT_MS}ms: ${method}`));
+      }, CDP_COMMAND_TIMEOUT_MS);
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timeout); resolve(value); },
+        reject: (error) => { clearTimeout(timeout); reject(error); },
+      });
+      try {
+        const packet = { id, method, params };
+        if (sessionId) packet.sessionId = sessionId;
+        this.socket.write(`${JSON.stringify(packet)}\0`);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        reject(error);
+      }
+    });
+  }
+
+  sendPage(method, params = {}) {
+    return this.send(method, params, this.sessionId);
+  }
+
+  on(method, listener) {
+    const listeners = this.events.get(method) ?? [];
+    listeners.push(listener);
+    this.events.set(method, listeners);
+  }
+
+  async goto(url) {
+    const loaded = new Promise((resolve) => this.on("Page.loadEventFired", resolve));
+    await this.sendPage("Page.navigate", { url });
+    await Promise.race([loaded, sleep(10000)]);
+  }
+
+  async waitForSelector(selector, timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.evaluate((target) => Boolean(document.querySelector(target)), selector)) return;
+      await sleep(100);
+    }
+    throw new Error(`remote CDP page selector timed out: ${selector}`);
+  }
+
+  async evaluate(callback, argument) {
+    const functionSource = callback.toString();
+    const argumentSource = argument === undefined ? "undefined" : JSON.stringify(argument);
+    const expression = `Promise.resolve((${functionSource})(${argumentSource}))`;
+    const response = await this.sendPage("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, userGesture: true });
+    if (response.exceptionDetails) {
+      const description = response.exceptionDetails.exception?.description || response.exceptionDetails.text || "remote evaluation failed";
+      throw new Error(description);
+    }
+    return response.result?.value;
+  }
+
+  async close() {
+    if (!this.socket) return;
+    try { if (this.target?.targetId) await this.send("Target.closeTarget", { targetId: this.target.targetId }); } catch { /* container teardown remains authoritative */ }
+    this.socket.end();
+    this.socket = null;
+  }
+}
+
 async function connectRemoteCdpPage() {
+  if (CDP_MODE === "pipe") {
+    const page = await new RemoteCdpPipePage().connect();
+    return { page, target: { ...page.target, cdp_mode: "pipe" } };
+  }
   const listResponse = await fetch(`${CDP_URL}/json/list`);
   if (!listResponse.ok) throw new Error(`CDP target list failed: HTTP ${listResponse.status}`);
   let targets = await listResponse.json();
@@ -1082,6 +1224,7 @@ async function main() {
     ice_address: ICE_ADDRESS,
     ssh_tunnel: USE_SSH_TUNNEL,
     transport_mode: USE_SSH_TUNNEL ? "ssh-tcp-smoke" : "direct-lan-udp-required",
+    cdp_mode: CDP_MODE,
     ports: { viewer: VIEWER_PORT, webrtc: WEBRTC_PORT, cdp: CDP_PORT },
     target_fps: TARGET_FPS,
     resolution: `${WIDTH}x${HEIGHT}`,
