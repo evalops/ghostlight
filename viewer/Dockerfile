@@ -42,7 +42,7 @@ RUN set -eux; \
     go mod verify; \
     go test -mod=readonly ./...; \
     CGO_ENABLED=1 go build -mod=readonly -buildvcs=false -trimpath \
-      -ldflags "-buildid= -s -w -X 'm1k1o/neko.buildDate=2026-08-05T14:28:51Z' -X 'm1k1o/neko.gitCommit=${NEKO_REVISION}' -X 'm1k1o/neko.gitBranch=detached' -X 'm1k1o/neko.gitTag=v3.1.5'" \
+      -ldflags "-buildid= -s -w -X 'github.com/m1k1o/neko/server.buildDate=2026-08-05T14:28:51Z' -X 'github.com/m1k1o/neko/server.gitCommit=${NEKO_REVISION}' -X 'github.com/m1k1o/neko/server.gitBranch=detached' -X 'github.com/m1k1o/neko/server.gitTag=v3.1.5'" \
       -o /build/neko ./cmd/neko/main.go; \
     touch --date="@${SOURCE_DATE_EPOCH}" /build/neko
 
