@@ -16,6 +16,8 @@ name: Browser update safety
       - scripts/test-image-safety.sh
       - scripts/update-control-base-images.sh
       - scripts/update-neko-image.sh
+      - compose.yaml
+      - runtime/bin/**
       - tests/acceptance/**
   schedule:
     - cron: "17 4 * * 1"
@@ -64,7 +66,7 @@ jobs:
 
       - name: Detect Neko and control-base digest drift
         id: base-drift
-        continue-on-error: true
+        continue-on-error: ${{ github.event_name == 'schedule' }}
         env:
           GHOSTLIGHT_NEKO_CANDIDATE_IMAGE: ${{ env.CANDIDATE_REF }}
         shell: bash

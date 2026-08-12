@@ -118,6 +118,6 @@ The backup shell tests use synthetic cookie, tab, and local-storage fixtures. No
 
 ## Explicit non-goals
 
-The shipped alpha has no multi-user scheduler, Dex control lease, public-internet deployment, TLS termination, control authentication, TURN service, profile synchronization, browser recording, automatic browser update, Developer ID-signed app, notarized distribution, or host-failover path.
+The shipped alpha has no multi-user scheduler, Dex control lease, public-internet deployment, TLS termination, control authentication, TURN service, profile synchronization, browser recording, automatic browser update, or host-failover path. Releases are ad-hoc signed unless the Apple signing secrets described in the README are configured.
 
 The seven-day daily-driver gate requires one successful close-and-reopen check and one successful Compose-restart check on each of seven consecutive days. Dex control-lease design and implementation start after that gate passes. Compose remains the lifecycle owner until a reviewed Dex design, migration, and acceptance receipt replace this architecture.

@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -35,6 +36,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish the exact source candidate
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: viewer
@@ -43,3 +45,38 @@ jobs:
           sbom: true
           push: true
           tags: ghcr.io/evalops/ghostlight-viewer:sha-${{ github.sha }}
+
+      - name: Verify the published digest is pullable
+        shell: bash
+        env:
+          PUBLISHED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$PUBLISHED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="ghcr.io/evalops/ghostlight-viewer@${PUBLISHED_DIGEST}"
+          docker pull "$image"
+          docker image inspect "$image" >/dev/null
+
+      - name: Scan the published image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/image-safety
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ghostlight-trivy-cache:/root/.cache/trivy \
+            -v "$GITHUB_WORKSPACE/output/image-safety:/output" \
+            aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --scanners vuln --format json --output /output/viewer-trivy.json \
+            --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            "ghcr.io/evalops/ghostlight-viewer@${{ steps.build.outputs.digest }}"
+
+      - name: Upload the scanner receipt
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: viewer-image-safety-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
