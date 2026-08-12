@@ -2,9 +2,13 @@
 
 Ghostlight runs a persistent Chromium profile on Linux and streams the browser to a native macOS client over WebRTC.
 
+## Current scope
+
+Ghostlight supports one fixed Chromium profile, one Neko viewer, one macOS client, and a trusted private network. Docker Compose owns service startup, restart, and shutdown. The Go control service returns one configured viewer URL from `GET /v1/viewer`; it keeps no session catalog and sends no browser media.
+
 ## Daily-driver milestone
 
-The next milestone has one acceptance path:
+The acceptance path is:
 
 1. Run flag-free `docker compose up` from the repository root on the Linux host.
 2. Launch `Ghostlight.app` on the Mac.
@@ -12,74 +16,50 @@ The next milestone has one acceptance path:
 4. Close Ghostlight.
 5. Reopen Ghostlight and find the same Gmail session and tabs.
 
-The acceptance gate is seven consecutive days with one successful close-and-reopen check and one successful Compose-restart check each day. Dex control lease work starts after that gate passes.
+The acceptance gate requires seven consecutive days with one successful close-and-reopen check and one successful Compose-restart check each day. Dex control-lease work starts after that gate passes.
 
-Today, the repository provides flag-free Compose startup and a script that builds an ad-hoc signed `Ghostlight.app` for local testing. Notarized distribution and repeated Gmail persistence testing remain acceptance work.
-
-## What works
-
-| Surface | Current behavior |
-| --- | --- |
-| Linux browser | Neko runs Chromium from a digest-pinned multi-architecture container image. |
-| Browser persistence | Chromium writes its profile to `runtime/data/chromium` on the Linux host. |
-| Control API | A Go service creates, reads, and deletes `/data/sessions.json` in the `ghostlight-control-data` Docker volume. |
-| macOS client | A native SwiftUI executable creates a session record and opens the returned Neko viewer URL in `WKWebView`. |
-| Connection | Neko negotiates browser video, audio, and input over WebRTC. |
-| Validation | Preflight checks configuration; smoke tests check control health, session creation, and viewer reachability. |
-
-The control API records session metadata. It does not create or stop the Neko container; Docker Compose owns both services in this alpha.
+The repository has a day-one Linux persistence receipt and synthetic acceptance tooling. That receipt does not satisfy the native Mac check, the Gmail check, or the seven-day gate.
 
 ## Requirements
 
-### Linux host
+Linux runtime:
 
-- Docker Engine
-- Docker Compose 2.20.0 or later
-- `curl`
-- `openssl`
-- a persistent filesystem for `runtime/data/`
+- Docker Engine and Docker Compose 2.20 or later
+- `curl`, `awk`, and `openssl`
+- a persistent filesystem for `runtime/data/chromium`
+- a host address reachable from the Mac
 
-### Mac
+macOS client:
 
 - macOS 14 or later
-- Swift 5.10 or later for the development executable
-- network access to the Linux control, viewer, and WebRTC ports
+- Swift 5.10 or later for local builds
+- access to the Linux control, viewer, and WebRTC ports
 
-### Development and verification
-
-- Go 1.24
-- ShellCheck
-- the Linux and Mac requirements for their respective module checks
-
-The Linux host and Mac should start on the same trusted LAN. The alpha exposes unauthenticated HTTP control endpoints and has no TLS termination.
+Repository verification uses a Go 1.24-compatible module, a Go 1.25.12 container builder, and ShellCheck.
 
 ## Start the Linux runtime
 
-Run these commands from the repository root on the Linux host:
+Run from the repository root on the Linux host:
 
 ```sh
 cp runtime/.env.example runtime/.env
-```
-
-Generate separate viewer passwords:
-
-```sh
+chmod 600 runtime/.env
 openssl rand -hex 32
 openssl rand -hex 32
 ```
 
-Edit `runtime/.env` and set at least these values:
+Put the two generated values in `NEKO_USER_PASSWORD` and `NEKO_ADMIN_PASSWORD`. For a Mac on the same private network, set these three values to the Linux address reachable from that Mac:
 
 ```dotenv
-GHOSTLIGHT_VIEWER_URL=http://192.168.1.20:8081
-NEKO_USER_PASSWORD=<first-generated-password>
-NEKO_ADMIN_PASSWORD=<second-generated-password>
-NEKO_WEBRTC_NAT1TO1=192.168.1.20
+GHOSTLIGHT_BIND_ADDRESS=<linux-host>
+GHOSTLIGHT_VIEWER_URL=http://<linux-host>:8081
+GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080
+NEKO_WEBRTC_NAT1TO1=<linux-host>
 ```
 
-Replace `192.168.1.20` with the Linux address reachable from the Mac. Keep `GHOSTLIGHT_VIEWER_URL` and `NEKO_WEBRTC_NAT1TO1` on the same reachable host unless the network has an explicit proxy or NAT arrangement.
+Use `127.0.0.1` for a Linux-local stack. `GHOSTLIGHT_BIND_ADDRESS` controls the host interface for the control, viewer, and WebRTC port publications. Preflight accepts literal IPv4 loopback, link-local, or RFC 1918 addresses and IPv6 loopback, link-local, or unique-local addresses. It rejects hostnames, public addresses, and wildcard addresses.
 
-Validate and start the stack from the repository root:
+Validate and start the stack:
 
 ```sh
 runtime/bin/preflight.sh
@@ -87,139 +67,178 @@ docker compose up -d
 runtime/bin/smoke.sh
 ```
 
-Inspect service state and logs:
+Preflight requires mode `600` on `runtime/.env` and mode `700` on the profile. It also rejects leftover install placeholders, a viewer URL host that differs from `NEKO_WEBRTC_NAT1TO1`, an invalid Compose model, a symlink profile path, and a profile that Neko uid `1000` cannot write. The profile write check runs through the digest-pinned Neko image.
+
+The smoke script checks control liveness, Neko `/health`, control readiness, stateless viewer discovery, and `/health` through the discovered viewer URL.
+
+Inspect or stop the stack with:
 
 ```sh
 docker compose ps
 docker compose logs --tail=100 viewer control
-```
-
-Stop the containers without deleting the browser profile:
-
-```sh
 docker compose down
 ```
 
-`runtime/.env` and `runtime/data/` are excluded from Git. Back up `runtime/data/chromium` as credential-bearing browser data.
+`docker compose down` removes the containers and leaves `runtime/data/chromium` on the host.
 
 ## Launch the macOS client
-
-Build the local test application:
 
 ```sh
 macos/package-app.sh
 open macos/.build/Ghostlight.app
 ```
 
-The bundle is ad-hoc signed with the stable identifier `org.evalops.Ghostlight`. It is intended for local development and is not notarized for distribution.
+The script creates an ad-hoc signed bundle at `macos/.build/Ghostlight.app` with identifier `org.evalops.Ghostlight`. The bundle has no Developer ID signature or notarization receipt.
 
-Enter the Linux control URL, such as `http://192.168.1.20:8080`, and select **Connect**. The app saves a successful URL and reconnects to it on later launches. It sends `POST /v1/sessions`, receives the configured viewer URL, and loads the Neko login screen.
+Enter the Linux control URL, such as `http://<linux-host>:8080`, and select **Connect**. The app requests `GET /v1/viewer`, saves the control URL after successful discovery, and loads the returned Neko URL in `WKWebView`. Sign in to Neko with `NEKO_USER_PASSWORD`.
 
-Sign in with `NEKO_USER_PASSWORD`. Website sessions, cookies, local storage, and tabs belong to the Chromium profile on the Linux host rather than the Mac app process.
+The status row distinguishes `Loading viewer`, `Viewer loaded`, and viewer navigation failure. `Viewer loaded` means WebKit finished the page navigation; it does not confirm a connected WebRTC media stream. Automatic launch from a saved control URL retries failed viewer navigation twice. **Retry** initiates one user-requested reload. **Disconnect** cancels discovery, clears the saved URL, and disables automatic connection on the next launch.
 
-After signing in to Gmail and opening two tabs, run the daily-driver acceptance path at the top of this README. Repeat the path after restarting the Compose stack.
+Chromium cookies, local storage, browsing and download history, website sessions, and restored tabs live in the Linux profile. Downloaded files are outside the profile mount at `/home/neko/Downloads`. The macOS app stores only the control URL in `UserDefaults`.
 
-Record any lost login, missing tab, blank viewer, or reconnect failure with the error text shown in Ghostlight, the full `docker compose ps` output, and the last 100 lines from both container logs.
+## Network and credentials
 
-## Architecture
+| Default port | Protocol | Purpose |
+| ---: | --- | --- |
+| `8080` | TCP | Control liveness, readiness, and viewer discovery |
+| `8081` | TCP | Neko login, viewer page, and signaling |
+| `52000` | UDP and TCP | Neko WebRTC media and input mux |
 
-```mermaid
-flowchart LR
-    app["Ghostlight for macOS"]
-    control["Go control API :8080"]
-    sessions[("Session records")]
-    viewer["Neko viewer :8081"]
-    chromium["Chromium"]
-    profile[("Persistent profile")]
+The control API has no authentication or TLS. Neko requires the configured user or admin password. Keep the published ports on a trusted private or loopback interface, keep `runtime/.env` free of group and world permissions, and allow both protocols on port `52000` between the Mac and Linux host.
 
-    app -->|"POST /v1/sessions"| control
-    control --> sessions
-    control -->|"viewer_url"| app
-    app <-->|"WebRTC through embedded viewer"| viewer
-    viewer --> chromium
-    chromium <--> profile
-```
+The Chromium profile and its backups contain credential-bearing browser state. `runtime/.env`, `runtime/data/`, screenshots, logs, and diagnostics must remain free of source control and public artifact uploads when they contain credentials or account data.
 
-Docker Compose starts `viewer` and `control`. The macOS app talks to the control API once per connection, then the embedded Neko client handles viewer login, signaling, media, and input. Browser traffic goes from Chromium on Linux to the destination website; the Go service does not proxy browser traffic or media.
+## Backup and restore
 
-The LAN threat model is in [docs/architecture.md](docs/architecture.md). Its lifecycle and persistence sections describe a target architecture. This README and the module READMEs describe the shipped alpha behavior.
-
-## Network ports
-
-| Default port | Protocol | Purpose | Required from the Mac |
-| ---: | --- | --- | --- |
-| `8080` | TCP | Ghostlight control API | Yes |
-| `8081` | TCP | Neko viewer and signaling | Yes |
-| `52000` | UDP and TCP | Neko WebRTC mux | Yes |
-
-Allow both UDP and TCP on port `52000`. If the viewer page loads but the stream is blank or disconnected, check `NEKO_WEBRTC_NAT1TO1` and port `52000`.
-
-## Control API
-
-Check health:
+The backup command validates the profile tree, stops the viewer before reading the profile, and leaves it stopped. It refuses operator-controlled symlink path components, nested links and special files, an existing archive or checksum path, and a concurrent backup to the same target. On macOS it permits a root-owned top-level platform alias such as `/var`. It writes a mode-`600` gzip-compressed tar archive plus a mode-`600` `.sha256` sidecar.
 
 ```sh
-curl --fail http://192.168.1.20:8080/healthz
+runtime/bin/profile-backup.sh backup \
+  runtime/data/chromium \
+  /safe/backup/ghostlight-profile.tar.gz
+docker compose start viewer
 ```
 
-Create a session record:
+Restore verifies the sidecar and permits one archive root containing regular files and directories with unique relative paths. It rejects traversal, links, special files, multiple roots, duplicate entries, symlink path components, and an existing destination. The destination must be an absolute new path.
 
 ```sh
-curl --fail \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  --data '{}' \
-  http://192.168.1.20:8080/v1/sessions
+runtime/bin/profile-backup.sh restore \
+  /safe/backup/ghostlight-profile.tar.gz \
+  /safe/restore/chromium
 ```
 
-A successful response has this shape:
+Inspect the restored profile before changing `CHROMIUM_PROFILE_DIR` in a reviewed Compose configuration. A restore does not replace `runtime/data/chromium` or start the viewer.
 
-```json
-{
-  "id": "6cbb94b6-d132-45d2-856f-77e820f2aa8d",
-  "viewer_url": "http://192.168.1.20:8081",
-  "created_at": "2026-08-12T10:00:00Z"
-}
-```
-
-The API also supports `GET /v1/sessions/{id}` and `DELETE /v1/sessions/{id}`. Deleting a session record does not delete the Chromium profile or stop Neko.
-
-## Verify the repository
-
-Run the module and repository checks from the repository root:
+## Verification
 
 ```sh
 (cd control && go test ./...)
 (cd control && go test -race ./...)
 (cd control && go vet ./...)
 swift test --package-path macos
+macos/package-app.sh
 runtime/tests/test_runtime.sh
-scripts/test-repo-hygiene.sh
-scripts/test-check-shell.sh
+runtime/tests/test_profile_backup.sh
+bash scripts/test-repo-hygiene.sh
+bash scripts/test-check-shell.sh
 bash scripts/check-shell.sh
 ```
 
-The runtime test requires Docker Compose to render the Compose model. CI runs `go test ./...`, repository hygiene, ShellCheck, runtime regression tests, and Compose validation on Linux. It runs `swift test --package-path macos` and builds the local app bundle on macOS.
+The [2026-08-12 day-one receipt](docs/acceptance/2026-08-12/README.md) records one Linux Compose recreation with changed container IDs, restored synthetic tabs, a persisted synthetic cookie and local-storage value, and before-and-after screenshots. Its test-only Chromium debugging and loopback instrumentation are absent from the runtime Compose file.
 
-The [2026-08-12 day-one receipt](docs/acceptance/2026-08-12/README.md) records a real Linux Compose recreation with changed container IDs, restored Chromium tabs, persisted cookie and local-storage values, and before-and-after screenshots. It does not replace the seven-day gate or the native macOS acceptance check.
+### Live Linux persistence lane
+
+```sh
+tests/acceptance/run-linux-persistence.sh
+```
+
+This command creates a temporary mode-`700` profile, a mode-`600` environment file, and a Compose override. The override adds an AppArmor exception, a loopback-only CDP proxy, and two synthetic pages inside the Neko container. The lane runs preflight, builds and starts the stack, creates two Chromium tabs, records their cookie and local-storage marker, tears down and recreates both containers, requires new viewer and control container IDs, and checks both restored tabs and markers. It writes PNG screenshots, JSON evidence, hashes, request logs, and `transcript.txt` under `output/playwright/acceptance/` by default.
+
+The screenshot audit rejects `tEXt`, `zTXt`, `iTXt`, and `eXIf` chunks plus configured plaintext credential and non-loopback IPv4 marker patterns found in raw PNG bytes. It does not perform optical-character recognition. Review each screenshot before publication. Set `GHOSTLIGHT_ACCEPTANCE_KEEP_STACK=1` only when the temporary stack and work directory are needed for debugging.
+
+The recorded improvement run failed: Chromium 151 exposed the two targets, then `Runtime.evaluate` timed out through the committed CDP proxy. The lane failed before recreation and published no screenshots. See [the improvement acceptance status](docs/acceptance/2026-08-12-improvements/README.md) and its raw transcript. The earlier day-one receipt remains the Linux persistence evidence, with its documented uncommitted test hooks.
+
+### Native macOS relaunch lane
+
+Build the app, start a synthetic control and viewer endpoint, unlock the Mac, and run:
+
+```sh
+GHOSTLIGHT_CONTROL_URL=http://127.0.0.1:8080 \
+tools/test-macos-relaunch.sh
+```
+
+The first launch receives the URL through its environment. The script waits through macOS Accessibility until the window exposes `Viewer loaded`, captures a screenshot, quits the app, and launches it again without that environment value. It requires `Viewer loaded` again, which exercises saved-URL discovery and WebKit navigation. The screenshots and transcript go to `output/macos-acceptance/` by default and require privacy plus rendering review.
+
+This lane requires Accessibility permission, Screen Recording permission, an unlocked interactive session, and a synthetic endpoint. `Viewer loaded` remains a WebKit navigation assertion; the lane does not inspect decoded WebRTC frames.
+
+The recorded improvement run failed because the terminal runner did not receive the required Accessibility response. It published bundle provenance only and no screenshots.
+
+### Streaming performance lane
+
+Against a running Neko viewer, set the actual viewer URL, container name, and test password:
+
+```sh
+GHOSTLIGHT_PERFORMANCE_VIEWER_URL=http://127.0.0.1:8081 \
+GHOSTLIGHT_PERFORMANCE_VIEWER_CONTAINER=<viewer-container> \
+GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD=<synthetic-test-password> \
+tools/collect-performance.sh
+```
+
+The Playwright client authenticates to Neko and samples inbound WebRTC for ten seconds. It records decoded frames, dropped frames, received bytes, bitrate, negotiated codec, H.264 receiver capability, a keyboard-dispatch-to-next-presented-frame approximation, one-second container statistics, Neko pipeline logs, a transcript, and SHA-256 receipts under `output/playwright/performance/`. It fails when no decoded inbound video frames appear.
+
+Set `GHOSTLIGHT_PERFORMANCE_CODEC=h264` for a measurement-only H.264 preference run. The H.264 setting does not change the runtime default. Retain the pinned Neko default until paired default/H.264 receipts and a native WKWebView decode receipt support a change. The input metric excludes physical keyboard polling and display scanout.
+
+The committed [VP8 baseline](docs/performance/2026-08-12-vp8-baseline/README.md) passed on `2026-08-12`: 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, 72.43 ms from browser keyboard dispatch to the next presented video frame, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB. The browser advertised H.264 receive support, but no paired H.264 or native WKWebView decode receipt exists.
+
+## Container updates
+
+The Neko image, both control base images, GitHub Actions, and Trivy are pinned to immutable digests or commit SHAs. Protected CI rejects mutable or inconsistent references.
+
+`.github/workflows/browser-update.yml` runs at `04:17 UTC` each Monday, accepts a manual Neko candidate, and runs on pull requests that change its inputs. Schedule and manual runs resolve the selected Neko tag plus the Go and Alpine base tags to digests. The candidate job then builds control, runs runtime and backup checks, boots and recreates the synthetic Linux persistence stack, scans Neko and control with the pinned Trivy image, and retains `output/` receipts for 30 days. A fixed `HIGH` or `CRITICAL` finding blocks the candidate; `--ignore-unfixed` excludes findings without an available fix from that blocking command.
+
+After a green schedule or manual candidate job, a separate write-scoped job opens a pull request containing only `control/Dockerfile` and the three mirrored Neko references. It creates no pull request when those files already contain the resolved digests. Review, required checks, and merge remain manual. Dependabot also checks the Docker bases in `control/` each Monday at `04:47 UTC`.
+
+The latest local candidate checks produced no end-to-end receipt. The local builder scan was interrupted by Docker container-store I/O errors, and the Linux persistence lane failed closed on the Chromium 151 CDP timeout described earlier. In GitHub Actions, a failure in the `candidate` job prevents `propose-update` from running.
+
+For a reviewed local Neko update:
+
+```sh
+candidate="$(scripts/resolve-image-digest.sh ghcr.io/m1k1o/neko/chromium:<tag>)"
+scripts/update-neko-image.sh "$candidate"
+scripts/check-image-safety.sh
+```
+
+The candidate lane checks synthetic Linux profile persistence through one Compose recreation and runs the configured image scans. It does not prove native macOS relaunch, WKWebView decoding, Gmail persistence, or the seven-day gate.
 
 ## Troubleshooting
 
-### Preflight reports install-time placeholders
+### Preflight reports install placeholders
 
-Open `runtime/.env` and replace each `__GENERATE_AT_INSTALL__` assignment value. Marker text in full-line or inline comments is accepted.
+Replace each `__GENERATE_AT_INSTALL__` assignment in `runtime/.env`. The password and NAT fields in the example file contain these markers.
 
-### The Mac cannot reach the control API
+### Preflight rejects `runtime/.env` permissions
 
-Run `curl http://<linux-host>:8080/healthz` from the Mac. Check the Linux firewall and confirm that `docker compose ps` publishes `0.0.0.0:8080->8080/tcp` or the intended private interface.
+```sh
+chmod 600 runtime/.env
+```
 
-### The viewer opens but video never connects
+Preflight requires mode `600` exactly.
 
-Confirm that `NEKO_WEBRTC_NAT1TO1` contains the Linux address reachable from the Mac. Allow `52000/udp` and `52000/tcp` through the host firewall. Check the Neko logs for the advertised ICE candidate and mux address.
+### The Mac cannot reach control
 
-### Gmail or tabs disappear after restart
+Run `curl http://<linux-host>:8080/healthz` from the Mac. Confirm that `GHOSTLIGHT_BIND_ADDRESS` names the intended Linux interface and inspect the Linux firewall plus `docker compose ps`.
 
-Confirm that `runtime/data/chromium` exists on the Linux host and is mounted at `/home/neko/.config/chromium` inside the viewer container:
+### Control is live but unready
+
+`GET /healthz` checks only the Go process. `GET /readyz` returns `503` when the control service cannot receive a successful response from the viewer's `/health` endpoint. Inspect `docker compose logs --tail=100 viewer control`.
+
+### The viewer page loads without media
+
+Confirm that `NEKO_WEBRTC_NAT1TO1` matches the host in `GHOSTLIGHT_VIEWER_URL`. Allow `52000/udp` and `52000/tcp` between the Mac and Linux host, then inspect the Neko ICE and mux log lines.
+
+### Website sessions or tabs disappear
+
+Confirm the host bind mount before changing the profile:
 
 ```sh
 docker inspect \
@@ -227,31 +246,26 @@ docker inspect \
   --format '{{json .Mounts}}'
 ```
 
-Check ownership and free disk space before changing or removing the profile directory.
-
-### Session creation succeeds but returns the wrong viewer host
-
-Update `GHOSTLIGHT_VIEWER_URL` in `runtime/.env`, then recreate the control container:
-
-```sh
-docker compose up -d --force-recreate control
-```
+Check `runtime/data/chromium` ownership, permissions, and free disk space. Restore only into a new path so the current profile remains available for diagnosis.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `macos/` | SwiftUI client, WebKit viewer, and Swift tests |
-| `control/` | Go control API, JSON session store, and Go tests |
-| `runtime/` | Compose stack, environment template, preflight, smoke checks, and persistent data paths |
-| `docs/` | Architecture and test documentation |
-| `scripts/` | Repository hygiene and shell validation |
+| `control/` | Stateless Go discovery API, liveness, readiness, and tests |
+| `runtime/` | Compose stack, preflight, smoke checks, profile backup, and shell tests |
+| `macos/` | SwiftUI client, WebKit viewer, packaging script, and tests |
+| `tests/acceptance/` | Live synthetic Linux persistence and WebRTC measurement drivers |
+| `tools/` | macOS relaunch and streaming-receipt commands |
+| `performance/` | Streaming measurement notes |
+| `docs/` | Shipped architecture and dated acceptance receipts |
+| `scripts/` | Repository and shell hygiene checks |
 
 ## Scope
 
-The alpha supports one user, one Neko browser, one Linux host, and one trusted LAN. It has no control authentication, TLS, TURN service, multi-host scheduler, account system, billing, automatic updates, Developer ID-signed or notarized macOS package, or public-internet deployment path.
+The alpha has no control authentication, TLS termination, TURN service, multi-host scheduler, account system, billing, automatic browser upgrade, Developer ID-signed macOS package, notarized distribution, or public-internet deployment path.
 
-Changes that improve the daily-driver acceptance path belong in the current milestone. Multi-user control, Dex leases, fleet scheduling, and production deployment remain outside it.
+Changes required by the seven-day acceptance path remain in the current milestone. Multi-user control, fleet scheduling, and production deployment remain gated on that acceptance result.
 
 ## Contributing and license
 

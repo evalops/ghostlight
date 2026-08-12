@@ -61,31 +61,29 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
-protocol SessionCreating {
-    func createSession(controlPlaneURL: String) async throws -> CreateSessionResponse
+protocol ViewerDiscovering {
+    func discoverViewer(controlPlaneURL: String) async throws -> ViewerDiscoveryResponse
 }
 
-public final class SessionClient: SessionCreating {
+public final class SessionClient: ViewerDiscovering {
     private let session: URLSession
-    private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     public init(session: URLSession = .shared) {
         self.session = session
-        self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
 
-    public func createSession(controlPlaneURL rawValue: String) async throws -> CreateSessionResponse {
+    public func discoverViewer(controlPlaneURL rawValue: String) async throws -> ViewerDiscoveryResponse {
         do {
             let baseURL = try ControlPlaneURLValidator.validate(rawValue)
-            return try await createSession(at: baseURL)
+            return try await discoverViewer(atValidatedBaseURL: baseURL)
         } catch let error as ControlPlaneURLError {
             throw SessionClientError.invalidControlPlaneURL(error)
         }
     }
 
-    public func createSession(at baseURL: URL) async throws -> CreateSessionResponse {
+    public func discoverViewer(at baseURL: URL) async throws -> ViewerDiscoveryResponse {
         let validatedBaseURL: URL
         do {
             validatedBaseURL = try ControlPlaneURLValidator.validate(baseURL.absoluteString)
@@ -93,15 +91,17 @@ public final class SessionClient: SessionCreating {
             throw SessionClientError.invalidControlPlaneURL(error)
         }
 
+        return try await discoverViewer(atValidatedBaseURL: validatedBaseURL)
+    }
+
+    private func discoverViewer(atValidatedBaseURL validatedBaseURL: URL) async throws -> ViewerDiscoveryResponse {
         var request = URLRequest(
             url: validatedBaseURL
                 .appendingPathComponent("v1")
-                .appendingPathComponent("sessions")
+                .appendingPathComponent("viewer")
         )
-        request.httpMethod = "POST"
+        request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(CreateSessionRequest())
 
         let data: Data
         let response: URLResponse
@@ -121,17 +121,17 @@ public final class SessionClient: SessionCreating {
             throw SessionClientError.mapHTTPFailure(statusCode: httpResponse.statusCode, data: data)
         }
 
-        let sessionResponse: CreateSessionResponse
+        let discoveryResponse: ViewerDiscoveryResponse
         do {
-            sessionResponse = try decoder.decode(CreateSessionResponse.self, from: data)
+            discoveryResponse = try decoder.decode(ViewerDiscoveryResponse.self, from: data)
         } catch {
             throw SessionClientError.responseDecodingFailed
         }
 
-        guard (try? ControlPlaneURLValidator.validate(sessionResponse.viewerURL.absoluteString)) != nil else {
+        guard (try? ControlPlaneURLValidator.validate(discoveryResponse.viewerURL.absoluteString)) != nil else {
             throw SessionClientError.invalidViewerURL
         }
 
-        return sessionResponse
+        return discoveryResponse
     }
 }

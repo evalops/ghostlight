@@ -1,139 +1,121 @@
-# Ghostlight alpha architecture
+# Ghostlight shipped architecture
 
-This document defines the alpha deployment shape and the interfaces shared by the control service, Linux runtime, viewer, and native macOS client.
+This document describes the topology shipped on `2026-08-12`. Ghostlight supports one fixed Chromium profile on one Linux host and one native macOS client on a trusted private network.
 
-The alpha supports one user, one browser session, direct LAN connectivity, and a Docker-based Linux runtime.
-
-## Data flow
+## Topology
 
 ```mermaid
 flowchart LR
-    client["Native macOS client"]
-    control["Control API<br/>TCP :8080"]
-    catalog[("SQLite session catalog")]
-    runtime["Linux runtime<br/>Docker"]
-    profile[("Persistent Chromium profile")]
-    viewer["Viewer and signaling<br/>TCP :8081"]
-    browser["Chromium"]
+    app["Ghostlight.app on macOS"]
+    control["Go control API :8080"]
+    compose["Docker Compose"]
+    viewer["Neko Chromium viewer :8081"]
+    profile[("runtime/data/chromium")]
+    web["Destination websites"]
 
-    client -->|"POST /v1/sessions"| control
-    control -->|"session metadata"| catalog
-    control -->|"start or stop session"| runtime
-    runtime -->|"read and write"| profile
-    runtime --> browser
-    control -->|"viewer_url"| client
-    client -->|"viewer connection"| viewer
-    viewer <-->|"signaling"| runtime
-    runtime -->|"WebRTC media"| client
+    app -->|"GET /v1/viewer"| control
+    control -->|"GET /health"| viewer
+    compose --> control
+    compose --> viewer
+    app <-->|"Neko page, signaling, WebRTC :52000"| viewer
+    viewer <--> profile
+    viewer <--> web
 ```
 
-1. The macOS client sends `POST /v1/sessions` to the control service on TCP port `8080`.
-2. The control service creates a session identifier, writes the session record, and starts the Linux runtime for that identifier.
-3. The runtime starts Chromium with the session's persistent profile directory.
-4. The control service returns the session identifier, a `viewer_url`, and the UTC creation time to the macOS client.
-5. The macOS client connects to the viewer on TCP port `8081` and uses the viewer for connection setup.
-6. The runtime and client complete WebRTC negotiation. Browser media travels from the runtime to the client after negotiation; the control service does not carry browser media.
+Docker Compose starts one Neko Chromium container and one Go control container. The macOS app requests the configured viewer URL from control and loads the Neko web client in `WKWebView`. The Neko client performs viewer authentication, signaling, media transport, and input transport. Chromium requests destination websites from the Linux container. Control carries no website traffic, viewer credentials, signaling, media, or input.
 
-## Components
+## Connection sequence
 
-| Component | Alpha responsibility | Durable state owned by the component |
-| --- | --- | --- |
-| macOS client | Create a session, open the viewer URL, and render the browser stream. | Client preferences selected by the implementation. |
-| Control service | Expose the session API, allocate the runtime, persist session metadata, and return viewer URLs. | The session catalog. |
-| Linux runtime | Run Chromium, expose the viewer/signaling endpoint, and publish the WebRTC stream. | The browser profile volume. |
-| Viewer | Serve the viewer connection and carry signaling messages required to establish the stream. | No required durable state. |
+1. The operator starts the Compose project from the repository root.
+2. Compose starts Neko and waits for a successful response from its `/health` endpoint.
+3. Compose starts control after Neko becomes healthy.
+4. The macOS client sends `GET /v1/viewer` to control.
+5. Control returns the configured `GHOSTLIGHT_VIEWER_URL` without creating a record or contacting Neko.
+6. `WKWebView` loads the returned URL and presents the Neko login page.
+7. After Neko authentication, the embedded Neko client negotiates signaling plus the UDP or TCP WebRTC mux with the viewer container.
+8. Neko sends Chromium video and audio to the Mac and sends client input to Chromium.
 
-The control service is the lifecycle coordinator. The runtime owns browser-process state. The viewer owns connection setup. A component must not write another component's durable store directly.
+The macOS `Viewer loaded` state occurs after step 6 when WebKit reports navigation completion. It is not evidence that steps 7 and 8 completed.
 
-## Trust boundaries
+## State ownership
 
-The following boundaries are part of the alpha design. Implementation work must enforce the controls listed in the final column.
-
-| Boundary | Data crossing the boundary | Alpha trust assumption and required control |
-| --- | --- | --- |
-| macOS client to LAN services | Session requests, session metadata, viewer URL, and signaling traffic | The LAN can contain other hosts. Bind services to the intended private interface, avoid automatic port forwarding, and treat the viewer URL as a bearer capability. |
-| Control service to runtime container | Session lifecycle commands and runtime identifiers | The control service may start and stop the local container. Limit container mounts to the assigned profile and required runtime data. |
-| Chromium to web content | URLs, cookies, local storage, downloads, and page scripts | Web content is untrusted. Keep Chromium inside the runtime container and avoid host mounts beyond the profile and explicitly required data. |
-| Runtime to persistent storage | Chromium profile files and runtime data | The local operator controls the host filesystem. Restrict permissions on profile data and exclude it from source control and diagnostic uploads. |
-| LAN services to external sites | Browser requests initiated by Chromium | A visited site can be malicious. The alpha relies on Chromium and container isolation for this boundary and does not promise host-kernel isolation. |
-
-## LAN threat model
-
-### Attacker capabilities
-
-The alpha assumes an attacker can send packets to the host's LAN addresses and can observe traffic on the local network. The attacker may:
-
-- call the control endpoint and consume a session slot or runtime resources;
-- capture an unencrypted HTTP request or response when the deployment does not add TLS;
-- read a `viewer_url` from captured traffic, logs, or a shared screen;
-- send malformed requests to the control or viewer ports;
-- supply or navigate Chromium to hostile web content; and
-- attempt denial of service against the host or runtime.
-
-### Protected assets
-
-- Chromium cookies, local storage, downloaded files, and active website sessions;
-- the session catalog and its lifecycle records;
-- the host filesystem outside the runtime's assigned data paths; and
-- the availability of the single alpha session.
-
-### Alpha controls
-
-- Generate session identifiers with a cryptographically secure random source and keep them opaque.
-- Treat `viewer_url` as a bearer capability. Do not use it as proof of user identity.
-- Bind the control and viewer services to the intended LAN interface. Do not enable UPnP or automatic internet port forwarding.
-- Keep control requests, viewer URLs, cookies, and profile paths out of routine logs.
-- Apply a one-session limit until multi-session lifecycle and cleanup are implemented.
-- Use the WebRTC transport's authenticated encryption for media when the selected implementation supports it. The control and viewer HTTP paths remain cleartext unless the deployment adds TLS.
-- Treat a container escape or host compromise as outside this boundary. Docker isolation provides containment for the alpha; host security requires separate controls.
-
-An operator must keep the service on a private LAN. Public internet exposure, authentication, and TLS require a separate design and acceptance review.
-
-## Persistence model
-
-| Data | Planned location | Lifecycle | Sensitivity |
+| State | Owner | Location | Lifetime |
 | --- | --- | --- | --- |
-| Session record | `control/ghostlight.db` SQLite file | Created by `POST /v1/sessions`; updated as the session starts or stops; removed by explicit cleanup. | Contains identifiers, timestamps, status, runtime references, and viewer URLs. |
-| Chromium profile | `runtime/data/<session-id>/profile` on a host volume | Created with the session; retained across runtime restarts; removed by explicit session cleanup. | May contain cookies, local storage, history, downloads, and website credentials. |
-| Runtime container | Docker-managed container state | Created when the session starts; removed when the session stops. | Contains active browser process state. |
-| WebRTC negotiation | In-memory runtime and viewer state | Exists only during connection setup and the active stream. | May contain network candidates and connection metadata. |
-| Logs | Process output and deployment-selected log storage | Retention is deployment-controlled. | Must exclude cookies, viewer URLs, and request bodies unless a diagnostic policy explicitly permits them. |
+| Control URL | macOS client | `UserDefaults` | Saved after discovery; removed by **Disconnect**. |
+| Runtime configuration and Neko passwords | Linux operator | `runtime/.env` | Persists until the operator changes or removes the file. |
+| Viewer URL | Control process | `GHOSTLIGHT_VIEWER_URL` environment value | Recreated with the control container. |
+| Chromium browser data | Chromium through Neko | `runtime/data/chromium` bind mount | Persists across container recreation and `docker compose down`. |
+| Neko login and WebRTC connection state | Neko process and embedded client | Process memory | Ends when the viewer or client connection ends. |
+| Container lifecycle state | Docker Compose and Docker Engine | Docker-managed state | Recreated by Compose operations. |
 
-The alpha does not synchronize profiles between hosts. A profile copy or backup must preserve its filesystem permissions and the operator's retention policy.
+The Go service has no session catalog, database, JSON store, or control data volume. A discovery request does not allocate a browser, create a profile, or change container state. All clients that reach the control endpoint receive the same configured viewer URL.
 
-## Shared API and port contract
+## Runtime lifecycle
 
-| Surface | Port | Contract |
-| --- | ---: | --- |
-| Control service | `8080/tcp` | Session lifecycle API. |
-| Viewer | `8081/tcp` | Viewer connection and WebRTC signaling endpoint. |
+Compose owns the two service lifecycles:
 
-### Create a session
+- `docker compose up -d` creates or starts the viewer and control services.
+- `restart: unless-stopped` applies to both containers.
+- Control has `depends_on: viewer: condition: service_healthy`.
+- `docker compose down` removes the containers and Compose network while leaving the host profile directory.
+- The backup script stops the viewer before archiving the profile and leaves it stopped for operator inspection.
 
-`POST /v1/sessions` creates the alpha session and returns HTTP `201 Created` with `application/json`.
+No control API route starts, stops, recreates, or deletes either container.
 
-The response contains these fields:
+## Health contracts
 
-| Field | Type | Meaning |
+| Surface | Meaning | Excluded evidence |
 | --- | --- | --- |
-| `id` | string | Opaque session identifier. |
-| `viewer_url` | string | LAN URL for the viewer on port `8081`. |
-| `created_at` | string | UTC timestamp encoded as RFC 3339. |
+| Control `GET /healthz` | The Go handler answered. | Viewer health, storage, Chromium state, WebRTC, and website state. |
+| Neko `GET /health` | Neko returned an HTTP success response. | macOS reachability, Neko login, WebRTC negotiation, and restored website state. |
+| Control `GET /readyz` | Control reached Neko `/health` and received `2xx` within two seconds. | macOS reachability, Neko login, WebRTC media, and website state. |
+| Runtime smoke script | Control liveness, direct Neko health, control readiness, discovery response, and discovered viewer health succeeded. | Native app launch, Neko login, WebRTC media, Gmail, and seven-day persistence. |
 
-The alpha request has no required JSON fields. A successful response must include all three fields. The `viewer_url` must resolve to the viewer service selected for the session.
+Preflight establishes the storage condition that health endpoints omit. It requires profile mode `700`, rejects a symlink profile path, and uses the pinned Neko image as uid `1000` to create and remove a marker in that directory.
 
-Changes to a field name, field type, port, or path require coordinated updates to the control service, viewer, macOS client, tests, and this document.
+## Storage and backup
+
+The viewer bind-mounts the default host path `runtime/data/chromium` at `/home/neko/.config/chromium`. The managed Chromium policy allows cookies and requests previous-session restoration. Cookies, local storage, browsing and download history, tabs, and site sessions belong to this profile. Downloaded files are outside the mount at `/home/neko/Downloads`.
+
+The profile is the only durable browser store. Container recreation does not copy it, and the control service does not index it. Removing the host path makes its prior browser state unavailable to the next viewer container.
+
+`runtime/bin/profile-backup.sh backup` rejects links and special files in the profile, stops the viewer, and atomically publishes a mode-`600` gzip-compressed tar archive plus SHA-256 sidecar. It leaves the viewer stopped. Restore accepts one archive root containing unique relative regular-file and directory entries. It verifies the checksum, rejects unsafe paths and entry types, extracts through a temporary directory, and renames the result to a new absolute mode-`700` destination. Restore does not overwrite the active profile or change the Compose mount.
+
+## Network boundaries
+
+| Boundary | Data | Shipped control | Remaining exposure |
+| --- | --- | --- | --- |
+| Mac to control `8080/tcp` | Viewer discovery and readiness requests | Ports bind to `GHOSTLIGHT_BIND_ADDRESS`; preflight accepts literal private, link-local, and loopback addresses. | The API has no authentication, TLS, or rate limit. A host with network access can query it. |
+| Mac to Neko `8081/tcp` | Login page, credentials, and signaling | Neko requires the configured user or admin password. | The default viewer URL uses HTTP; the repository supplies no TLS termination. |
+| Mac to Neko `52000/udp,tcp` | Browser media and input | Both mux protocols bind to the selected host address. | Host firewall and NAT configuration determine reachability. The repository supplies no TURN service. |
+| Chromium to websites | Page requests, scripts, cookies, and downloads | Chromium runs in the Neko container with a managed policy and one profile mount. | Website content remains untrusted and can alter browser state within Chromium's permissions. |
+| Viewer to host profile | Browser files | Preflight requires mode `700`, rejects a symlink path, and checks uid-`1000` write access. | A compromised viewer can read and change the mounted profile. |
+| Operator to backups | Archived profile and checksum | Backup and restore reject operator-controlled symlink path components; restore also rejects traversal, links, special files, duplicate entries, and existing destinations. | Archive contents include active website credentials and require operator-controlled storage. |
+
+`GHOSTLIGHT_BIND_ADDRESS`, `GHOSTLIGHT_VIEWER_URL`, `GHOSTLIGHT_VIEWER_HEALTH_URL`, and `NEKO_WEBRTC_NAT1TO1` are separate settings. Preflight requires the client-facing viewer URL host and advertised NAT address to match and limits the bind value to literal private, link-local, and loopback ranges. Compose defaults the health target to the internal `viewer:8080` service name so readiness does not confuse a container-local loopback address with the client-facing viewer address. The runtime does not confirm local interface assignment, configure a firewall, enable TLS, or configure NAT.
+
+## Image selection
+
+The Neko Chromium image is selected by a digest-pinned `NEKO_IMAGE` value mirrored in the environment example, Compose fallback, and runtime test. The control image is built locally from digest-pinned Go and Alpine base images. Repository checks reject inconsistent Neko pins, mutable Docker bases, and GitHub Actions without full commit SHAs.
+
+The weekly or manually dispatched browser-update workflow resolves candidate tags to immutable digests in a read-scoped job. It updates only the Neko mirror files and `control/Dockerfile`, builds control, runs runtime and backup checks, recreates the live synthetic Linux persistence stack, and scans Neko plus control for fixed `HIGH` and `CRITICAL` findings. Receipt artifacts are retained for 30 days. A separate write-scoped job opens a unique update pull request only after the candidate job succeeds. Required review, protected checks, and merge remain outside the automation.
+
+Changing a committed digest affects the browser or control runtime after the next image pull, build, or container recreation. The repository performs no unattended merge or host rollout.
+
+## Acceptance boundary
+
+The dated Linux receipt uses synthetic loopback pages and test-only Chromium instrumentation to show profile persistence through one Compose recreation. The live Linux harness adds loopback CDP plus a synthetic page server through a temporary Compose override, then checks tab, cookie, and local-storage restoration after both containers receive new IDs. These fixtures are absent from the shipped runtime Compose model.
+
+The macOS relaunch tool launches the packaged app with a synthetic control URL, waits for `Viewer loaded` through Accessibility, captures a screenshot, quits, and relaunches without the environment URL. Reaching `Viewer loaded` again exercises saved-URL discovery and WebKit navigation. It does not inspect authenticated Neko state or decoded media frames.
+
+The streaming tool authenticates to a running Neko viewer and records WebRTC statistics for the negotiated stream, a keyboard-dispatch-to-presented-frame approximation, container statistics, and Neko pipeline logs. A requested H.264 preference is measurement-only and does not change the runtime configuration. The repository keeps the pinned default pending paired codec receipts and a native WKWebView decoding receipt.
+
+On `2026-08-12`, the improvement Linux lane failed before recreation because Chromium 151 target-scoped `Runtime.evaluate` timed out through the committed CDP proxy. The macOS improvement lane failed before its semantic assertion because the runner received no Accessibility response. Both lanes published provenance or failure transcripts without passing screenshots. The VP8 performance lane completed with 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, a 72.43 ms browser-dispatch-to-presented-frame sample, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB.
+
+The backup shell tests use synthetic cookie, tab, and local-storage fixtures. None of these checks establishes Gmail persistence, sleep/wake recovery, or seven consecutive days of use.
 
 ## Explicit non-goals
 
-The alpha does not include:
+The shipped alpha has no multi-user scheduler, Dex control lease, public-internet deployment, TLS termination, control authentication, TURN service, profile synchronization, browser recording, automatic browser update, Developer ID-signed app, notarized distribution, or host-failover path.
 
-- public internet deployment or automatic port forwarding;
-- user authentication, authorization, or TLS termination;
-- more than one user or more than one active browser session;
-- profile synchronization between machines;
-- high availability, failover, or distributed scheduling;
-- an enterprise browser policy, compliance report, or audit service;
-- host-kernel isolation guarantees beyond the selected container and browser controls;
-- browser recording, replay, or media storage; or
-- automatic third-party license inventory generation.
+The seven-day daily-driver gate requires one successful close-and-reopen check and one successful Compose-restart check on each of seven consecutive days. Dex control-lease design and implementation start after that gate passes. Compose remains the lifecycle owner until a reviewed Dex design, migration, and acceptance receipt replace this architecture.

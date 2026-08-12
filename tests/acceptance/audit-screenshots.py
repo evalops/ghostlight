@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Reject screenshot metadata and obvious credential or address markers."""
+
+from __future__ import annotations
+
+import re
+import struct
+import sys
+from pathlib import Path
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+BLOCKED_CHUNKS = {b"tEXt", b"zTXt", b"iTXt", b"eXIf"}
+IPV4_PATTERN = re.compile(rb"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])")
+SECRET_PATTERN = re.compile(
+    rb"(?:__GENERATE_AT_INSTALL__|NEKO_[A-Z0-9_]+|GHOSTLIGHT_(?:VIEWER|CONTROL|USER|ADMIN)[A-Z0-9_]*|"
+    rb"(?:password|passwd|secret|api[ _-]?key|authorization))",
+    re.IGNORECASE,
+)
+
+
+def audit_png(path: Path) -> list[str]:
+    data = path.read_bytes()
+    failures: list[str] = []
+    if data[:8] != PNG_SIGNATURE:
+        return ["not a PNG"]
+
+    offset = 8
+    saw_iend = False
+    while offset + 12 <= len(data):
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        chunk_type = data[offset + 4 : offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            failures.append("truncated chunk")
+            break
+        if chunk_type in BLOCKED_CHUNKS:
+            failures.append(f"metadata chunk {chunk_type.decode('ascii')}")
+        offset = end
+        if chunk_type == b"IEND":
+            saw_iend = True
+            break
+
+    if not saw_iend:
+        failures.append("missing IEND chunk")
+    visible_markers = b"\n".join(
+        part for part in re.findall(rb"[ -~]{4,}", data) if part
+    )
+    if SECRET_PATTERN.search(visible_markers):
+        failures.append("credential marker")
+    for match in IPV4_PATTERN.finditer(visible_markers):
+        if match.group(0) != b"127.0.0.1":
+            failures.append(f"address marker {match.group(0).decode('ascii')}")
+            break
+    return failures
+
+
+def main() -> int:
+    paths = [Path(value) for value in sys.argv[1:]]
+    if not paths:
+        print(f"usage: {Path(sys.argv[0]).name} <png> [<png> ...]", file=sys.stderr)
+        return 2
+
+    failures = 0
+    for path in paths:
+        if not path.is_file():
+            print(f"{path}: file does not exist", file=sys.stderr)
+            failures += 1
+            continue
+        errors = audit_png(path)
+        if errors:
+            print(f"{path}: {', '.join(errors)}", file=sys.stderr)
+            failures += 1
+
+    if failures:
+        print(f"screenshot privacy audit failed for {failures} file(s)", file=sys.stderr)
+        return 1
+    print(f"screenshot privacy audit passed for {len(paths)} PNG file(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

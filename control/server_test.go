@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
-	"path/filepath"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,10 +21,18 @@ func TestValidateViewerURL(t *testing.T) {
 	}{
 		{name: "http", url: "http://localhost:3000", want: true},
 		{name: "https with path", url: "https://viewer.example.test/session", want: true},
+		{name: "https with query", url: "https://viewer.example.test/session?mode=control", want: true},
+		{name: "ipv6 host", url: "http://[::1]:3000", want: true},
 		{name: "missing", url: "", want: false},
 		{name: "relative", url: "/viewer", want: false},
+		{name: "protocol relative", url: "//viewer.example.test", want: false},
 		{name: "unsupported scheme", url: "ftp://viewer.example.test", want: false},
 		{name: "missing host", url: "https:///session", want: false},
+		{name: "empty hostname", url: "https://:443/session", want: false},
+		{name: "malformed port", url: "https://viewer.example.test:not-a-port", want: false},
+		{name: "credentials", url: "https://user:password@viewer.example.test", want: false},
+		{name: "fragment", url: "https://viewer.example.test/#viewer", want: false},
+		{name: "control character", url: "https://viewer.example.test/\nhealth", want: false},
 	}
 
 	for _, tt := range tests {
@@ -48,8 +56,8 @@ func TestLoadConfigRequiresAndValidatesViewerURL(t *testing.T) {
 	}
 
 	t.Setenv("GHOSTLIGHT_VIEWER_URL", "https://viewer.example.test")
-	t.Setenv("GHOSTLIGHT_STORE_PATH", "")
-	t.Setenv("GHOSTLIGHT_LISTEN_ADDR", "")
+	t.Setenv("GHOSTLIGHT_VIEWER_HEALTH_URL", "http://viewer:8080")
+	t.Setenv("GHOSTLIGHT_LISTEN_ADDR", " 127.0.0.1:9090 ")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig() with valid viewer URL error = %v", err)
@@ -57,11 +65,45 @@ func TestLoadConfigRequiresAndValidatesViewerURL(t *testing.T) {
 	if cfg.ViewerURL != "https://viewer.example.test" {
 		t.Fatalf("ViewerURL = %q", cfg.ViewerURL)
 	}
+	if cfg.ViewerHealthURL != "http://viewer:8080" {
+		t.Fatalf("ViewerHealthURL = %q", cfg.ViewerHealthURL)
+	}
+	if cfg.ListenAddr != "127.0.0.1:9090" {
+		t.Fatalf("ListenAddr = %q, want custom address", cfg.ListenAddr)
+	}
+
+	t.Setenv("GHOSTLIGHT_LISTEN_ADDR", "")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() with default listen address error = %v", err)
+	}
 	if cfg.ListenAddr != defaultListenAddr {
 		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, defaultListenAddr)
 	}
-	if cfg.StorePath != defaultStorePath {
-		t.Fatalf("StorePath = %q, want %q", cfg.StorePath, defaultStorePath)
+
+	t.Setenv("GHOSTLIGHT_VIEWER_HEALTH_URL", "")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() with omitted health URL error = %v", err)
+	}
+	if cfg.ViewerHealthURL != cfg.ViewerURL {
+		t.Fatalf("ViewerHealthURL = %q, want discovery URL fallback %q", cfg.ViewerHealthURL, cfg.ViewerURL)
+	}
+
+	t.Setenv("GHOSTLIGHT_VIEWER_HEALTH_URL", "file:///tmp/viewer")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("loadConfig() with invalid health URL returned nil error")
+	}
+}
+
+func TestHealthURLUsesViewerOriginAndOfficialPath(t *testing.T) {
+	if got, want := healthURL("https://viewer.example.test:8443/viewer/path?token=value"), "https://viewer.example.test:8443/health"; got != want {
+		t.Fatalf("healthURL() = %q, want %q", got, want)
+	}
+	for _, raw := range []string{"", "/viewer", "file:///tmp/viewer", "https://user@viewer.example.test"} {
+		if got := healthURL(raw); got != "" {
+			t.Fatalf("healthURL(%q) = %q, want empty URL", raw, got)
+		}
 	}
 }
 
@@ -81,285 +123,390 @@ func TestHTTPServerTimeouts(t *testing.T) {
 	}
 }
 
-func TestHTTPIntegrationLifecycle(t *testing.T) {
-	server := newIntegrationServer(t)
-	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/healthz")
-	if err != nil {
-		t.Fatalf("GET /healthz error = %v", err)
+func TestViewerDiscoveryIsStatelessAndIdempotent(t *testing.T) {
+	handler := NewHandler("https://viewer.example.test")
+	responses := make([]string, 2)
+	for i := range responses {
+		response := execute(t, handler, http.MethodGet, viewerDiscoveryPath, nil, "")
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d", viewerDiscoveryPath, response.StatusCode, http.StatusOK)
+		}
+		assertJSONContentType(t, response)
+		var payload map[string]any
+		decodeResponse(t, response, &payload)
+		if payload["viewer_url"] != "https://viewer.example.test" {
+			t.Fatalf("viewer_url = %v, want configured URL", payload["viewer_url"])
+		}
+		if _, exists := payload["id"]; exists {
+			t.Fatal("stateless discovery returned an id")
+		}
+		if _, exists := payload["created_at"]; exists {
+			t.Fatal("stateless discovery returned created_at")
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal discovery response: %v", err)
+		}
+		responses[i] = string(encoded)
 	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("GET /healthz status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	assertJSONContentType(t, resp)
-	var health map[string]string
-	decodeResponse(t, resp, &health)
-	if health["status"] != "ok" {
-		t.Fatalf("health status = %q, want %q", health["status"], "ok")
-	}
-
-	resp = doRequest(t, http.MethodPost, server.URL+"/v1/sessions", nil, "")
-	if resp.StatusCode != http.StatusCreated {
-		resp.Body.Close()
-		t.Fatalf("POST /v1/sessions with empty body status = %d, want %d", resp.StatusCode, http.StatusCreated)
-	}
-	var optionalBodySession Session
-	decodeResponse(t, resp, &optionalBodySession)
-	if optionalBodySession.ViewerURL != "https://viewer.example.test" {
-		t.Fatalf("empty-body session viewer URL = %q, want %q", optionalBodySession.ViewerURL, "https://viewer.example.test")
-	}
-
-	resp = doJSONRequest(t, http.MethodPost, server.URL+"/v1/sessions", `{"profile":"default"}`)
-	if resp.StatusCode != http.StatusCreated {
-		resp.Body.Close()
-		t.Fatalf("POST /v1/sessions status = %d, want %d", resp.StatusCode, http.StatusCreated)
-	}
-	assertJSONContentType(t, resp)
-	var want Session
-	decodeResponse(t, resp, &want)
-	if want.ID == "" || want.ViewerURL != "https://viewer.example.test" || want.CreatedAt.IsZero() {
-		t.Fatalf("POST /v1/sessions returned incomplete session: %#v", want)
+	if responses[0] != responses[1] {
+		t.Fatalf("discovery changed between calls: %q != %q", responses[0], responses[1])
 	}
 
-	resp, err = http.Get(server.URL + "/v1/sessions/" + want.ID)
-	if err != nil {
-		t.Fatalf("GET session error = %v", err)
+	response := execute(t, handler, http.MethodPost, "/v1/sessions", strings.NewReader(`{}`), "application/json")
+	if response.StatusCode != http.StatusNotFound {
+		response.Body.Close()
+		t.Fatalf("removed session route status = %d, want %d", response.StatusCode, http.StatusNotFound)
 	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("GET session status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	var got Session
-	decodeResponse(t, resp, &got)
-	if got != want {
-		t.Fatalf("GET session = %#v, want %#v", got, want)
-	}
-
-	req, err := http.NewRequest(http.MethodDelete, server.URL+"/v1/sessions/"+want.ID, nil)
-	if err != nil {
-		t.Fatalf("construct DELETE request: %v", err)
-	}
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("DELETE session error = %v", err)
-	}
-	if resp.StatusCode != http.StatusNoContent {
-		resp.Body.Close()
-		t.Fatalf("DELETE session status = %d, want %d", resp.StatusCode, http.StatusNoContent)
-	}
-	resp.Body.Close()
-
-	resp, err = http.Get(server.URL + "/v1/sessions/" + want.ID)
-	if err != nil {
-		t.Fatalf("GET deleted session error = %v", err)
-	}
-	if resp.StatusCode != http.StatusNotFound {
-		resp.Body.Close()
-		t.Fatalf("GET deleted session status = %d, want %d", resp.StatusCode, http.StatusNotFound)
-	}
-	assertErrorResponse(t, resp, "session_not_found")
+	assertErrorResponse(t, response, "not_found")
 }
 
-func TestHTTPIntegrationValidationAndNotFound(t *testing.T) {
-	server := newIntegrationServer(t)
-	defer server.Close()
+func TestReadinessUsesOfficialViewerHealthEndpoint(t *testing.T) {
+	var healthy atomic.Bool
+	healthy.Store(true)
+	var observedPath atomic.Value
+	var observedQuery atomic.Value
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		observedPath.Store(r.URL.Path)
+		observedQuery.Store(r.URL.RawQuery)
+		status := http.StatusOK
+		if r.URL.Path != viewerHealthPath {
+			status = http.StatusNotFound
+		} else if !healthy.Load() {
+			status = http.StatusServiceUnavailable
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})}
+	handler := newHandler("https://viewer.example.test/viewer?token=value", client)
 
-	resp := doRequest(t, http.MethodPost, server.URL+"/v1/sessions", strings.NewReader(`{}`), "text/plain")
-	if resp.StatusCode != http.StatusUnsupportedMediaType {
-		resp.Body.Close()
-		t.Fatalf("wrong content type status = %d, want %d", resp.StatusCode, http.StatusUnsupportedMediaType)
+	response := execute(t, handler, http.MethodGet, readinessPath, nil, "")
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("ready response status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
-	assertErrorResponse(t, resp, "unsupported_media_type")
+	response.Body.Close()
+	if got := observedPath.Load(); got != viewerHealthPath {
+		t.Fatalf("viewer health path = %v, want %q", got, viewerHealthPath)
+	}
+	if got := observedQuery.Load(); got != "" {
+		t.Fatalf("viewer health query = %v, want empty query", got)
+	}
 
-	resp = doRequest(t, http.MethodPost, server.URL+"/v1/sessions", strings.NewReader(`{"unterminated":`), "application/json")
-	if resp.StatusCode != http.StatusBadRequest {
-		resp.Body.Close()
-		t.Fatalf("invalid JSON status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	healthy.Store(false)
+	response = execute(t, handler, http.MethodGet, readinessPath, nil, "")
+	if response.StatusCode != http.StatusServiceUnavailable {
+		response.Body.Close()
+		t.Fatalf("unhealthy ready response status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
 	}
-	assertErrorResponse(t, resp, "invalid_json")
+	assertErrorResponse(t, response, "viewer_unavailable")
 
-	resp = doRequest(t, http.MethodPost, server.URL+"/v1/sessions", strings.NewReader(`[]`), "application/json")
-	if resp.StatusCode != http.StatusBadRequest {
-		resp.Body.Close()
-		t.Fatalf("non-object JSON status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	response = execute(t, handler, http.MethodGet, healthPath, nil, "")
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("liveness status = %d, want %d while viewer is unhealthy", response.StatusCode, http.StatusOK)
 	}
-	assertErrorResponse(t, resp, "invalid_json")
-
-	resp = doRequest(t, http.MethodPost, server.URL+"/v1/sessions", strings.NewReader(strings.Repeat("x", int(maxRequestBodyBytes)+1)), "application/json")
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		resp.Body.Close()
-		t.Fatalf("oversized JSON status = %d, want %d", resp.StatusCode, http.StatusRequestEntityTooLarge)
-	}
-	assertErrorResponse(t, resp, "request_too_large")
-
-	resp = doRequest(t, http.MethodGet, server.URL+"/v1/sessions/missing", nil, "")
-	if resp.StatusCode != http.StatusNotFound {
-		resp.Body.Close()
-		t.Fatalf("missing session status = %d, want %d", resp.StatusCode, http.StatusNotFound)
-	}
-	assertErrorResponse(t, resp, "session_not_found")
-
-	resp = doRequest(t, http.MethodGet, server.URL+"/healthz", nil, "")
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("GET /healthz status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodPost, server.URL+"/healthz", nil, "")
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		resp.Body.Close()
-		t.Fatalf("POST /healthz status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
-	}
-	assertErrorResponse(t, resp, "method_not_allowed")
+	response.Body.Close()
 }
 
-func TestHTTPIntegrationConcurrentCreate(t *testing.T) {
-	server := newIntegrationServer(t)
-	defer server.Close()
+func TestReadinessCanUseInternalHealthURLWithoutChangingDiscovery(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "http://viewer:8080/health" {
+			t.Fatalf("health request URL = %q, want internal viewer health URL", r.URL.String())
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header), Request: r}, nil
+	})}
+	handler := newHandlerWithHealthURL("http://192.0.2.10:8081", "http://viewer:8080", client)
 
+	ready := execute(t, handler, http.MethodGet, readinessPath, nil, "")
+	if ready.StatusCode != http.StatusOK {
+		ready.Body.Close()
+		t.Fatalf("internal health readiness = %d, want %d", ready.StatusCode, http.StatusOK)
+	}
+	ready.Body.Close()
+
+	discovered := execute(t, handler, http.MethodGet, viewerDiscoveryPath, nil, "")
+	if discovered.StatusCode != http.StatusOK {
+		discovered.Body.Close()
+		t.Fatalf("discovery status = %d, want %d", discovered.StatusCode, http.StatusOK)
+	}
+	var payload map[string]string
+	decodeResponse(t, discovered, &payload)
+	if payload["viewer_url"] != "http://192.0.2.10:8081" {
+		t.Fatalf("discovered viewer URL = %q, want external URL", payload["viewer_url"])
+	}
+}
+
+func TestReadinessMapsFailuresAndCanRecover(t *testing.T) {
+	var healthy atomic.Bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != viewerHealthPath {
+			return responseWithStatus(r, http.StatusNotFound), nil
+		}
+		if !healthy.Load() {
+			return responseWithStatus(r, http.StatusServiceUnavailable), nil
+		}
+		return responseWithStatus(r, http.StatusNoContent), nil
+	})}
+	handler := newHandler("https://viewer.example.test/viewer", client)
+	response := execute(t, handler, http.MethodGet, readinessPath, nil, "")
+	if response.StatusCode != http.StatusServiceUnavailable {
+		response.Body.Close()
+		t.Fatalf("starting viewer readiness = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	assertErrorResponse(t, response, "viewer_unavailable")
+
+	healthy.Store(true)
+	response = execute(t, handler, http.MethodGet, readinessPath, nil, "")
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("recovered viewer readiness = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	var payload map[string]string
+	decodeResponse(t, response, &payload)
+	if payload["status"] != "ok" || payload["viewer"] != "ready" {
+		t.Fatalf("recovered readiness payload = %#v", payload)
+	}
+}
+
+func TestReadinessFailureMapping(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.Handler
+	}{
+		{name: "invalid viewer URL", handler: newHandler("not-a-url", http.DefaultClient)},
+		{name: "nil client", handler: newHandler("https://viewer.example.test", nil)},
+		{name: "transport error", handler: newHandler("https://viewer.example.test", &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("dial failed")
+		})})},
+		{name: "redirect status", handler: newHandler("https://viewer.example.test", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return responseWithStatus(r, http.StatusTemporaryRedirect), nil
+		})})},
+		{name: "server error status", handler: newHandler("https://viewer.example.test", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return responseWithStatus(r, http.StatusInternalServerError), nil
+		})})},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := execute(t, tt.handler, http.MethodGet, readinessPath, nil, "")
+			if response.StatusCode != http.StatusServiceUnavailable {
+				response.Body.Close()
+				t.Fatalf("readiness status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+			}
+			assertErrorResponse(t, response, "viewer_unavailable")
+		})
+	}
+}
+
+func TestReadinessDoesNotFollowRedirects(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		redirectedRequests.Add(1)
+		return responseWithStatus(r, http.StatusTemporaryRedirect), nil
+	})}
+	response := execute(t, newHandler("https://viewer.example.test", client), http.MethodGet, readinessPath, nil, "")
+	if response.StatusCode != http.StatusServiceUnavailable {
+		response.Body.Close()
+		t.Fatalf("redirecting viewer readiness = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	assertErrorResponse(t, response, "viewer_unavailable")
+	if got := redirectedRequests.Load(); got != 1 {
+		t.Fatalf("readiness sent %d health requests, want 1 without following redirect", got)
+	}
+}
+
+func TestReadinessProbeHasIndependentTimeout(t *testing.T) {
+	started := make(chan struct{})
+	var startOnce sync.Once
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		startOnce.Do(func() { close(started) })
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+
+	handler := newHandler("https://viewer.example.test", client)
+	handler.viewerTimeout = 75 * time.Millisecond
+	start := time.Now()
+	response := execute(t, handler, http.MethodGet, readinessPath, nil, "")
+	if response.StatusCode != http.StatusServiceUnavailable {
+		response.Body.Close()
+		t.Fatalf("timed out readiness = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	assertErrorResponse(t, response, "viewer_unavailable")
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("readiness timeout took %s, want less than 1s", elapsed)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("viewer health endpoint was not contacted")
+	}
+}
+
+func TestHTTPIntegrationValidationAndMethods(t *testing.T) {
+	handler := NewHandler("https://viewer.example.test")
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodHead, http.MethodOptions} {
+		for _, path := range []string{healthPath, readinessPath, viewerDiscoveryPath} {
+			response := execute(t, handler, method, path, nil, "")
+			if response.StatusCode != http.StatusMethodNotAllowed {
+				response.Body.Close()
+				t.Fatalf("%s %s status = %d, want %d", method, path, response.StatusCode, http.StatusMethodNotAllowed)
+			}
+			if got := response.Header.Get("Allow"); got != http.MethodGet {
+				response.Body.Close()
+				t.Fatalf("%s %s Allow = %q, want %q", method, path, got, http.MethodGet)
+			}
+			assertErrorResponse(t, response, "method_not_allowed")
+		}
+	}
+
+	response := execute(t, handler, http.MethodGet, "/v1/sessions/missing", nil, "")
+	if response.StatusCode != http.StatusNotFound {
+		response.Body.Close()
+		t.Fatalf("removed session route status = %d, want %d", response.StatusCode, http.StatusNotFound)
+	}
+	assertErrorResponse(t, response, "not_found")
+}
+
+func TestConcurrentReadiness(t *testing.T) {
+	var probes atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		probes.Add(1)
+		return responseWithStatus(r, http.StatusNoContent), nil
+	})}
+	handler := newHandler("https://viewer.example.test", client)
 	const count = 32
-	ids := make(chan string, count)
+	errCh := make(chan error, count)
+	var wg sync.WaitGroup
+	for range count {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			response := execute(t, handler, http.MethodGet, readinessPath, nil, "")
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				errCh <- errors.New("concurrent readiness returned non-200 status")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	if got := probes.Load(); got != count {
+		t.Fatalf("viewer probes = %d, want %d", got, count)
+	}
+}
+
+func TestShutdownHTTPServerIsBounded(t *testing.T) {
+	server := newHTTPServer(http.NotFoundHandler())
+	if err := shutdownHTTPServer(server); err != nil {
+		t.Fatalf("shutdownHTTPServer() error = %v", err)
+	}
+}
+
+func TestHTTPIntegrationConcurrentDiscovery(t *testing.T) {
+	handler := NewHandler("https://viewer.example.test")
+	const count = 32
+	responses := make(chan string, count)
 	errs := make(chan error, count)
 	var wg sync.WaitGroup
 	for i := 0; i < count; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := doJSONRequestWithClient(server.Client(), http.MethodPost, server.URL+"/v1/sessions", `{}`)
-			if err != nil {
+			response := execute(t, handler, http.MethodGet, viewerDiscoveryPath, nil, "")
+			if response.StatusCode != http.StatusOK {
+				response.Body.Close()
+				errs <- errors.New("concurrent discovery returned non-200 status")
+				return
+			}
+			var payload struct {
+				ViewerURL string `json:"viewer_url"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				response.Body.Close()
 				errs <- err
 				return
 			}
-			if resp.StatusCode != http.StatusCreated {
-				resp.Body.Close()
-				errs <- errors.New("concurrent create returned non-201 status")
-				return
-			}
-			var session Session
-			if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
-				resp.Body.Close()
-				errs <- err
-				return
-			}
-			resp.Body.Close()
-			ids <- session.ID
+			response.Body.Close()
+			responses <- payload.ViewerURL
 		}()
 	}
 	wg.Wait()
-	close(ids)
+	close(responses)
 	close(errs)
 
 	for err := range errs {
-		t.Fatalf("concurrent HTTP create error = %v", err)
+		t.Fatalf("concurrent discovery error = %v", err)
 	}
-	seen := make(map[string]struct{}, count)
-	for id := range ids {
-		if _, exists := seen[id]; exists {
-			t.Fatalf("duplicate HTTP session id %q", id)
+	counted := 0
+	for discoveredURL := range responses {
+		counted++
+		if discoveredURL != "https://viewer.example.test" {
+			t.Fatalf("concurrent viewer_url = %q, want configured URL", discoveredURL)
 		}
-		seen[id] = struct{}{}
 	}
-	if len(seen) != count {
-		t.Fatalf("created %d HTTP sessions, want %d", len(seen), count)
+	if counted != count {
+		t.Fatalf("received %d discovery responses, want %d", counted, count)
 	}
 }
 
-type integrationServer struct {
-	URL    string
-	server *http.Server
-	done   chan error
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
-func (s *integrationServer) Client() *http.Client {
-	return http.DefaultClient
+func responseWithStatus(request *http.Request, status int) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+		Request:    request,
+	}
 }
 
-func (s *integrationServer) Close() {
-	_ = s.server.Close()
-	<-s.done
-}
-
-func newIntegrationServer(t *testing.T) *integrationServer {
+func execute(t *testing.T, handler http.Handler, method, path string, body io.Reader, contentType string) *http.Response {
 	t.Helper()
-	store, err := NewFileStore(filepath.Join(t.TempDir(), "sessions.json"))
-	if err != nil {
-		t.Fatalf("NewFileStore() error = %v", err)
-	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for integration server: %v", err)
-	}
-	server := newHTTPServer(NewHandler(store, "https://viewer.example.test"))
-	done := make(chan error, 1)
-	go func() {
-		done <- server.Serve(listener)
-	}()
-	return &integrationServer{
-		URL:    "http://" + listener.Addr().String(),
-		server: server,
-		done:   done,
-	}
-}
-
-func doJSONRequest(t *testing.T, method, url, body string) *http.Response {
-	t.Helper()
-	resp, err := doRequestWithClient(http.DefaultClient, method, url, strings.NewReader(body), "application/json")
-	if err != nil {
-		t.Fatalf("%s %s error = %v", method, url, err)
-	}
-	return resp
-}
-
-func doJSONRequestWithClient(client *http.Client, method, url, body string) (*http.Response, error) {
-	return doRequestWithClient(client, method, url, strings.NewReader(body), "application/json")
-}
-
-func doRequest(t *testing.T, method, url string, body io.Reader, contentType string) *http.Response {
-	t.Helper()
-	resp, err := doRequestWithClient(http.DefaultClient, method, url, body, contentType)
-	if err != nil {
-		t.Fatalf("%s %s error = %v", method, url, err)
-	}
-	return resp
-}
-
-func doRequestWithClient(client *http.Client, method, url string, body io.Reader, contentType string) (*http.Response, error) {
-	req, err := http.NewRequest(method, url, body)
-	if err != nil {
-		return nil, err
-	}
+	request := httptest.NewRequest(method, "http://ghostlight.test"+path, body)
 	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
+		request.Header.Set("Content-Type", contentType)
 	}
-	return client.Do(req)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder.Result()
 }
 
-func decodeResponse(t *testing.T, resp *http.Response, target any) {
+func decodeResponse(t *testing.T, response *http.Response, target any) {
 	t.Helper()
-	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+	defer response.Body.Close()
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 }
 
-func assertJSONContentType(t *testing.T, resp *http.Response) {
+func assertJSONContentType(t *testing.T, response *http.Response) {
 	t.Helper()
-	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
-		resp.Body.Close()
+	if got := response.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		response.Body.Close()
 		t.Fatalf("Content-Type = %q, want application/json", got)
 	}
 }
 
-func assertErrorResponse(t *testing.T, resp *http.Response, wantCode string) {
+func assertErrorResponse(t *testing.T, response *http.Response, wantCode string) {
 	t.Helper()
-	assertJSONContentType(t, resp)
+	assertJSONContentType(t, response)
 	var got struct {
 		Error APIError `json:"error"`
 	}
-	decodeResponse(t, resp, &got)
+	decodeResponse(t, response, &got)
 	if got.Error.Code != wantCode {
 		t.Fatalf("error code = %q, want %q", got.Error.Code, wantCode)
 	}

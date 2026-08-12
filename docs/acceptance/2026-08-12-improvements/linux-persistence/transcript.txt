@@ -1,0 +1,114 @@
+captured_utc=2026-08-12T15:49:50Z
+source_sha=working-tree-20260812T1710Z
+project=ghostlight_improvements_20260812 control_port=28080 viewer_port=28081 webrtc_port=52080 cdp_port=29280
+marker=synthetic-20260812T154950Z
+docker_server=29.1.3
+Docker Compose version v2.40.3
+v22.22.0
+11.18.0
+
+added 2 packages, and audited 3 packages in 526ms
+
+found 0 vulnerabilities
+preflight passed: explicit bind address, private environment permissions, Compose config, viewer URL alignment, and uid 1000 profile write access
+time="2026-08-12T08:49:51-07:00" level=warning msg="COMPOSE_BAKE=false is deprecated, support for internal compose builder will be removed in next release"
+#0 building with "homelab-insecure" instance using docker-container driver
+
+#1 [control internal] load build definition from Dockerfile
+#1 transferring dockerfile: 806B done
+#1 DONE 0.0s
+
+#2 [control internal] load metadata for docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+#2 DONE 0.0s
+
+#3 [control internal] load metadata for docker.io/library/golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56
+#3 DONE 0.0s
+
+#4 [control internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [control stage-1 1/3] FROM docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+#5 resolve docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce 0.0s done
+#5 DONE 0.0s
+
+#6 [control build 1/5] FROM docker.io/library/golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56
+#6 resolve docker.io/library/golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56 0.0s done
+#6 DONE 0.0s
+
+#7 [control internal] load build context
+#7 transferring context: 214B done
+#7 DONE 0.0s
+
+#8 [control build 3/5] COPY go.mod ./
+#8 CACHED
+
+#9 [control build 2/5] WORKDIR /src
+#9 CACHED
+
+#10 [control build 4/5] COPY *.go ./
+#10 CACHED
+
+#11 [control build 5/5] RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ghostlight-control .
+#11 CACHED
+
+#12 [control stage-1 2/3] RUN apk add --no-cache wget     && addgroup -S ghostlight     && adduser -S -G ghostlight ghostlight
+#12 CACHED
+
+#13 [control stage-1 3/3] COPY --from=build /out/ghostlight-control /usr/local/bin/ghostlight-control
+#13 CACHED
+
+#14 [control] importing to docker
+#14 DONE 0.0s
+
+#15 [control] exporting to docker image format
+#15 exporting layers done
+#15 exporting manifest sha256:24e73f6c0fd6ea40864bd83210e726e7b40ac73151f206b5d6bccd0219760cca done
+#15 exporting config sha256:837705a8527aef702c841392591852f1011b94a48a5b7755a2597d2f77ebdcf3 done
+#15 sending tarball 0.1s done
+#15 DONE 0.1s
+
+#16 [control] resolving provenance for metadata file
+#16 DONE 0.0s
+ control  Built
+ Network ghostlight_improvements_20260812_default  Creating
+ Network ghostlight_improvements_20260812_default  Created
+ Container ghostlight_improvements_20260812-viewer-1  Creating
+ Container ghostlight_improvements_20260812-viewer-1  Created
+ Container ghostlight_improvements_20260812-control-1  Creating
+ Container ghostlight_improvements_20260812-control-1  Created
+ Container ghostlight_improvements_20260812-viewer-1  Starting
+ Container ghostlight_improvements_20260812-viewer-1  Started
+ Container ghostlight_improvements_20260812-viewer-1  Waiting
+ Container ghostlight_improvements_20260812-viewer-1  Healthy
+ Container ghostlight_improvements_20260812-control-1  Starting
+ Container ghostlight_improvements_20260812-control-1  Started
+{
+   "Browser": "Chrome/151.0.7922.71",
+   "Protocol-Version": "1.3",
+   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "V8-Version": "15.1.206.10",
+   "WebKit-Version": "537.36 (@ef35003457e93c278f911a334b06e4a5f8967e06)",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:29280/devtools/browser/37fe9e2c-45b1-4a37-9140-1b14aaa137dc"
+}
+
+tests/acceptance/persistence.mjs:27
+    const timer = setTimeout(() => reject(new Error(`CDP ${method} timed out`)), 15000);
+                                          ^
+
+Error: CDP Runtime.evaluate timed out
+    at Timeout._onTimeout (tests/acceptance/persistence.mjs:27:43)
+    at listOnTimeout (node:internal/timers:588:17)
+    at process.processTimers (node:internal/timers:523:7)
+
+Node.js v22.22.0
+ Container ghostlight_improvements_20260812-control-1  Stopping
+ Container ghostlight_improvements_20260812-control-1  Stopped
+ Container ghostlight_improvements_20260812-control-1  Removing
+ Container ghostlight_improvements_20260812-control-1  Removed
+ Container ghostlight_improvements_20260812-viewer-1  Stopping
+ Container ghostlight_improvements_20260812-viewer-1  Stopped
+ Container ghostlight_improvements_20260812-viewer-1  Removing
+ Container ghostlight_improvements_20260812-viewer-1  Removed
+ Network ghostlight_improvements_20260812_default  Removing
+ Network ghostlight_improvements_20260812_default  Removed

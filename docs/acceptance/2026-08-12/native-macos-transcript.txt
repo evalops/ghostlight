@@ -1,0 +1,13 @@
+captured_utc=2026-08-12T15:50:18Z
+status=passed
+bundle_identifier=org.evalops.Ghostlight
+state=Viewer loaded
+relaunch=passed; saved control URL reopened viewer without another Connect action
+webrtc_state=not-claimed
+control_endpoint=redacted-loopback
+viewer_endpoint=redacted-loopback
+app_binary_sha256=26581f3d480584a3216f9494835f6fcade02054fe5cfe3de877d5e49c3f27fcf
+screenshot_sha256=3a306cf4eceefc5379b07e20384b11b0de779d30a73758abe93a0c9b7bc99c3d
+relaunch_screenshot_sha256=7635996be297ba2385083e848508fab686f7e90e54f0a083c7b3ba0a6839d34a
+privacy_review=passed; synthetic content only
+limitation=WKWebView navigation proof only; no WebRTC, account, or seven-day claim

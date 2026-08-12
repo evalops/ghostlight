@@ -8,9 +8,18 @@ services:
     restart: unless-stopped
     shm_size: "2gb"
     ports:
-      - "${VIEWER_PORT:-8081}:8080"
-      - "${WEBRTC_MUX_PORT:-52000}:${WEBRTC_MUX_PORT:-52000}/udp"
-      - "${WEBRTC_MUX_PORT:-52000}:${WEBRTC_MUX_PORT:-52000}/tcp"
+      - target: 8080
+        published: "${VIEWER_PORT:-8081}"
+        host_ip: "${GHOSTLIGHT_BIND_ADDRESS:?set GHOSTLIGHT_BIND_ADDRESS to a private host interface}"
+        protocol: tcp
+      - target: "${WEBRTC_MUX_PORT:-52000}"
+        published: "${WEBRTC_MUX_PORT:-52000}"
+        host_ip: "${GHOSTLIGHT_BIND_ADDRESS:?set GHOSTLIGHT_BIND_ADDRESS to a private host interface}"
+        protocol: udp
+      - target: "${WEBRTC_MUX_PORT:-52000}"
+        published: "${WEBRTC_MUX_PORT:-52000}"
+        host_ip: "${GHOSTLIGHT_BIND_ADDRESS:?set GHOSTLIGHT_BIND_ADDRESS to a private host interface}"
+        protocol: tcp
     volumes:
       - "${CHROMIUM_PROFILE_DIR:-./data/chromium}:/home/neko/.config/chromium"
       - "./chromium-policy.json:/etc/chromium/policies/managed/policies.json:ro"
@@ -22,9 +31,8 @@ services:
       NEKO_WEBRTC_TCPMUX: "${NEKO_WEBRTC_TCPMUX:-52000}"
       NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-0}"
       NEKO_WEBRTC_NAT1TO1: "${NEKO_WEBRTC_NAT1TO1:-127.0.0.1}"
-      NEKO_SESSION_FILE: "/home/neko/.config/chromium/neko-sessions.json"
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       start_period: 20s
@@ -37,23 +45,21 @@ services:
     init: true
     restart: unless-stopped
     ports:
-      - "${CONTROL_PORT:-8080}:8080"
+      - target: 8080
+        published: "${CONTROL_PORT:-8080}"
+        host_ip: "${GHOSTLIGHT_BIND_ADDRESS:?set GHOSTLIGHT_BIND_ADDRESS to a private host interface}"
+        protocol: tcp
     environment:
       GHOSTLIGHT_LISTEN_ADDR: "0.0.0.0:8080"
       GHOSTLIGHT_VIEWER_URL: "${GHOSTLIGHT_VIEWER_URL:-http://127.0.0.1:8081}"
-      GHOSTLIGHT_STORE_PATH: "${GHOSTLIGHT_STORE_PATH:-/data/sessions.json}"
-    volumes:
-      - "ghostlight-control-data:/data"
+      GHOSTLIGHT_VIEWER_HEALTH_URL: "${GHOSTLIGHT_VIEWER_HEALTH_URL:-http://viewer:8080}"
     depends_on:
       viewer:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]
       interval: 10s
       timeout: 5s
       start_period: 10s
       retries: 12
-    # Control contract: POST /v1/sessions creates the persistent session record.
-
-volumes:
-  ghostlight-control-data:
+    # Control contract: GET /v1/viewer returns the configured viewer URL.

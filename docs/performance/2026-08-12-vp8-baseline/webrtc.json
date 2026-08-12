@@ -1,0 +1,26 @@
+{
+  "status": "measured",
+  "capturedAt": "2026-08-12T15:51:03.952Z",
+  "viewerEndpointSha256": "b528746506c397e764b63d3f76e7cd8627a9f045ee9103dee33b0c0bff905618",
+  "requestedCodec": "default",
+  "h264Supported": true,
+  "sampleSeconds": 10.082075722999999,
+  "inputToPresentedFrameMs": 72.43357999999989,
+  "frameCallbackDelayMs": 62.60000002384186,
+  "decodedFrames": 251,
+  "droppedFrames": 0,
+  "receivedBytes": 1471767,
+  "bitrateBitsPerSecond": 1167828.5626381424,
+  "codec": {
+    "id": "CIT01_96",
+    "mimeType": "video/VP8",
+    "clockRate": 90000,
+    "sdpFmtpLine": null
+  },
+  "limitations": [
+    "Input latency is measured from browser keyboard dispatch until the next presented WebRTC video frame.",
+    "The metric does not include physical keyboard polling or display scanout.",
+    "The H.264 run only changes codec preference when the browser advertises H.264 receiver capability; the Neko default remains unchanged."
+  ],
+  "decision": "Retain the pinned Neko default codec until a paired H.264 run and native WKWebView receipt show a supported improvement."
+}

@@ -89,7 +89,11 @@ while IFS= read -r -d '' markdown_file; do
     printf '%s contains an unresolved placeholder\n' "${markdown_file#"$repo_root/"}" >&2
     failures=$((failures + 1))
   fi
-done < <(find "$repo_root" -type f -name '*.md' -not -path "$repo_root/.git/*" -print0)
+done < <(
+  find "$repo_root" \
+    \( -type d \( -name .git -o -name node_modules -o -name .build -o -name DerivedData \) -prune \) -o \
+    \( -type f -name '*.md' -print0 \)
+)
 
 if (( failures > 0 )); then
   printf 'Repository license and prose hygiene check failed with %d issue(s).\n' "$failures" >&2

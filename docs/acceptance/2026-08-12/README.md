@@ -42,3 +42,9 @@ After recreation, tab B:
 This is a day-one Linux browser-level receipt. The nested test host required a test-only AppArmor override, and its installed Buildx version required `COMPOSE_BAKE=false`. Test instrumentation also enabled Chromium's debugging protocol and mounted a loopback proxy and synthetic page server. None of these hooks is part of Ghostlight's committed runtime. The PNGs are X-display captures of Linux Chromium; they are not Ghostlight.app, WKWebView, or WebRTC screenshots.
 
 This receipt does not claim that Gmail, the native macOS relaunch flow, or the seven-consecutive-day acceptance gate has passed. Those remain separate acceptance checks.
+
+## Native macOS navigation receipt
+
+The [native macOS receipt](native-macos-receipt.json) records a local build of `Ghostlight.app` discovering a synthetic loopback viewer, reaching the exact `Viewer loaded` state through `WKWebView`, closing, and reopening from the saved control URL without another Connect action. The [initial screenshot](native-viewer-loaded.png) and [relaunch screenshot](native-relaunch.png) were inspected for privacy and contain only synthetic content. The [transcript and hashes](native-macos-transcript.txt) are committed alongside them.
+
+This native receipt does not claim Neko authentication, WebRTC media, a no-manual-Connect relaunch, Gmail persistence, or the seven-day gate. Those remain separate checks.

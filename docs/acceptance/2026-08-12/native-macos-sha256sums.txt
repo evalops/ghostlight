@@ -1,0 +1,4 @@
+28e9470e77abd25fcfc5ca000ffbd6e6f809f5429b5fd65ce5a3b3f98b7ce5b1  native-macos-receipt.json
+ce44a635828567b5738ba242807006a7e1936dbe1b959d9e76f01b519f77dc56  native-macos-transcript.txt
+3a306cf4eceefc5379b07e20384b11b0de779d30a73758abe93a0c9b7bc99c3d  native-viewer-loaded.png
+7635996be297ba2385083e848508fab686f7e90e54f0a083c7b3ba0a6839d34a  native-relaunch.png

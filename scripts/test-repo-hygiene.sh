@@ -65,6 +65,10 @@ expect_success "current repository passes" "$repo_root"
 expect_success_without_argument "CI-style no-argument invocation passes"
 expect_success "valid fixture passes" "$valid_fixture"
 
+mkdir -p "$valid_fixture/node_modules/vendor"
+printf 'TODO: third-party package documentation is not repository prose.\n' >"$valid_fixture/node_modules/vendor/README.md"
+expect_success "dependency directories are excluded" "$valid_fixture"
+
 missing_license="$scratch_dir/missing-license"
 cp -R "$valid_fixture" "$missing_license"
 rm "$missing_license/LICENSE"
