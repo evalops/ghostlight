@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(ROOT_DIR, "tests", "acceptance", "package.json"));
 const { chromium } = require("playwright");
+const { ws: WebSocket } = require(join(ROOT_DIR, "tests", "acceptance", "node_modules", "playwright-core", "lib", "utilsBundle.js"));
 const FIXTURE_PATH = join(ROOT_DIR, "tools", "performance-fixture.py");
 const IMAGE = process.env.GHOSTLIGHT_PERFORMANCE_IMAGE ?? "ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44";
 const REMOTE = process.env.GHOSTLIGHT_PERFORMANCE_REMOTE_HOST ?? "developer@192.168.4.113";
@@ -375,6 +376,109 @@ function percentile(values, rank) { const numbers = sorted(values); if (!numbers
 function mean(values) { const numbers = values.filter((value) => Number.isFinite(value)); return numbers.length ? numbers.reduce((sum, value) => sum + value, 0) / numbers.length : null; }
 function ratio(numerator, denominator) { return denominator > 0 ? numerator / denominator : null; }
 function nonNegativeDelta(candidate, control) { return candidate === null || control === null ? null : candidate - control; }
+
+function localWebSocketUrl(value) {
+  const url = new URL(value);
+  url.hostname = CLIENT_ADDRESS;
+  return url.toString();
+}
+
+class RemoteCdpPage {
+  constructor(target) {
+    this.target = target;
+    this.socket = null;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.events = new Map();
+  }
+
+  async connect() {
+    this.socket = new WebSocket(localWebSocketUrl(this.target.webSocketDebuggerUrl));
+    await new Promise((resolve, reject) => {
+      this.socket.once("open", resolve);
+      this.socket.once("error", reject);
+    });
+    this.socket.on("message", (message) => {
+      const packet = JSON.parse(message.toString());
+      if (packet.id && this.pending.has(packet.id)) {
+        const { resolve, reject } = this.pending.get(packet.id);
+        this.pending.delete(packet.id);
+        if (packet.error) reject(new Error(`${packet.error.code}: ${packet.error.message}`));
+        else resolve(packet.result);
+        return;
+      }
+      for (const listener of this.events.get(packet.method) ?? []) listener(packet.params ?? {});
+    });
+    await this.send("Page.enable");
+    await this.send("Runtime.enable");
+    return this;
+  }
+
+  send(method, params = {}) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  on(method, listener) {
+    const listeners = this.events.get(method) ?? [];
+    listeners.push(listener);
+    this.events.set(method, listeners);
+  }
+
+  async goto(url) {
+    const loaded = new Promise((resolve) => {
+      const listener = () => resolve();
+      this.on("Page.loadEventFired", listener);
+    });
+    await this.send("Page.navigate", { url });
+    await Promise.race([loaded, sleep(10000)]);
+  }
+
+  async waitForSelector(selector, timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.evaluate((target) => Boolean(document.querySelector(target)), selector)) return;
+      await sleep(100);
+    }
+    throw new Error(`remote CDP page selector timed out: ${selector}`);
+  }
+
+  async evaluate(callback, argument) {
+    const functionSource = callback.toString();
+    const argumentSource = argument === undefined ? "undefined" : JSON.stringify(argument);
+    const expression = `Promise.resolve((${functionSource})(${argumentSource}))`;
+    const response = await this.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, userGesture: true });
+    if (response.exceptionDetails) {
+      const description = response.exceptionDetails.exception?.description || response.exceptionDetails.text || "remote evaluation failed";
+      throw new Error(description);
+    }
+    return response.result?.value;
+  }
+
+  async close() {
+    if (!this.socket) return;
+    try { await this.send("Page.close"); } catch { /* the container teardown remains authoritative */ }
+    this.socket.close();
+    this.socket = null;
+  }
+}
+
+async function connectRemoteCdpPage() {
+  const listResponse = await fetch(`${CDP_URL}/json/list`);
+  if (!listResponse.ok) throw new Error(`CDP target list failed: HTTP ${listResponse.status}`);
+  let targets = await listResponse.json();
+  let target = targets.find((entry) => entry.type === "page" && !entry.url.startsWith("devtools://"));
+  if (!target) {
+    const newTargetResponse = await fetch(`${CDP_URL}/json/new?${encodeURIComponent(REMOTE_FIXTURE_URL)}`, { method: "PUT" });
+    if (!newTargetResponse.ok) throw new Error(`CDP target creation failed: HTTP ${newTargetResponse.status}`);
+    target = await newTargetResponse.json();
+  }
+  const page = await new RemoteCdpPage(target).connect();
+  return { page, target };
+}
 
 function addPeerTracking(context) {
   return context.addInitScript(() => {
@@ -832,7 +936,7 @@ async function main() {
   let tunnel;
   let stats;
   let clientBrowser;
-  let remoteBrowser;
+  let remotePage;
   let processStart;
   let processEnd;
   const phaseResults = [];
@@ -863,25 +967,9 @@ async function main() {
     }, null, { timeout: 30000 });
     await installFrameObserver(clientPage);
 
-    remoteBrowser = await chromium.connectOverCDP(CDP_URL);
-    const remoteContext = remoteBrowser.contexts()[0];
-    if (!remoteContext) throw new Error("CDP browser context is missing");
-    const remoteCdp = await remoteBrowser.newBrowserCDPSession();
-    await remoteCdp.send("Target.createTarget", { url: REMOTE_FIXTURE_URL });
-    const remoteTargets = await remoteCdp.send("Target.getTargets");
-    const remoteTarget = remoteTargets.targetInfos.find((target) => target.type === "page" && !target.attached);
-    if (remoteTarget) await remoteCdp.send("Target.attachToTarget", { targetId: remoteTarget.targetId, flatten: true });
-    let remotePage = remoteContext.pages()[0] ?? null;
-    const pageDeadline = Date.now() + 30000;
-    while (!remotePage && Date.now() < pageDeadline) {
-      await sleep(250);
-      remotePage = remoteContext.pages()[0] ?? null;
-    }
-    if (!remotePage) {
-      try { remotePage = await remoteContext.newPage(); } catch (error) {
-        throw new Error(`CDP browser exposed no page after 30s: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    const remoteTarget = await connectRemoteCdpPage();
+    remotePage = remoteTarget.page;
+    await fs.writeFile(join(OUTPUT_DIR, "remote-cdp-target.json"), `${JSON.stringify(remoteTarget.target, null, 2)}\n`, { mode: 0o600 });
     const initialClientStats = await collectClientStats(clientPage);
     await fs.writeFile(join(OUTPUT_DIR, "initial-webrtc.json"), `${JSON.stringify({ ...initialClientStats, reports: undefined }, null, 2)}\n`, { mode: 0o600 });
     if (!initialClientStats.inbound_count) throw new Error("no inbound video RTP stream was negotiated");
@@ -896,7 +984,7 @@ async function main() {
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
   } finally {
-    if (remoteBrowser) await remoteBrowser.close().catch(() => {});
+    if (remotePage) await remotePage.close().catch(() => {});
     if (clientBrowser) await clientBrowser.close().catch(() => {});
     await stopRemoteStats(stats).catch(() => {});
     if (tunnel?.getStderr?.()) await fs.writeFile(join(OUTPUT_DIR, "ssh-tunnel.stderr"), tunnel.getStderr(), { mode: 0o600 });
