@@ -280,7 +280,8 @@ function startRemoteCdpBridge(containerId) {
   const containerPid = remoteCommand(`docker inspect --format '{{.State.Pid}}' ${shellQuote(containerId)}`).trim();
   if (!/^\d+$/.test(containerPid)) throw new Error(`invalid viewer container PID for CDP bridge: ${containerPid}`);
   const logPath = `${REMOTE_DIR}/cdp-bridge.log`;
-  const bridgePid = remoteCommand(`sudo -n sh -c ${shellQuote(`exec nsenter -t ${containerPid} -n -- /usr/bin/socat TCP-LISTEN:9223,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:9222 >${logPath} 2>&1`)} & echo $!`).trim();
+  const bridgeCommand = `nohup nsenter -t ${containerPid} -n -- /usr/bin/socat TCP-LISTEN:9223,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:9222 </dev/null >${logPath} 2>&1 & echo $!`;
+  const bridgePid = remoteCommand(`sudo -n sh -c ${shellQuote(bridgeCommand)}`).trim();
   if (!/^\d+$/.test(bridgePid)) throw new Error(`invalid CDP bridge PID: ${bridgePid}`);
   return { containerPid, bridgePid, logPath };
 }
