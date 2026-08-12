@@ -6,7 +6,7 @@ repo_root=$(cd -- "$script_dir/.." && pwd)
 shell_pattern='^#!.*[[:space:]](ba)?sh([[:space:]]|$)'
 
 if (( $# == 0 )); then
-  directories=("$repo_root/scripts" "$repo_root/runtime")
+  directories=("$repo_root/scripts" "$repo_root/runtime" "$repo_root/tools" "$repo_root/tests" "$repo_root/macos")
 else
   directories=()
   for directory in "$@"; do
@@ -27,7 +27,7 @@ for directory in "${directories[@]}"; do
     if [[ "$file" == *.sh ]] || grep -qE "$shell_pattern" "$file"; then
       shell_files+=("$file")
     fi
-  done < <(find "$directory" -type f -print0)
+  done < <(find "$directory" -type f -not -path '*/node_modules/*' -print0)
 done
 
 if (( ${#shell_files[@]} == 0 )); then

@@ -166,15 +166,32 @@ verify_checksum() {
   [[ "$actual" == "$expected" ]] || die "archive checksum mismatch: $archive"
 }
 
+viewer_project_name() {
+  local repo_root project_name
+
+  repo_root="$(cd -- "$RUNTIME_DIR/.." && pwd)"
+  project_name="${COMPOSE_PROJECT_NAME:-$(env_value COMPOSE_PROJECT_NAME)}"
+  printf '%s' "${project_name:-$(basename -- "$repo_root")}"
+}
+
+assert_viewer_stopped() {
+  local project_name running
+
+  [[ "${PROFILE_BACKUP_SKIP_COMPOSE:-0}" == 1 ]] && return 0
+  project_name="$(viewer_project_name)"
+  running="$(docker compose --project-name "$project_name" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+    ps --quiet --status running viewer)"
+  [[ -z "$running" ]] || die "viewer container is still running; refusing to archive a live Chromium profile"
+}
+
 quiesce_viewer() {
-  local project_name repo_root
+  local project_name
 
   [[ "${PROFILE_BACKUP_SKIP_COMPOSE:-0}" == 1 ]] && return 0
   [[ -f "$ENV_FILE" ]] || die "runtime/.env is required to quiesce the viewer"
-  repo_root="$(cd -- "$RUNTIME_DIR/.." && pwd)"
-  project_name="${COMPOSE_PROJECT_NAME:-$(env_value COMPOSE_PROJECT_NAME)}"
-  project_name="${project_name:-$(basename -- "$repo_root")}"
+  project_name="$(viewer_project_name)"
   docker compose --project-name "$project_name" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop viewer >/dev/null
+  assert_viewer_stopped
 }
 
 backup_profile() {
@@ -219,6 +236,10 @@ backup_profile() {
   source_parent="$(cd -- "$(dirname -- "$source")" && pwd)"
   source_name="$(basename -- "$source")"
   quiesce_viewer
+
+  # Re-check immediately before reading the profile: nothing else may have
+  # restarted the viewer between the Compose stop and this archive read.
+  assert_viewer_stopped
 
   COPYFILE_DISABLE=1 tar -czf "$temporary_archive" --numeric-owner \
     --exclude="$source_name/SingletonCookie" \

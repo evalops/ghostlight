@@ -17,6 +17,8 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing '$1'; install Docker Compose and curl before running the smoke check"
 }
 
+[[ "$ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || die "SMOKE_ATTEMPTS must be a positive integer, got: $ATTEMPTS"
+
 env_value() {
   local key="$1"
   local value
