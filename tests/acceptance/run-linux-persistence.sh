@@ -26,6 +26,10 @@ HOST_GID="$(id -g)"
   printf 'GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK must be 0 or 1\n' >&2
   exit 1
 }
+[[ "$SKIP_PROFILE_CHECK" =~ ^[01]$ ]] || {
+  printf 'GHOSTLIGHT_ACCEPTANCE_SKIP_PROFILE_CHECK must be 0 or 1\n' >&2
+  exit 1
+}
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ghostlight-acceptance.XXXXXX")"
 PROFILE_DIR="$WORK_DIR/chromium-profile"
 ENV_FILE="$WORK_DIR/runtime.env"
@@ -149,11 +153,24 @@ fi
   npm --version
 
   npm ci --prefix "$TEST_DIR"
-  profile_owned_by_viewer=1
-  docker run --rm --user 0:0 --entrypoint /bin/sh \
-    -v "$PROFILE_DIR:/profile" "$NEKO_IMAGE_REF" \
-    -c 'set -eu; chown 1000:1000 /profile; chmod 700 /profile'
-  GHOSTLIGHT_ENV_FILE="$ENV_FILE" CHROMIUM_PROFILE_DIR="$PROFILE_DIR" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK="$SKIP_PROFILE_CHECK" "$ROOT_DIR/runtime/bin/preflight.sh"
+  preflight_profile_check="$SKIP_PROFILE_CHECK"
+  if (( HOST_UID != 1000 )); then
+    # Preflight must resolve the mode-0700 host path before ownership transfers
+    # to Neko. The direct container check below preserves the same write proof.
+    preflight_profile_check=1
+  fi
+  GHOSTLIGHT_ENV_FILE="$ENV_FILE" CHROMIUM_PROFILE_DIR="$PROFILE_DIR" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK="$preflight_profile_check" "$ROOT_DIR/runtime/bin/preflight.sh"
+  if (( HOST_UID != 1000 )); then
+    profile_owned_by_viewer=1
+    docker run --rm --user 0:0 --entrypoint /bin/sh \
+      -v "$PROFILE_DIR:/profile" "$NEKO_IMAGE_REF" \
+      -c 'set -eu; chown 1000:1000 /profile; chmod 700 /profile'
+  fi
+  if (( SKIP_PROFILE_CHECK == 0 )); then
+    docker run --rm --user 1000:1000 --entrypoint /bin/sh \
+      -v "$PROFILE_DIR:/profile" "$NEKO_IMAGE_REF" \
+      -c 'set -eu; test -w /profile; umask 077; : > /profile/.ghostlight-acceptance-write; rm -f /profile/.ghostlight-acceptance-write'
+  fi
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build --wait --wait-timeout 120
 
 for _attempt in {1..60}; do

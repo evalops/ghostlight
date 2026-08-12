@@ -108,6 +108,18 @@ grep -Fq -- "chown -R \"\$1:\$2\" /profile" "$acceptance" || {
   printf 'acceptance harness does not restore profile ownership before cleanup\n' >&2
   exit 1
 }
+grep -Fq -- '--user 1000:1000 --entrypoint /bin/sh' "$acceptance" || {
+  printf 'acceptance harness does not directly verify Neko uid 1000 profile writes\n' >&2
+  exit 1
+}
+# This is a literal source-contract assertion, not a shell expansion.
+# shellcheck disable=SC2016
+preflight_line=$(grep -nF -- '"$ROOT_DIR/runtime/bin/preflight.sh"' "$acceptance" | cut -d: -f1)
+profile_chown_line=$(grep -nF -- 'chown 1000:1000 /profile; chmod 700 /profile' "$acceptance" | cut -d: -f1)
+if [[ -z "$preflight_line" || -z "$profile_chown_line" || "$preflight_line" -ge "$profile_chown_line" ]]; then
+  printf 'acceptance preflight must resolve the host-owned profile before Neko takes ownership\n' >&2
+  exit 1
+fi
 # This is a literal source-contract assertion, not a shell expansion.
 # shellcheck disable=SC2016
 if grep -Fq -- 'down --remove-orphans >>"$TRANSCRIPT" 2>&1 || true' "$acceptance"; then
