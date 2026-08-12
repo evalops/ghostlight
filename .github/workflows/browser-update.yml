@@ -1,0 +1,285 @@
+name: Browser update safety
+
+"on":
+  pull_request:
+    paths:
+      - .github/dependabot.yml
+      - .github/workflows/browser-update.yml
+      - control/Dockerfile
+      - runtime/.env.example
+      - runtime/docker-compose.yml
+      - runtime/tests/test_runtime.sh
+      - scripts/check-image-safety.sh
+      - scripts/check-image-drift.sh
+      - scripts/resolve-image-digest.sh
+      - scripts/test-browser-update-workflow.sh
+      - scripts/test-image-safety.sh
+      - scripts/update-control-base-images.sh
+      - scripts/update-neko-image.sh
+      - tests/acceptance/**
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Tagged or digest-pinned ghcr.io/m1k1o/neko/chromium image
+        required: false
+        default: ghcr.io/m1k1o/neko/chromium:latest
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Build, boot, persist, and scan candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      neko-image: ${{ steps.refs.outputs.neko-image }}
+      go-image: ${{ steps.refs.outputs.go-image }}
+      alpine-image: ${{ steps.refs.outputs.alpine-image }}
+    env:
+      CANDIDATE_REF: ${{ inputs.candidate || 'ghcr.io/m1k1o/neko/chromium:latest' }}
+      GHOSTLIGHT_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/output/playwright/acceptance
+      GHOSTLIGHT_ACCEPTANCE_PROJECT: ghostlight_candidate_${{ github.run_id }}_${{ github.run_attempt }}
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Node.js
+        # actions/setup-node v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: tests/acceptance/package-lock.json
+
+      - name: Enforce immutable repository inputs
+        run: |
+          set -euo pipefail
+          bash scripts/check-container-pins.sh
+          bash scripts/test-image-safety.sh
+          bash scripts/check-image-safety.sh
+
+      - name: Detect Neko and control-base digest drift
+        id: base-drift
+        continue-on-error: true
+        env:
+          GHOSTLIGHT_NEKO_CANDIDATE_IMAGE: ${{ env.CANDIDATE_REF }}
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p output/image-safety
+          bash scripts/check-image-drift.sh |& tee output/image-safety/digest-drift.txt
+
+      - name: Resolve the candidate to an immutable digest
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == pull_request ]]; then
+            resolved=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' runtime/.env.example)
+          else
+            resolved=$(bash scripts/resolve-image-digest.sh "$CANDIDATE_REF")
+          fi
+          printf 'image=%s\n' "$resolved" >>"$GITHUB_OUTPUT"
+          printf '%s\n' "$resolved" | tee candidate-image.txt
+
+      - name: Apply the candidate digest to every required reference
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          bash scripts/update-neko-image.sh "${{ steps.candidate.outputs.image }}"
+          bash scripts/update-control-base-images.sh
+
+      - name: Verify the candidate-only diff and repository invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/update-neko-image.sh --check "${{ steps.candidate.outputs.image }}"
+          bash scripts/check-image-safety.sh
+          git diff --check
+          changed=$(git diff --name-only)
+          if [[ -n "$changed" ]] && grep -Ev '^(control/Dockerfile|runtime/\.env\.example|runtime/docker-compose\.yml|runtime/tests/test_runtime\.sh)$' <<<"$changed"; then
+            echo "candidate updater changed an unauthorized path" >&2
+            exit 1
+          fi
+
+      - name: Record the exact candidate references
+        id: refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          neko_image=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' runtime/.env.example)
+          go_image=$(awk '$1 == "FROM" && $2 ~ /^golang:/ { print $2; exit }' control/Dockerfile)
+          alpine_image=$(awk '$1 == "FROM" && $2 ~ /^alpine:/ { print $2; exit }' control/Dockerfile)
+          {
+            printf 'neko-image=%s\n' "$neko_image"
+            printf 'go-image=%s\n' "$go_image"
+            printf 'alpine-image=%s\n' "$alpine_image"
+          } >>"$GITHUB_OUTPUT"
+          printf 'neko=%s\ngo=%s\nalpine=%s\n' "$neko_image" "$go_image" "$alpine_image" >candidate-images.txt
+
+      - name: Build the control candidate
+        run: docker build --tag ghostlight-control:candidate-${{ github.sha }} control
+
+      - name: Run static runtime and backup checks
+        run: |
+          set -euo pipefail
+          bash runtime/tests/test_runtime.sh
+          bash runtime/tests/test_profile_backup.sh
+
+      - name: Install screenshot privacy dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tesseract-ocr
+
+      - name: Boot, recreate, and verify Chromium profile persistence
+        env:
+          NEKO_IMAGE: ${{ steps.candidate.outputs.image }}
+          GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK: "0"
+        run: tests/acceptance/run-linux-persistence.sh
+
+      - name: Record candidate image metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/image-safety
+          cp candidate-image.txt output/image-safety/candidate-image.txt
+          cp candidate-images.txt output/image-safety/candidate-images.txt
+          docker image inspect "${{ steps.candidate.outputs.image }}" >output/image-safety/neko-image-inspect.json
+          docker image inspect "ghostlight-control:candidate-${{ github.sha }}" >output/image-safety/control-image-inspect.json
+
+      - name: Scan Neko candidate
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ghostlight-trivy-cache:/root/.cache/trivy \
+            -v "$GITHUB_WORKSPACE/output/image-safety:/output" \
+            aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --scanners vuln --format json --output /output/neko-trivy.json \
+            --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            "${{ steps.candidate.outputs.image }}"
+
+      - name: Scan control candidate
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ghostlight-trivy-cache:/root/.cache/trivy \
+            -v "$GITHUB_WORKSPACE/output/image-safety:/output" \
+            aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --scanners vuln --format json --output /output/control-trivy.json \
+            --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            "ghostlight-control:candidate-${{ github.sha }}"
+
+      - name: Upload acceptance and scanner receipts
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: browser-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
+
+  propose-update:
+    name: Open a reviewed browser digest update
+    if: github.event_name != 'pull_request'
+    needs: candidate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Resolve and apply the candidate digest
+        id: update
+        shell: bash
+        env:
+          CANDIDATE_IMAGE: ${{ needs.candidate.outputs.neko-image }}
+          GO_BASE_IMAGE: ${{ needs.candidate.outputs.go-image }}
+          ALPINE_BASE_IMAGE: ${{ needs.candidate.outputs.alpine-image }}
+        run: |
+          set -euo pipefail
+          go_digest=${GO_BASE_IMAGE#*@}
+          alpine_digest=${ALPINE_BASE_IMAGE#*@}
+          bash scripts/update-neko-image.sh "$CANDIDATE_IMAGE"
+          GHOSTLIGHT_GO_BASE_RESOLVED_DIGEST="$go_digest" \
+          GHOSTLIGHT_ALPINE_BASE_RESOLVED_DIGEST="$alpine_digest" \
+            bash scripts/update-control-base-images.sh
+          bash scripts/check-image-safety.sh
+          git diff --check
+          if git diff --quiet; then
+            printf 'changed=false\n' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'changed=true\n' >>"$GITHUB_OUTPUT"
+          printf 'image=%s\n' "$CANDIDATE_IMAGE" >>"$GITHUB_OUTPUT"
+
+      - name: Create the protected update pull request
+        if: steps.update.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_IMAGE: ${{ steps.update.outputs.image }}
+        run: |
+          set -euo pipefail
+          diff_hash=$(git diff | sha256sum | cut -c1-12)
+          branch="automation/browser-image-$diff_hash"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git add control/Dockerfile runtime/.env.example runtime/docker-compose.yml runtime/tests/test_runtime.sh
+          git commit -m "chore(runtime): update container image digests"
+          tested_tree=$(git rev-parse 'HEAD^{tree}')
+          remote_oid=$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 { print $1 }')
+          if [[ -n "$remote_oid" ]]; then
+            git fetch --no-tags origin "refs/heads/$branch"
+            fetched_oid=$(git rev-parse FETCH_HEAD)
+            [[ "$fetched_oid" == "$remote_oid" ]] || {
+              echo "Fetched update branch does not match the advertised remote commit." >&2
+              exit 1
+            }
+            remote_tree=$(git rev-parse 'FETCH_HEAD^{tree}')
+            [[ "$remote_tree" == "$tested_tree" ]] || {
+              echo "The existing update branch does not contain the exact tested tree: $branch" >&2
+              exit 1
+            }
+          else
+            git push --set-upstream origin "$branch"
+          fi
+
+          open_pr=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -n "$open_pr" ]]; then
+            echo "The tested update pull request already exists: #$open_pr"
+            exit 0
+          fi
+
+          closed_pr=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --state closed \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -n "$closed_pr" ]]; then
+            gh pr reopen --repo "$GITHUB_REPOSITORY" "$closed_pr"
+            exit 0
+          fi
+
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --title "chore(runtime): update container image digests" \
+            --body "Automated digest proposal for \`$CANDIDATE_IMAGE\`. The scheduled safety lane built the control image, booted and recreated the candidate stack, verified synthetic Chromium profile persistence, and scanned both images before opening this PR. Required protected checks must still pass before merge."

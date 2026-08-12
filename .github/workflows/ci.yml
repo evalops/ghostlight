@@ -29,8 +29,15 @@ jobs:
       - name: Run repository-script tests
         run: bash scripts/test-repo-hygiene.sh
 
-  optional-shell-and-compose:
-    name: Optional shell and Compose checks
+      - name: Enforce immutable image and action references
+        run: |
+          set -euo pipefail
+          bash scripts/test-image-safety.sh
+          bash scripts/test-browser-update-workflow.sh
+          bash scripts/check-image-safety.sh
+
+  shell-and-compose:
+    name: Shell and Compose checks
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -42,9 +49,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! -d scripts && ! -d runtime ]]; then
-            echo "No scripts/ or runtime/ directory found."
-            echo "Skipping ShellCheck."
-            exit 0
+            echo "Required scripts/ and runtime/ inputs are missing." >&2
+            exit 1
           fi
 
           if ! command -v shellcheck >/dev/null 2>&1; then
@@ -59,6 +65,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cp runtime/.env.example runtime/.env
+          chmod 600 runtime/.env
           compose_files=()
           if [[ -d runtime ]]; then
             while IFS= read -r -d '' file; do
@@ -74,9 +82,8 @@ jobs:
           fi
 
           if (( ${#compose_files[@]} == 0 )); then
-            echo "No Docker Compose file found under runtime/;"
-            echo "Skipping Compose validation."
-            exit 0
+            echo "Required Docker Compose file is missing under runtime/." >&2
+            exit 1
           fi
 
           for file in "${compose_files[@]}"; do
@@ -100,9 +107,20 @@ jobs:
         # actions/checkout v4.2.2
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
+      - name: Set up Go
+        # actions/setup-go v6.1.0
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c
+        with:
+          go-version-file: control/go.mod
+          cache-dependency-path: control/go.mod
+
       - name: Run control tests
         working-directory: control
-        run: go test ./...
+        run: |
+          set -euo pipefail
+          go test ./...
+          go test -race ./...
+          go vet ./...
 
   swift-tests:
     name: Swift tests
@@ -168,7 +186,7 @@ jobs:
           fi
 
           echo "macos/ has no Package.swift, Xcode workspace, or Xcode project."
-          echo "Skipping Swift tests."
+          exit 1
 
       - name: Build the Ghostlight app bundle
         run: |
@@ -177,3 +195,92 @@ jobs:
           test "$(plutil -extract CFBundleIdentifier raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "org.evalops.Ghostlight"
           test "$(plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
           test "$(plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
+
+  deterministic-harnesses:
+    name: Deterministic harnesses
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Require the acceptance and performance harness inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            tests/acceptance/package.json
+            tests/acceptance/package-lock.json
+            tests/acceptance/persistence.mjs
+            tests/acceptance/performance.mjs
+            tests/acceptance/run-linux-persistence.sh
+            tests/acceptance/validate-persistence.py
+            tests/acceptance/test_audit_screenshots.py
+            tests/acceptance/fixtures/chromium.conf
+            tests/acceptance/fixtures/cdp_proxy.conf
+            tests/acceptance/fixtures/cdp_proxy.py
+            tests/acceptance/fixtures/synthetic_server.conf
+            tests/acceptance/fixtures/synthetic_server.py
+            tools/collect-performance.sh
+            tools/test-macos-relaunch.sh
+          )
+          for path in "${required[@]}"; do
+            test -s "$path"
+          done
+
+      - name: Set up Node.js
+        # actions/setup-node v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: tests/acceptance/package-lock.json
+
+      - name: Install the locked Playwright harness
+        run: npm ci --ignore-scripts --prefix tests/acceptance
+
+      - name: Install screenshot OCR dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes tesseract-ocr
+
+      - name: Validate harness syntax and CLI failure contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check tests/acceptance/persistence.mjs
+          node --check tests/acceptance/performance.mjs
+          python3 -m py_compile tests/acceptance/audit-screenshots.py tests/acceptance/fixtures/synthetic_server.py tests/acceptance/validate-persistence.py
+          if node tests/acceptance/persistence.mjs; then
+            echo "persistence harness accepted missing arguments" >&2
+            exit 1
+          fi
+          if node tests/acceptance/performance.mjs; then
+            echo "performance harness accepted missing arguments" >&2
+            exit 1
+          fi
+          python3 tests/acceptance/test_audit_screenshots.py
+
+      - name: Run deterministic harness and recovery checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/test-container-pins.sh
+          bash runtime/tests/test_profile_backup.sh
+          mapfile -d '' screenshots < <(find docs/acceptance -type f \( -name '*.png' -o -name '*.jpg' \) -print0)
+          (( ${#screenshots[@]} > 0 ))
+          python3 tests/acceptance/audit-screenshots.py "${screenshots[@]}"
+
+      - name: Upload committed acceptance evidence audit
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: committed-acceptance-evidence-audit-${{ github.sha }}
+          path: |
+            tests/acceptance/package-lock.json
+            docs/acceptance/2026-08-12/
+          if-no-files-found: warn
+          retention-days: 14

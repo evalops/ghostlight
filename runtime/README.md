@@ -1,29 +1,35 @@
 # Linux runtime
 
-This directory runs one Chromium browser stream and the Ghostlight control API.
+The runtime contains one [Apache-2.0-licensed Neko](https://github.com/m1k1o/neko/blob/master/LICENSE) Chromium viewer and one stateless Ghostlight control service. Docker Compose starts, restarts, and stops both containers. Chromium writes one profile to `runtime/data/chromium` by default.
 
-The Compose stack contains two services:
-
-- `viewer` runs Neko Chromium 3.1 from the multi-architecture image index at `sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7` and stores the Chromium profile in `runtime/data/chromium`.
-- `control` builds from `control/`, stores `/data/sessions.json` in the `ghostlight-control-data` Docker volume, and publishes the session API.
-
-The Neko repository is [Apache-2.0 licensed](https://github.com/m1k1o/neko/blob/master/LICENSE). Its [image documentation](https://neko.m1k1o.net/docs/v3/installation/docker-images) defines the GHCR naming and version scheme. The runtime pins the published `3.1` image index by digest; update the digest only after confirming the replacement manifest on GHCR.
-
-## Install
-
-Run these commands from the repository root on the Linux host:
+## Configure
 
 ```sh
 cp runtime/.env.example runtime/.env
+chmod 600 runtime/.env
 ```
 
-Edit `runtime/.env` before starting the stack:
+Replace the three install markers in `runtime/.env`:
 
-- Set `NEKO_USER_PASSWORD` and `NEKO_ADMIN_PASSWORD` to different generated values.
-- Set `NEKO_WEBRTC_NAT1TO1` to the Linux host address reachable by the client when the host is behind NAT or a routed LAN.
-- Set `GHOSTLIGHT_VIEWER_URL` to the same reachable address with port `8081`.
+- Generate different values for `NEKO_USER_PASSWORD` and `NEKO_ADMIN_PASSWORD`.
+- Set `NEKO_WEBRTC_NAT1TO1` to the Linux address reachable from the client.
 
-Then run:
+Set `GHOSTLIGHT_BIND_ADDRESS` to the loopback or private Linux address that should receive published ports. Set the host in `GHOSTLIGHT_VIEWER_URL` to the same value as `NEKO_WEBRTC_NAT1TO1`.
+
+Example for a Linux host address:
+
+```dotenv
+GHOSTLIGHT_BIND_ADDRESS=<linux-host>
+GHOSTLIGHT_VIEWER_URL=http://<linux-host>:8081
+GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080
+NEKO_WEBRTC_NAT1TO1=<linux-host>
+```
+
+The Compose model requires an explicit bind address. Preflight accepts literal IPv4 loopback, link-local, or RFC 1918 addresses and IPv6 loopback, link-local, or unique-local addresses. It rejects hostnames, public addresses, wildcard addresses, and malformed IP literals. The operator must still confirm that the accepted address belongs to the intended host interface and apply firewall rules.
+
+## Start and inspect
+
+Run from the repository root:
 
 ```sh
 runtime/bin/preflight.sh
@@ -31,27 +37,92 @@ docker compose up -d
 runtime/bin/smoke.sh
 ```
 
-`runtime/.env` and `runtime/data/` are ignored by Git. Do not commit passwords, session records, or browser profile files. Compose mounts `chromium-policy.json` to preserve cookies and restore the previous Chromium session; keep that file aligned with the defaults in the pinned Neko image when updating the digest.
+`compose.yaml` loads `runtime/docker-compose.yml` and `runtime/.env`, which permits flag-free root commands after configuration.
 
-## HTTP and WebRTC ports
+```sh
+docker compose ps
+docker compose logs --tail=100 viewer control
+docker compose down
+```
 
-| Service | Default host port | Protocol | Use |
+The viewer uses `restart: unless-stopped`, a 2 GiB shared-memory allocation, and the digest-pinned `NEKO_IMAGE`. Neko listens on the private Compose network so control can probe it, while the published viewer port remains constrained by `GHOSTLIGHT_BIND_ADDRESS`. The control container starts only after the viewer healthcheck receives a successful response from Neko `/health`. Inside Compose, `GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080` gives control a reachable service-network health target while `GHOSTLIGHT_VIEWER_URL` remains the client-facing address returned by discovery.
+
+## Preflight checks
+
+`runtime/bin/preflight.sh` performs these checks without starting the Compose services:
+
+1. Requires Docker, Compose, `curl`, and `awk`.
+2. Requires a regular, non-symlink environment file with mode `600`.
+3. Rejects unresolved install markers and bind addresses outside the accepted literal private, link-local, and loopback ranges.
+4. Requires the host in `GHOSTLIGHT_VIEWER_URL` to match `NEKO_WEBRTC_NAT1TO1`.
+5. Renders the Compose model and checks that `control/Dockerfile` exists.
+6. Creates the default Chromium profile with mode `700` when absent, then rejects a non-directory, symlink, or profile path with another mode.
+7. Runs the digest-pinned Neko image as uid `1000` to create and remove a marker in the profile.
+
+The uid check confirms that Neko uid `1000` can create and remove a marker in the profile before the documented Compose startup. `GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK=1` exists for the shell-test fixture and skips the container-side write check.
+
+## Published ports
+
+| Service | Default port | Protocol | Use |
 | --- | ---: | --- | --- |
-| Control | `8080` | TCP | Health and session API |
-| Viewer | `8081` | TCP | Neko web viewer and WebSocket signaling |
-| WebRTC mux | `52000` | UDP and TCP | Audio, video, and input transport |
+| Control | `8080` | TCP | Liveness, readiness, and viewer discovery |
+| Viewer | `8081` | TCP | Neko login, viewer page, and signaling |
+| WebRTC mux | `52000` | UDP and TCP | Browser audio, video, and input |
 
-The Compose file maps `52000` without remapping it inside the container. Allow both `52000/udp` and `52000/tcp` through the Linux host firewall. The Neko documentation states that ICE candidates contain the server address and port, so a different host mapping can make the media path unreachable.
+Each port publication uses `GHOSTLIGHT_BIND_ADDRESS`. Keep the host and container WebRTC mux ports identical; Neko advertises that port during ICE negotiation.
 
-For a deployment that uses an ephemeral UDP range instead of muxing, set `NEKO_WEBRTC_EPR` and map the identical host and container range as UDP. Keep TCP mux enabled when clients may be on networks that block UDP.
+## Health and smoke checks
 
-## Operational checks
+The viewer healthcheck calls Neko `/health`. The control container healthcheck calls `GET /readyz`, which performs another viewer `/health` request through `GHOSTLIGHT_VIEWER_HEALTH_URL`. Compose defaults that value to the internal address `http://viewer:8080`; the client-facing `GHOSTLIGHT_VIEWER_URL` remains the value returned by discovery. `GET /healthz` checks only the Go process.
 
-`bin/preflight.sh` validates the Compose model, control source path, profile directory, and install-time placeholders. It does not start containers.
+`runtime/bin/smoke.sh` retries control liveness, direct viewer health, and control readiness up to 30 times by default. It then requests `GET /v1/viewer` once and checks `/health` through the returned viewer URL. Set `SMOKE_ATTEMPTS` to change the retry count.
 
-`bin/smoke.sh` validates Compose configuration, `GET /healthz`, `POST /v1/sessions`, and the `viewer_url` returned by the control API.
+## Chromium profile
 
-The sibling control service must provide:
+Compose bind-mounts `runtime/data/chromium` at `/home/neko/.config/chromium`. `runtime/chromium-policy.json` sets `DefaultCookiesSetting` to allow cookies and `RestoreOnStartup` to restore the previous session. The profile may contain cookies, local storage, browsing and download history, and website credentials. Downloaded files are outside this mount at `/home/neko/Downloads`.
 
-- `GET /healthz` with a JSON body containing `{"status":"ok"}`.
-- `POST /v1/sessions` with an optional JSON object and a JSON response containing `id`, `viewer_url`, and `created_at`.
+`docker compose down` removes containers and networks while leaving the host profile. Removing or replacing `runtime/data/chromium` removes the persisted browser state from the next viewer start.
+
+## Profile backup
+
+Create a backup while the configured Compose stack is available:
+
+```sh
+runtime/bin/profile-backup.sh backup \
+  runtime/data/chromium \
+  /safe/backup/ghostlight-profile.tar.gz
+docker compose start viewer
+```
+
+The backup command validates the source tree, stops the viewer, and leaves it stopped. Source validation allows directories and regular files, omits Chromium's top-level `SingletonCookie`, `SingletonLock`, and `SingletonSocket`, and rejects other links or special files. Path validation rejects operator-controlled symlink components; on macOS it permits a root-owned top-level platform alias such as `/var`. A per-target lock plus temporary files prevents concurrent or partial publication. A successful run atomically publishes a mode-`600` gzip-compressed tar archive with numeric-owner metadata and a mode-`600` `<archive>.sha256` sidecar.
+
+Restore into a new absolute path:
+
+```sh
+runtime/bin/profile-backup.sh restore \
+  /safe/backup/ghostlight-profile.tar.gz \
+  /safe/restore/chromium
+```
+
+Restore requires the sidecar to contain exactly one SHA-256 digest and verifies it before extraction. Archive validation permits one root containing directories and regular files with unique relative paths. It rejects absolute paths, dot or parent components, duplicate entries, multiple roots, links, and special files. Restore rejects symlink path components and an existing destination, extracts into a temporary sibling, sets mode `700`, and renames the result into the requested absolute path. It does not replace the active profile, modify Compose, or start the viewer.
+
+`PROFILE_BACKUP_SKIP_COMPOSE=1` skips the viewer stop for the isolated shell-test fixture. Do not use that setting against an active Chromium profile.
+
+Store the archive and sidecar as credential-bearing material. Test a restore into an isolated path before depending on a backup.
+
+## Tests
+
+```sh
+runtime/tests/test_runtime.sh
+runtime/tests/test_profile_backup.sh
+```
+
+The runtime test checks configuration contracts, shell syntax, optional ShellCheck output, flag-free Compose rendering, bind-address propagation, and profile backup behavior. The backup test verifies synthetic cookie, tab, and local-storage recovery; file-mode preservation; exact archive mode; checksum and collision failures; source and path link rejection; archive traversal rejection; and embedded-link rejection.
+
+## Image update lane
+
+The viewer reference in `.env.example` is mirrored in `docker-compose.yml` and `tests/test_runtime.sh`. The live persistence harness reads its default from `.env.example`. The committed runtime uses the public `ghcr.io/evalops/ghostlight-viewer` multi-architecture index by digest. `viewer/Dockerfile` derives it from the exact upstream Neko Chromium 3.1.5 digest, verifies the Neko source revision and tarball hash, applies `viewer/neko-go-modules.patch`, and installs fixed Chromium and libheif versions from the Debian `20260812T000000Z` snapshot.
+
+`scripts/update-neko-image.sh` accepts canonical digest references only from `ghcr.io/m1k1o/neko/chromium` or `ghcr.io/evalops/ghostlight-viewer` and updates the three mirrored files together. `scripts/check-image-safety.sh` rejects other namespaces, mismatched pins, a hardcoded acceptance-harness digest, mutable Docker bases, and GitHub Actions that lack a full commit SHA. The upstream Neko 3.1.5 image remains blocked because protected run `31621725290` found 32 fixed `HIGH` vulnerabilities under the unchanged Trivy gate.
+
+The hardened viewer workflow publishes `linux/amd64` and `linux/arm64` images with SBOM and provenance attestations. Publish run `31625537828` produced the public index pinned by this runtime. The unchanged Trivy 0.73.0 gate reported zero fixed `HIGH` or `CRITICAL` findings for both child images. The amd64 child returned `true` from `/health`; the arm64 child received binary and provenance inspection but no native boot test. The scheduled browser-update workflow resolves an upstream Neko candidate plus both control base tags, builds the candidate, runs these runtime and backup checks, runs the live synthetic Linux persistence lane, and scans the candidate viewer and control images. The workflow opens a digest-update pull request only after those blocking jobs succeed. It does not merge the pull request or change a running Linux host.

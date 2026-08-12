@@ -32,16 +32,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	store, err := NewFileStore(cfg.StorePath)
-	if err != nil {
-		return fmt.Errorf("initialize session store: %w", err)
-	}
 
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
-	server := newHTTPServer(NewHandler(store, cfg.ViewerURL))
+	server := newHTTPServer(newHandlerWithHealthURL(cfg.ViewerURL, cfg.ViewerHealthURL, &http.Client{Timeout: viewerHealthTimeout}))
 	serveErrors := make(chan error, 1)
 	go func() {
 		serveErrors <- server.Serve(listener)
@@ -59,13 +55,26 @@ func run() error {
 		return fmt.Errorf("serve HTTP: %w", err)
 	case sig := <-signals:
 		log.Printf("received %s; shutting down", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
+		if err := shutdownHTTPServer(server); err != nil {
 			return fmt.Errorf("shut down HTTP server: %w", err)
+		}
+		if err := <-serveErrors; !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve HTTP during shutdown: %w", err)
 		}
 		return nil
 	}
+}
+
+func shutdownHTTPServer(server *http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		if closeErr := server.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("force close HTTP server: %w", closeErr))
+		}
+		return err
+	}
+	return nil
 }
 
 func newHTTPServer(handler http.Handler) *http.Server {

@@ -1,0 +1,253 @@
+captured_utc=2026-08-12T16:28:11Z
+source_sha=f94bb784316e206674234407a75170b10dd0e7bc
+project=ghostlight_final_f94bb78 control_port=64080 viewer_port=64081 webrtc_port=59080 cdp_port=64280
+marker=synthetic-20260812T162811Z
+docker_server=29.1.3
+Docker Compose version v2.40.3
+v22.22.0
+11.18.0
+
+added 2 packages, and audited 3 packages in 502ms
+
+found 0 vulnerabilities
+preflight passed: explicit bind address, private environment permissions, Compose config, viewer URL alignment, and uid 1000 profile write access
+time="2026-08-12T09:28:12-07:00" level=warning msg="COMPOSE_BAKE=false is deprecated, support for internal compose builder will be removed in next release"
+#0 building with "homelab-insecure" instance using docker-container driver
+
+#1 [control internal] load build definition from Dockerfile
+#1 transferring dockerfile: 805B done
+#1 DONE 0.0s
+
+#2 [control internal] load metadata for docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+#2 DONE 0.0s
+
+#3 [control internal] load metadata for docker.io/library/golang:1.25.12-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587
+#3 DONE 0.0s
+
+#4 [control internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [control build 1/5] FROM docker.io/library/golang:1.25.12-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587
+#5 resolve docker.io/library/golang:1.25.12-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 0.0s done
+#5 DONE 0.0s
+
+#6 [control stage-1 1/3] FROM docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+#6 resolve docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce 0.0s done
+#6 DONE 0.0s
+
+#7 [control internal] load build context
+#7 transferring context: 118B done
+#7 DONE 0.0s
+
+#8 [control build 2/5] WORKDIR /src
+#8 CACHED
+
+#9 [control build 4/5] COPY *.go ./
+#9 CACHED
+
+#10 [control build 3/5] COPY go.mod ./
+#10 CACHED
+
+#11 [control build 5/5] RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ghostlight-control .
+#11 CACHED
+
+#12 [control stage-1 2/3] RUN apk add --no-cache wget     && addgroup -S ghostlight     && adduser -S -G ghostlight ghostlight
+#12 CACHED
+
+#13 [control stage-1 3/3] COPY --from=build /out/ghostlight-control /usr/local/bin/ghostlight-control
+#13 CACHED
+
+#14 [control] importing to docker
+#14 DONE 0.0s
+
+#15 [control] exporting to docker image format
+#15 exporting layers done
+#15 exporting manifest sha256:a9bd465e38beac11eb2b068d1f7517185fff26a1e535f37107086d54efd36ad9 done
+#15 exporting config sha256:057de481bd440afb114c04768df2c4b90c53c3456ea213a33baebbce7f89462b done
+#15 sending tarball 0.1s done
+#15 DONE 0.1s
+
+#16 [control] resolving provenance for metadata file
+#16 DONE 0.0s
+ control  Built
+ Network ghostlight_final_f94bb78_default  Creating
+ Network ghostlight_final_f94bb78_default  Created
+ Container ghostlight_final_f94bb78-viewer-1  Creating
+ Container ghostlight_final_f94bb78-viewer-1  Created
+ Container ghostlight_final_f94bb78-control-1  Creating
+ Container ghostlight_final_f94bb78-control-1  Created
+ Container ghostlight_final_f94bb78-viewer-1  Starting
+ Container ghostlight_final_f94bb78-viewer-1  Started
+ Container ghostlight_final_f94bb78-viewer-1  Waiting
+ Container ghostlight_final_f94bb78-viewer-1  Healthy
+ Container ghostlight_final_f94bb78-control-1  Starting
+ Container ghostlight_final_f94bb78-control-1  Started
+ Container ghostlight_final_f94bb78-control-1  Waiting
+ Container ghostlight_final_f94bb78-viewer-1  Waiting
+ Container ghostlight_final_f94bb78-viewer-1  Healthy
+ Container ghostlight_final_f94bb78-control-1  Healthy
+{
+   "Browser": "Chrome/151.0.7922.71",
+   "Protocol-Version": "1.3",
+   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "V8-Version": "15.1.206.10",
+   "WebKit-Version": "537.36 (@ef35003457e93c278f911a334b06e4a5f8967e06)",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:64280/devtools/browser/4b64fdb9-309a-4fce-906f-a18b0614c154"
+}
+
+{
+  "phase": "before",
+  "pipeline": "browser-target-restoration-server-state-and-neko-screenshot",
+  "proofTargetCount": 2,
+  "evidence": [
+    {
+      "id": "2EF49E99916E921BD405B3F2D44EC1B7",
+      "title": "Ghostlight Synthetic Tab A",
+      "type": "page",
+      "url": "http://127.0.0.1:18083/state-a",
+      "screenshot": "before-tab-a.jpg"
+    },
+    {
+      "id": "EB76545EA86DF1742F30A0723501713B",
+      "title": "",
+      "type": "page",
+      "url": "http://127.0.0.1:18083/state-b",
+      "screenshot": "before-tab-b.jpg"
+    }
+  ]
+}
+ Container ghostlight_final_f94bb78-control-1  Stopping
+ Container ghostlight_final_f94bb78-control-1  Stopped
+ Container ghostlight_final_f94bb78-control-1  Removing
+ Container ghostlight_final_f94bb78-control-1  Removed
+ Container ghostlight_final_f94bb78-viewer-1  Stopping
+ Container ghostlight_final_f94bb78-viewer-1  Stopped
+ Container ghostlight_final_f94bb78-viewer-1  Removing
+ Container ghostlight_final_f94bb78-viewer-1  Removed
+ Network ghostlight_final_f94bb78_default  Removing
+ Network ghostlight_final_f94bb78_default  Removed
+time="2026-08-12T09:28:29-07:00" level=warning msg="COMPOSE_BAKE=false is deprecated, support for internal compose builder will be removed in next release"
+#0 building with "homelab-insecure" instance using docker-container driver
+
+#1 [control internal] load build definition from Dockerfile
+#1 transferring dockerfile: 805B done
+#1 DONE 0.0s
+
+#2 [control internal] load metadata for docker.io/library/golang:1.25.12-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587
+#2 DONE 0.0s
+
+#3 [control internal] load metadata for docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+#3 DONE 0.0s
+
+#4 [control internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [control build 1/5] FROM docker.io/library/golang:1.25.12-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587
+#5 resolve docker.io/library/golang:1.25.12-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 0.0s done
+#5 DONE 0.0s
+
+#6 [control stage-1 1/3] FROM docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+#6 resolve docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce 0.0s done
+#6 DONE 0.0s
+
+#7 [control internal] load build context
+#7 transferring context: 118B done
+#7 DONE 0.0s
+
+#8 [control build 5/5] RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ghostlight-control .
+#8 CACHED
+
+#9 [control stage-1 2/3] RUN apk add --no-cache wget     && addgroup -S ghostlight     && adduser -S -G ghostlight ghostlight
+#9 CACHED
+
+#10 [control build 4/5] COPY *.go ./
+#10 CACHED
+
+#11 [control build 3/5] COPY go.mod ./
+#11 CACHED
+
+#12 [control build 2/5] WORKDIR /src
+#12 CACHED
+
+#13 [control stage-1 3/3] COPY --from=build /out/ghostlight-control /usr/local/bin/ghostlight-control
+#13 CACHED
+
+#14 [control] importing to docker
+#14 DONE 0.0s
+
+#15 [control] exporting to docker image format
+#15 exporting layers done
+#15 exporting manifest sha256:a9bd465e38beac11eb2b068d1f7517185fff26a1e535f37107086d54efd36ad9 done
+#15 exporting config sha256:057de481bd440afb114c04768df2c4b90c53c3456ea213a33baebbce7f89462b done
+#15 sending tarball 0.1s done
+#15 DONE 0.1s
+
+#16 [control] resolving provenance for metadata file
+#16 DONE 0.0s
+ control  Built
+ Network ghostlight_final_f94bb78_default  Creating
+ Network ghostlight_final_f94bb78_default  Created
+ Container ghostlight_final_f94bb78-viewer-1  Creating
+ Container ghostlight_final_f94bb78-viewer-1  Created
+ Container ghostlight_final_f94bb78-control-1  Creating
+ Container ghostlight_final_f94bb78-control-1  Created
+ Container ghostlight_final_f94bb78-viewer-1  Starting
+ Container ghostlight_final_f94bb78-viewer-1  Started
+ Container ghostlight_final_f94bb78-viewer-1  Waiting
+ Container ghostlight_final_f94bb78-viewer-1  Healthy
+ Container ghostlight_final_f94bb78-control-1  Starting
+ Container ghostlight_final_f94bb78-control-1  Started
+ Container ghostlight_final_f94bb78-control-1  Waiting
+ Container ghostlight_final_f94bb78-viewer-1  Waiting
+ Container ghostlight_final_f94bb78-viewer-1  Healthy
+ Container ghostlight_final_f94bb78-control-1  Healthy
+{
+  "phase": "after",
+  "pipeline": "browser-target-restoration-server-state-and-neko-screenshot",
+  "proofTargetCount": 2,
+  "evidence": [
+    {
+      "id": "B82770756A42D988C413110357F3A5B1",
+      "title": "Ghostlight Synthetic Tab A",
+      "type": "page",
+      "url": "http://127.0.0.1:18083/state-a",
+      "screenshot": "after-tab-a.jpg"
+    },
+    {
+      "id": "AEBFFA65532F48CFFA7DCA7F19D6F04A",
+      "title": "Ghostlight Synthetic Tab B",
+      "type": "page",
+      "url": "http://127.0.0.1:18083/state-b",
+      "screenshot": "after-tab-b.jpg"
+    }
+  ]
+}
+post-recreation cookie and local-storage markers passed for both restored tabs
+before_viewer=f7cf93bf6596217ab35169b90e83112e0c55d63564d303e92485bc53e1a5a1c9
+after_viewer=3519f30b12d02b7d6ff9ea90a0999d86a1d1244569f14e6f14ecb7e65cf95a0b
+before_control=d96cafead9fe9fab6e317264f404e86a9476872462825c6e53488bfe69695cd6
+after_control=b36fb1d21d74821b67f2d80415cc0b9b1c93f0e8ab02616394f2e955d2369d48
+NAME                                 IMAGE                                                                                                 COMMAND                  SERVICE   CREATED          STATUS                    PORTS
+ghostlight_final_f94bb78-control-1   ghostlight_final_f94bb78-control                                                                      "/usr/local/bin/ghos…"   control   18 seconds ago   Up 12 seconds (healthy)
+ghostlight_final_f94bb78-viewer-1    ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7   "/usr/bin/supervisor…"   viewer    18 seconds ago   Up 18 seconds (healthy)   127.0.0.1:59080->59080/tcp, 127.0.0.1:59080->59080/udp, 127.0.0.1:64081->8080/tcp, 127.0.0.1:64080->8082/tcp, 127.0.0.1:64280->9223/tcp
+{"cookie": "", "path": "/state-a", "query": {}, "time": "2026-08-12T16:28:24.759515+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/state-b", "query": {}, "time": "2026-08-12T16:28:24.822378+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/favicon.ico", "query": {}, "time": "2026-08-12T16:28:24.824846+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["A"], "value": ["none"]}, "time": "2026-08-12T16:28:24.824722+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["B"], "value": ["synthetic-20260812T162811Z"]}, "time": "2026-08-12T16:28:24.840666+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/state-b", "query": {}, "time": "2026-08-12T16:28:31.979924+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/state-a", "query": {}, "time": "2026-08-12T16:28:32.000530+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["A"], "value": ["synthetic-20260812T162811Z"]}, "time": "2026-08-12T16:28:32.029626+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["B"], "value": ["synthetic-20260812T162811Z"]}, "time": "2026-08-12T16:28:32.060619+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/favicon.ico", "query": {}, "time": "2026-08-12T16:28:32.073921+00:00"}
+screenshot privacy audit passed for 4 image file(s)
+0b1d143b37354e0ad91f8d855e4249c330eaed55b6e125c76f6d5e8d9df7a413  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/after-tab-a.jpg
+7adb1952222488663680e01100deae45c671a518dd8e4ab1d427f62c43fc6890  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/after-tab-b.jpg
+b3d626aa5edc138e2e8d2bb01783bc53454f3ce501e764e5c3456752f4dc3e37  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/before-tab-a.jpg
+7adb1952222488663680e01100deae45c671a518dd8e4ab1d427f62c43fc6890  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/before-tab-b.jpg
+37f9e768aa0781143c6732fc5b93311098adb64bbf7041d684621e6e99d46389  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/after-evidence.json
+6badbe17ae7fcaee4e8daa5b30e81ed6623f888879b4d08b3443c2906af21319  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/before-evidence.json
+02477d9e6039dc3828122fd71486669d92f1a77bb37eba2e99991e8b6969f9d7  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/after-requests.jsonl
+5e4ed7132d0a4894360a122df92fc7bb5c1d1d0d344cd45e2ae0cdfd3c739424  /home/developer/ghostlight-final-238de9a/output/acceptance-f94bb78/before-requests.jsonl

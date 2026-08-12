@@ -1,10 +1,6 @@
 import Foundation
 
-public struct CreateSessionRequest: Codable, Equatable, Sendable {
-    public init() {}
-}
-
-public struct CreateSessionResponse: Codable, Equatable, Sendable {
+public struct ViewerDiscoveryResponse: Codable, Equatable, Sendable {
     public let viewerURL: URL
 
     public init(viewerURL: URL) {

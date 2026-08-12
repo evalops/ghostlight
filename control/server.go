@@ -1,11 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,18 +13,21 @@ import (
 )
 
 const (
-	defaultListenAddr     = ":8080"
-	defaultStorePath      = "/data/sessions.json"
-	maxRequestBodyBytes   = 1 << 20
-	viewerURLEnvironment  = "GHOSTLIGHT_VIEWER_URL"
-	storePathEnvironment  = "GHOSTLIGHT_STORE_PATH"
-	listenAddrEnvironment = "GHOSTLIGHT_LISTEN_ADDR"
+	defaultListenAddr          = ":8080"
+	viewerURLEnvironment       = "GHOSTLIGHT_VIEWER_URL"
+	viewerHealthURLEnvironment = "GHOSTLIGHT_VIEWER_HEALTH_URL"
+	listenAddrEnvironment      = "GHOSTLIGHT_LISTEN_ADDR"
+	viewerHealthPath           = "/health"
+	viewerHealthTimeout        = 2 * time.Second
+	healthPath                 = "/healthz"
+	readinessPath              = "/readyz"
+	viewerDiscoveryPath        = "/v1/viewer"
 )
 
 type Config struct {
-	ListenAddr string
-	StorePath  string
-	ViewerURL  string
+	ListenAddr      string
+	ViewerURL       string
+	ViewerHealthURL string
 }
 
 type APIError struct {
@@ -38,8 +40,10 @@ type errorResponse struct {
 }
 
 type handler struct {
-	store     *FileStore
-	viewerURL string
+	viewerURL       string
+	viewerHealthURL string
+	viewerClient    *http.Client
+	viewerTimeout   time.Duration
 }
 
 func loadConfig() (Config, error) {
@@ -47,16 +51,19 @@ func loadConfig() (Config, error) {
 	if err := validateViewerURL(viewerURL); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", viewerURLEnvironment, err)
 	}
+	viewerHealthURL := strings.TrimSpace(os.Getenv(viewerHealthURLEnvironment))
+	if viewerHealthURL == "" {
+		viewerHealthURL = viewerURL
+	}
+	if err := validateViewerURL(viewerHealthURL); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", viewerHealthURLEnvironment, err)
+	}
 
 	listenAddr := strings.TrimSpace(os.Getenv(listenAddrEnvironment))
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
-	storePath := strings.TrimSpace(os.Getenv(storePathEnvironment))
-	if storePath == "" {
-		storePath = defaultStorePath
-	}
-	return Config{ListenAddr: listenAddr, StorePath: storePath, ViewerURL: viewerURL}, nil
+	return Config{ListenAddr: listenAddr, ViewerURL: viewerURL, ViewerHealthURL: viewerHealthURL}, nil
 }
 
 func validateViewerURL(raw string) error {
@@ -70,6 +77,9 @@ func validateViewerURL(raw string) error {
 	if !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" {
 		return errors.New("must be an absolute HTTP URL")
 	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return errors.New("must not contain credentials or a fragment")
+	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https":
 		return nil
@@ -78,18 +88,54 @@ func validateViewerURL(raw string) error {
 	}
 }
 
-func NewHandler(store *FileStore, viewerURL string) http.Handler {
-	return &handler{store: store, viewerURL: viewerURL}
+func NewHandler(viewerURL string) http.Handler {
+	return newHandler(viewerURL, &http.Client{Timeout: viewerHealthTimeout})
+}
+
+func newHandler(viewerURL string, client *http.Client) *handler {
+	return newHandlerWithHealthURL(viewerURL, viewerURL, client)
+}
+
+func newHandlerWithHealthURL(viewerURL, viewerHealthURL string, client *http.Client) *handler {
+	if client != nil {
+		clientCopy := *client
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		client = &clientCopy
+	}
+	return &handler{
+		viewerURL:       viewerURL,
+		viewerHealthURL: healthURL(viewerHealthURL),
+		viewerClient:    client,
+		viewerTimeout:   viewerHealthTimeout,
+	}
+}
+
+func healthURL(viewerURL string) string {
+	if err := validateViewerURL(viewerURL); err != nil {
+		return ""
+	}
+	parsed, err := url.Parse(viewerURL)
+	if err != nil {
+		return ""
+	}
+	parsed.Path = viewerHealthPath
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
-	case r.URL.Path == "/healthz":
+	case r.URL.Path == healthPath:
 		h.handleHealth(w, r)
-	case r.URL.Path == "/v1/sessions":
-		h.handleSessions(w, r)
-	case strings.HasPrefix(r.URL.Path, "/v1/sessions/"):
-		h.handleSession(w, r)
+	case r.URL.Path == readinessPath:
+		h.handleReadiness(w, r)
+	case r.URL.Path == viewerDiscoveryPath:
+		h.handleViewerDiscovery(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
@@ -103,109 +149,43 @@ func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeMethodNotAllowed(w, http.MethodPost)
-		return
-	}
-	if !validateAndConsumeOptionalJSON(w, r) {
+func (h *handler) handleReadiness(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
-	session, err := h.store.Create(h.viewerURL, time.Now().UTC())
+	if !h.viewerReady(r) {
+		writeError(w, http.StatusServiceUnavailable, "viewer_unavailable", "configured viewer health check failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "viewer": "ready"})
+}
+
+func (h *handler) handleViewerDiscovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"viewer_url": h.viewerURL})
+}
+
+func (h *handler) viewerReady(r *http.Request) bool {
+	if h.viewerHealthURL == "" || h.viewerClient == nil || h.viewerTimeout <= 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), h.viewerTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.viewerHealthURL, nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "could not create session")
-		return
-	}
-	w.Header().Set("Location", "/v1/sessions/"+session.ID)
-	writeJSON(w, http.StatusCreated, session)
-}
-
-func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
-	if id == "" || strings.Contains(id, "/") {
-		writeError(w, http.StatusNotFound, "session_not_found", "session not found")
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		session, err := h.store.Get(id)
-		if errors.Is(err, ErrSessionNotFound) {
-			writeError(w, http.StatusNotFound, "session_not_found", "session not found")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "could not read session")
-			return
-		}
-		writeJSON(w, http.StatusOK, session)
-	case http.MethodDelete:
-		if err := h.store.Delete(id); errors.Is(err, ErrSessionNotFound) {
-			writeError(w, http.StatusNotFound, "session_not_found", "session not found")
-		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "could not delete session")
-		} else {
-			w.WriteHeader(http.StatusNoContent)
-		}
-	default:
-		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodDelete)
-	}
-}
-
-func validateAndConsumeOptionalJSON(w http.ResponseWriter, r *http.Request) bool {
-	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
-	if contentType != "" {
-		mediaType, _, err := mime.ParseMediaType(contentType)
-		if err != nil || !strings.EqualFold(mediaType, "application/json") {
-			writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
-			return false
-		}
-	} else if r.ContentLength != 0 {
-		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json when a body is present")
 		return false
 	}
-
-	if r.ContentLength > maxRequestBodyBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 1048576 bytes")
+	response, err := h.viewerClient.Do(request)
+	if err != nil {
 		return false
 	}
-
-	body := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	defer body.Close()
-	decoder := json.NewDecoder(body)
-	var object map[string]json.RawMessage
-	if err := decoder.Decode(&object); err != nil {
-		if errors.Is(err, io.EOF) {
-			return true
-		}
-		if isRequestTooLarge(err) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 1048576 bytes")
-		} else {
-			writeError(w, http.StatusBadRequest, "invalid_json", "request body must be a JSON object")
-		}
-		return false
-	}
-	if object == nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "request body must be a JSON object")
-		return false
-	}
-
-	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if isRequestTooLarge(err) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 1048576 bytes")
-		} else {
-			writeError(w, http.StatusBadRequest, "invalid_json", "request body must contain one JSON object")
-		}
-		return false
-	}
-	return true
-}
-
-func isRequestTooLarge(err error) bool {
-	var maxBytesError *http.MaxBytesError
-	return errors.As(err, &maxBytesError)
+	defer response.Body.Close()
+	return response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices
 }
 
 func writeMethodNotAllowed(w http.ResponseWriter, allow string) {

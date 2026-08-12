@@ -1,0 +1,21 @@
+{
+  "phase": "after",
+  "pipeline": "browser-target-restoration-server-state-and-neko-screenshot",
+  "proofTargetCount": 2,
+  "evidence": [
+    {
+      "id": "B82770756A42D988C413110357F3A5B1",
+      "title": "Ghostlight Synthetic Tab A",
+      "type": "page",
+      "url": "http://127.0.0.1:18083/state-a",
+      "screenshot": "after-tab-a.jpg"
+    },
+    {
+      "id": "AEBFFA65532F48CFFA7DCA7F19D6F04A",
+      "title": "Ghostlight Synthetic Tab B",
+      "type": "page",
+      "url": "http://127.0.0.1:18083/state-b",
+      "screenshot": "after-tab-b.jpg"
+    }
+  ]
+}

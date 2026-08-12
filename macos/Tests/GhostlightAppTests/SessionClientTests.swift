@@ -8,7 +8,7 @@ final class SessionClientTests: XCTestCase {
         super.tearDown()
     }
 
-    func testCreateSessionEncodesEmptyJSONRequest() async throws {
+    func testDiscoverViewerUsesStatelessGETRequest() async throws {
         let expectedResponse = Data(#"{"viewer_url":"http://localhost:6080/viewer"}"#.utf8)
         var capturedRequest: URLRequest?
         var capturedBody: Data?
@@ -24,22 +24,22 @@ final class SessionClientTests: XCTestCase {
         }
 
         let client = SessionClient(session: makeStubSession())
-        let response = try await client.createSession(
+        let response = try await client.discoverViewer(
             at: try XCTUnwrap(URL(string: "http://localhost:8080"))
         )
 
-        XCTAssertEqual(capturedRequest?.httpMethod, "POST")
-        XCTAssertEqual(capturedRequest?.url?.absoluteString, "http://localhost:8080/v1/sessions")
-        XCTAssertEqual(capturedRequest?.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(capturedRequest?.httpMethod, "GET")
+        XCTAssertEqual(capturedRequest?.url?.absoluteString, "http://localhost:8080/v1/viewer")
+        XCTAssertNil(capturedRequest?.value(forHTTPHeaderField: "Content-Type"))
         XCTAssertEqual(capturedRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
-        XCTAssertEqual(capturedBody, Data("{}".utf8))
+        XCTAssertNil(capturedBody)
         XCTAssertEqual(response.viewerURL.absoluteString, "http://localhost:6080/viewer")
     }
 
-    func testCreateSessionResponseDecodesViewerURL() throws {
+    func testViewerDiscoveryResponseDecodesViewerURL() throws {
         let data = Data(#"{"viewer_url":"https://ghostlight.example/viewer?session=abc"}"#.utf8)
 
-        let response = try JSONDecoder().decode(CreateSessionResponse.self, from: data)
+        let response = try JSONDecoder().decode(ViewerDiscoveryResponse.self, from: data)
 
         XCTAssertEqual(
             response.viewerURL,
@@ -91,8 +91,8 @@ final class SessionClientTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let firstClient = StubSessionCreating(
-            response: CreateSessionResponse(
+        let firstClient = StubViewerDiscovering(
+            response: ViewerDiscoveryResponse(
                 viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
             )
         )
@@ -107,8 +107,8 @@ final class SessionClientTests: XCTestCase {
         await fulfillment(of: [firstClient.requestExpectation], timeout: 1)
         await waitUntil { firstLaunch.viewerURL != nil }
 
-        let relaunchClient = StubSessionCreating(
-            response: CreateSessionResponse(
+        let relaunchClient = StubViewerDiscovering(
+            response: ViewerDiscoveryResponse(
                 viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
             )
         )
@@ -131,8 +131,8 @@ final class SessionClientTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         defaults.set("http://saved.example.test:8080", forKey: "GhostlightControlPlaneURL")
 
-        let client = StubSessionCreating(
-            response: CreateSessionResponse(
+        let client = StubViewerDiscovering(
+            response: ViewerDiscoveryResponse(
                 viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
             )
         )
@@ -147,6 +147,202 @@ final class SessionClientTests: XCTestCase {
         await waitUntil { viewModel.viewerURL != nil }
         XCTAssertEqual(viewModel.controlPlaneURL, "http://environment.example.test:8080")
         XCTAssertEqual(client.requestedURLs, ["http://environment.example.test:8080"])
+    }
+
+    @MainActor
+    func testViewerNavigationTransitionsAndBoundedAutomaticRetry() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://saved.example.test:8080", forKey: "GhostlightControlPlaneURL")
+
+        let viewerURL = try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+        let client = StubViewerDiscovering(response: ViewerDiscoveryResponse(viewerURL: viewerURL))
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: true)
+
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.state == .loadingViewer(viewerURL, retryAttempt: 0) }
+
+        viewModel.viewerNavigationStarted()
+        XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 0))
+        viewModel.viewerNavigationFailed("synthetic navigation failure")
+        XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 1))
+        XCTAssertEqual(viewModel.reloadToken, 1)
+        viewModel.viewerNavigationFailed("synthetic navigation failure")
+        XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 2))
+        XCTAssertEqual(viewModel.reloadToken, 2)
+        viewModel.viewerNavigationFailed("synthetic navigation failure")
+        XCTAssertEqual(
+            viewModel.state,
+            .viewerFailed(viewerURL, message: "synthetic navigation failure")
+        )
+
+        viewModel.retryViewer()
+        XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 0))
+        viewModel.viewerNavigationFinished(at: viewerURL)
+        XCTAssertEqual(viewModel.state, .viewerLoaded(viewerURL))
+    }
+
+    @MainActor
+    func testExplicitRetryDoesNotRestartAutomaticRetryLoop() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewerURL = try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+        let client = StubViewerDiscovering(response: ViewerDiscoveryResponse(viewerURL: viewerURL))
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.controlPlaneURL = "http://control.example.test:8080"
+        viewModel.connect()
+
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.state == .loadingViewer(viewerURL, retryAttempt: 0) }
+        viewModel.viewerNavigationFailed("first failure")
+        XCTAssertEqual(viewModel.state, .viewerFailed(viewerURL, message: "first failure"))
+        viewModel.retryViewer()
+        viewModel.viewerNavigationFailed("second failure")
+        XCTAssertEqual(viewModel.state, .viewerFailed(viewerURL, message: "second failure"))
+    }
+
+    @MainActor
+    func testReloadReportsLoadingUntilNavigationFinishes() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewerURL = try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+        let client = StubViewerDiscovering(response: ViewerDiscoveryResponse(viewerURL: viewerURL))
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.connect()
+
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.state == .loadingViewer(viewerURL, retryAttempt: 0) }
+        viewModel.viewerNavigationFinished(at: viewerURL)
+        XCTAssertEqual(viewModel.state, .viewerLoaded(viewerURL))
+
+        viewModel.reloadViewer()
+        viewModel.viewerNavigationStarted()
+
+        XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 0))
+    }
+
+    @MainActor
+    func testFinishedRedirectDoesNotReplaceDiscoveredViewerEntryURL() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewerURL = try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+        let redirectedURL = try XCTUnwrap(URL(string: "http://viewer.example.test:8081/login"))
+        let client = StubViewerDiscovering(response: ViewerDiscoveryResponse(viewerURL: viewerURL))
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.connect()
+
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.state == .loadingViewer(viewerURL, retryAttempt: 0) }
+        viewModel.viewerNavigationFinished(at: redirectedURL)
+
+        XCTAssertEqual(viewModel.state, .viewerLoaded(viewerURL))
+        XCTAssertEqual(viewModel.viewerURL, viewerURL)
+    }
+
+    @MainActor
+    func testCancelledDiscoveryCannotOverwriteDisconnectWithFailure() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let client = CancellationIgnoringViewerDiscovering()
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.connect()
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+
+        viewModel.disconnect()
+        await fulfillment(of: [client.completionExpectation], timeout: 1)
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.state, .disconnected)
+        XCTAssertNil(defaults.string(forKey: "GhostlightControlPlaneURL"))
+    }
+
+    @MainActor
+    func testNewConnectionCannotBeOverwrittenByCancelledRequest() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewerURL = try XCTUnwrap(URL(string: "http://new-viewer.example.test:8081"))
+        let client = SupersededViewerDiscovering(
+            newResponse: ViewerDiscoveryResponse(viewerURL: viewerURL)
+        )
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.controlPlaneURL = "http://old-control.example.test:8080"
+        viewModel.connect()
+        await fulfillment(of: [client.oldRequestExpectation], timeout: 1)
+
+        viewModel.controlPlaneURL = "http://new-control.example.test:8080"
+        viewModel.connect()
+        await fulfillment(of: [client.newRequestExpectation], timeout: 1)
+        await waitUntil { viewModel.state == .loadingViewer(viewerURL, retryAttempt: 0) }
+        await fulfillment(of: [client.oldCompletionExpectation], timeout: 1)
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 0))
+        XCTAssertEqual(viewModel.viewerURL, viewerURL)
+        XCTAssertEqual(
+            defaults.string(forKey: "GhostlightControlPlaneURL"),
+            "http://new-control.example.test:8080"
+        )
+    }
+
+    @MainActor
+    func testViewerFailureAfterSuccessfulLoadReportsFailure() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewerURL = try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+        let client = StubViewerDiscovering(response: ViewerDiscoveryResponse(viewerURL: viewerURL))
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.connect()
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.state == .loadingViewer(viewerURL, retryAttempt: 0) }
+        viewModel.viewerNavigationFinished(at: viewerURL)
+
+        viewModel.viewerNavigationFailed("The viewer process stopped unexpectedly.")
+
+        XCTAssertEqual(
+            viewModel.state,
+            .viewerFailed(viewerURL, message: "The viewer process stopped unexpectedly.")
+        )
+    }
+
+    func testNavigationCancellationIsNotPresentedAsViewerFailure() {
+        XCTAssertFalse(
+            ViewerWebView.Coordinator.shouldReportNavigationError(URLError(.cancelled))
+        )
+        XCTAssertTrue(
+            ViewerWebView.Coordinator.shouldReportNavigationError(URLError(.cannotConnectToHost))
+        )
+    }
+
+    @MainActor
+    func testDisconnectClearsSavedAutomaticConnection() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://saved.example.test:8080", forKey: "GhostlightControlPlaneURL")
+
+        let client = StubViewerDiscovering(
+            response: ViewerDiscoveryResponse(
+                viewerURL: try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+            )
+        )
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.disconnect()
+
+        XCTAssertNil(defaults.string(forKey: "GhostlightControlPlaneURL"))
+        XCTAssertEqual(viewModel.state, .disconnected)
     }
 
     private func makeStubSession() -> URLSession {
@@ -192,19 +388,62 @@ final class SessionClientTests: XCTestCase {
     }
 }
 
-private final class StubSessionCreating: SessionCreating, @unchecked Sendable {
-    let requestExpectation = XCTestExpectation(description: "create session")
-    private let response: CreateSessionResponse
+private final class StubViewerDiscovering: ViewerDiscovering, @unchecked Sendable {
+    let requestExpectation = XCTestExpectation(description: "viewer discovery")
+    private let response: ViewerDiscoveryResponse
     private(set) var requestedURLs: [String] = []
 
-    init(response: CreateSessionResponse) {
+    init(response: ViewerDiscoveryResponse) {
         self.response = response
     }
 
-    func createSession(controlPlaneURL: String) async throws -> CreateSessionResponse {
+    func discoverViewer(controlPlaneURL: String) async throws -> ViewerDiscoveryResponse {
         requestedURLs.append(controlPlaneURL)
         requestExpectation.fulfill()
         return response
+    }
+}
+
+private final class CancellationIgnoringViewerDiscovering: ViewerDiscovering, @unchecked Sendable {
+    let requestExpectation = XCTestExpectation(description: "viewer discovery requested")
+    let completionExpectation = XCTestExpectation(description: "viewer discovery completed")
+
+    func discoverViewer(controlPlaneURL: String) async throws -> ViewerDiscoveryResponse {
+        requestExpectation.fulfill()
+        do {
+            try await Task.sleep(for: .milliseconds(20))
+        } catch {
+            // Model a transport that maps cancellation to its own domain error.
+        }
+        completionExpectation.fulfill()
+        throw SessionClientError.networkUnavailable
+    }
+}
+
+private final class SupersededViewerDiscovering: ViewerDiscovering, @unchecked Sendable {
+    let oldRequestExpectation = XCTestExpectation(description: "old viewer discovery requested")
+    let newRequestExpectation = XCTestExpectation(description: "new viewer discovery requested")
+    let oldCompletionExpectation = XCTestExpectation(description: "old viewer discovery completed")
+    private let newResponse: ViewerDiscoveryResponse
+
+    init(newResponse: ViewerDiscoveryResponse) {
+        self.newResponse = newResponse
+    }
+
+    func discoverViewer(controlPlaneURL: String) async throws -> ViewerDiscoveryResponse {
+        if controlPlaneURL.contains("old-control") {
+            oldRequestExpectation.fulfill()
+            do {
+                try await Task.sleep(for: .milliseconds(20))
+            } catch {
+                // Model a transport that finishes after cancellation.
+            }
+            oldCompletionExpectation.fulfill()
+            throw SessionClientError.networkUnavailable
+        }
+
+        newRequestExpectation.fulfill()
+        return newResponse
     }
 }
 

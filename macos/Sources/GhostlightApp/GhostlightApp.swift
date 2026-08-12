@@ -56,7 +56,7 @@ struct ContentView: View {
             }
             .formStyle(.grouped)
 
-            if case let .failed(message) = viewModel.state {
+            if case let .controlFailed(message) = viewModel.state {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
@@ -69,23 +69,52 @@ struct ContentView: View {
 
     private func connectedView(viewerURL: URL) -> some View {
         VStack(spacing: 0) {
-            ViewerWebView(url: viewerURL, reloadToken: viewModel.reloadToken)
+            ViewerWebView(
+                url: viewerURL,
+                reloadToken: viewModel.reloadToken,
+                onNavigationStarted: viewModel.viewerNavigationStarted,
+                onNavigationFinished: viewModel.viewerNavigationFinished,
+                onNavigationFailed: viewModel.viewerNavigationFailed
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
             HStack(spacing: 12) {
-                Label("Connected", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                statusLabel
                 Spacer()
-                Button("Reload", systemImage: "arrow.clockwise") {
-                    viewModel.reloadViewer()
+                if case .viewerFailed = viewModel.state {
+                    Button("Retry", systemImage: "arrow.clockwise") {
+                        viewModel.retryViewer()
+                    }
+                } else if case .viewerLoaded = viewModel.state {
+                    Button("Reload", systemImage: "arrow.clockwise") {
+                        viewModel.reloadViewer()
+                    }
                 }
                 Button("Disconnect", systemImage: "rectangle.portrait.and.arrow.right") {
                     viewModel.disconnect()
                 }
             }
             .padding(12)
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        switch viewModel.state {
+        case .loadingViewer:
+            Label("Loading viewer", systemImage: "hourglass")
+                .foregroundStyle(.secondary)
+        case .viewerLoaded:
+            Label("Viewer loaded", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case let .viewerFailed(_, message):
+            Label("Viewer failed: \(message)", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .lineLimit(2)
+        case .disconnected, .discoveringControl, .controlFailed:
+            EmptyView()
         }
     }
 }

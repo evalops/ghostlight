@@ -1,0 +1,5 @@
+captured_utc=2026-08-12T15:52:45Z
+git_head=267c14c7d29aeffeabda906c7330c9150c16a506
+app_path=macos/.build/Ghostlight.app
+control_endpoint_sha256=d0299cefc8eb9660903e987c94517f64238bc1b9cb6f32daabceb26042de5f74
+bundle_id=org.evalops.Ghostlight

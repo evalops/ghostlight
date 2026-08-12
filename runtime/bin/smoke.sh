@@ -58,9 +58,28 @@ request_with_retry() {
   return 1
 }
 
+url_with_path() {
+  local raw_url="$1"
+  local path="$2"
+
+  python3 - "$raw_url" "$path" <<'PY'
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+parsed = urlsplit(sys.argv[1])
+if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+    raise SystemExit(1)
+path = "/" + sys.argv[2].lstrip("/")
+print(urlunsplit((parsed.scheme, parsed.netloc, path, "", "")))
+PY
+}
+
 require_command docker
 require_command curl
 require_command awk
+require_command grep
+require_command sed
+require_command python3
 
 [[ -f "$ENV_FILE" ]] || die "runtime/.env is missing; run 'cp runtime/.env.example runtime/.env' and replace the placeholders"
 if "$SCRIPT_DIR/find-placeholders.sh" "$ENV_FILE"; then
@@ -76,34 +95,50 @@ VIEWER_PORT="${VIEWER_PORT:-$(env_value VIEWER_PORT)}"
 VIEWER_PORT="${VIEWER_PORT:-8081}"
 CONTROL_HEALTH_PATH="${CONTROL_HEALTH_PATH:-$(env_value CONTROL_HEALTH_PATH)}"
 CONTROL_HEALTH_PATH="${CONTROL_HEALTH_PATH:-/healthz}"
-SESSION_CREATE_PATH="${SESSION_CREATE_PATH:-$(env_value SESSION_CREATE_PATH)}"
-SESSION_CREATE_PATH="${SESSION_CREATE_PATH:-/v1/sessions}"
-CONTROL_URL="${GHOSTLIGHT_CONTROL_URL:-http://127.0.0.1:$CONTROL_PORT}"
-DIRECT_VIEWER_URL="${GHOSTLIGHT_SMOKE_VIEWER_URL:-http://127.0.0.1:$VIEWER_PORT}"
+CONTROL_READY_PATH="${CONTROL_READY_PATH:-$(env_value CONTROL_READY_PATH)}"
+CONTROL_READY_PATH="${CONTROL_READY_PATH:-/readyz}"
+VIEWER_HEALTH_PATH="${VIEWER_HEALTH_PATH:-$(env_value VIEWER_HEALTH_PATH)}"
+VIEWER_HEALTH_PATH="${VIEWER_HEALTH_PATH:-/health}"
+VIEWER_DISCOVERY_PATH="${VIEWER_DISCOVERY_PATH:-$(env_value VIEWER_DISCOVERY_PATH)}"
+VIEWER_DISCOVERY_PATH="${VIEWER_DISCOVERY_PATH:-/v1/viewer}"
+bind_address="${GHOSTLIGHT_BIND_ADDRESS:-$(env_value GHOSTLIGHT_BIND_ADDRESS)}"
+[[ -n "$bind_address" ]] || die "GHOSTLIGHT_BIND_ADDRESS must be configured"
+url_host="$bind_address"
+if [[ "$url_host" == *:* && "$url_host" != \[*\] ]]; then
+  url_host="[$url_host]"
+fi
+
+CONTROL_URL="${GHOSTLIGHT_CONTROL_URL:-http://$url_host:$CONTROL_PORT}"
+DIRECT_VIEWER_URL="${GHOSTLIGHT_SMOKE_VIEWER_URL:-http://$url_host:$VIEWER_PORT}"
 
 CONTROL_HEALTH_URL="${CONTROL_URL%/}${CONTROL_HEALTH_PATH}"
-SESSION_CREATE_URL="${CONTROL_URL%/}${SESSION_CREATE_PATH}"
+CONTROL_READY_URL="${CONTROL_URL%/}${CONTROL_READY_PATH}"
+VIEWER_HEALTH_URL="${DIRECT_VIEWER_URL%/}${VIEWER_HEALTH_PATH}"
+VIEWER_DISCOVERY_URL="${CONTROL_URL%/}${VIEWER_DISCOVERY_PATH}"
 
 health_response="$(request_with_retry "$CONTROL_HEALTH_URL")" \
-  || die "control health failed at $CONTROL_HEALTH_URL; inspect 'docker compose --env-file $ENV_FILE -f $COMPOSE_FILE logs control'"
+  || die "control liveness failed at $CONTROL_HEALTH_URL; inspect 'docker compose --env-file $ENV_FILE -f $COMPOSE_FILE logs control'"
 printf '%s' "$health_response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' \
-  || die "control health at $CONTROL_HEALTH_URL did not return JSON status=ok"
+  || die "control liveness at $CONTROL_HEALTH_URL did not return JSON status=ok"
 
-request_with_retry "${DIRECT_VIEWER_URL%/}/" \
-  || die "viewer is unreachable at $DIRECT_VIEWER_URL; check viewer port $VIEWER_PORT and the Neko container logs"
+request_with_retry "$VIEWER_HEALTH_URL" \
+  || die "viewer health failed at $VIEWER_HEALTH_URL; check viewer port $VIEWER_PORT and the Neko container logs"
 
-session_response="$(request_once "$SESSION_CREATE_URL" -X POST -H 'Content-Type: application/json' --data '{}')" \
-  || die "session creation failed at $SESSION_CREATE_URL; inspect control logs and confirm POST /v1/sessions accepts JSON"
-printf '%s' "$session_response" | grep -Eq '"id"[[:space:]]*:[[:space:]]*"[^" ]+"' \
-  || die "session response from $SESSION_CREATE_URL has no id field"
-printf '%s' "$session_response" | grep -Eq '"viewer_url"[[:space:]]*:[[:space:]]*"[^" ]+"' \
-  || die "session response from $SESSION_CREATE_URL has no viewer_url field"
-printf '%s' "$session_response" | grep -Eq '"created_at"[[:space:]]*:' \
-  || die "session response from $SESSION_CREATE_URL has no created_at field"
+ready_response="$(request_with_retry "$CONTROL_READY_URL")" \
+  || die "control readiness failed at $CONTROL_READY_URL; viewer health may be unavailable"
+printf '%s' "$ready_response" | grep -Eq '"viewer"[[:space:]]*:[[:space:]]*"ready"' \
+  || die "control readiness at $CONTROL_READY_URL did not report viewer=ready"
 
-session_viewer_url="$(printf '%s' "$session_response" | sed -n 's/.*"viewer_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-[[ -n "$session_viewer_url" ]] || die "could not read viewer_url from the session response"
-request_with_retry "${session_viewer_url%/}/" \
-  || die "viewer is unreachable at $session_viewer_url; check viewer port 8081 and WebRTC host configuration"
+discovery_response="$(request_once "$VIEWER_DISCOVERY_URL")" \
+  || die "viewer discovery failed at $VIEWER_DISCOVERY_URL; inspect control logs"
+printf '%s' "$discovery_response" | grep -Eq '"viewer_url"[[:space:]]*:[[:space:]]*"[^" ]+"' \
+  || die "viewer discovery response from $VIEWER_DISCOVERY_URL has no viewer_url field"
 
-printf 'smoke passed: control health, session creation, and viewer reachability (%s)\n' "$session_viewer_url"
+discovered_viewer_url="$(printf '%s' "$discovery_response" | sed -n 's/.*"viewer_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+[[ -n "$discovered_viewer_url" ]] || die "could not read viewer_url from the discovery response"
+discovered_viewer_health_url="$(url_with_path "$discovered_viewer_url" "$VIEWER_HEALTH_PATH")" \
+  || die "could not normalize viewer health URL from discovery response"
+request_with_retry "$discovered_viewer_health_url" \
+  || die "discovered viewer health failed at $discovered_viewer_url; check GHOSTLIGHT_VIEWER_URL and NEKO_WEBRTC_NAT1TO1"
+
+printf 'smoke passed: control liveness, viewer /health, control readiness, and stateless viewer discovery (%s)\n' "$discovered_viewer_url"
