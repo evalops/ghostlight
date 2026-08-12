@@ -130,6 +130,11 @@ jobs:
           bash runtime/tests/test_runtime.sh
           bash runtime/tests/test_profile_backup.sh
 
+      - name: Install screenshot privacy dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tesseract-ocr
+
       - name: Boot, recreate, and verify Chromium profile persistence
         env:
           NEKO_IMAGE: ${{ steps.candidate.outputs.image }}

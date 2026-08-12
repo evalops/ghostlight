@@ -42,6 +42,7 @@ require_text 'Create the protected update pull request'
 require_text 'image --scanners vuln --format json'
 require_text '--exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed'
 require_text 'GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK: "0"'
+require_text 'sudo apt-get install --yes tesseract-ocr'
 require_text "tested_tree=\$(git rev-parse 'HEAD^{tree}')"
 require_text "remote_tree=\$(git rev-parse 'FETCH_HEAD^{tree}')"
 require_text 'gh pr list'
