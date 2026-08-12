@@ -32,7 +32,10 @@ done
 
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/m1k1o/neko/chromium:3.1.0'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'context: ../control'
+# These are literal Compose interpolation expressions, not shell expansions.
+# shellcheck disable=SC2016
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '"${CONTROL_PORT:-8080}:8080"'
+# shellcheck disable=SC2016
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '"${VIEWER_PORT:-8081}:8080"'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'shm_size: "2gb"'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'restart: unless-stopped'
