@@ -63,7 +63,7 @@ require_command curl
 require_command awk
 
 [[ -f "$ENV_FILE" ]] || die "runtime/.env is missing; run 'cp runtime/.env.example runtime/.env' and replace the placeholders"
-if grep --line-number --fixed-strings '__GENERATE_AT_INSTALL__' "$ENV_FILE"; then
+if "$SCRIPT_DIR/find-placeholders.sh" "$ENV_FILE"; then
   die "runtime/.env still contains install-time placeholders; generate passwords and set the reachable viewer address"
 fi
 
