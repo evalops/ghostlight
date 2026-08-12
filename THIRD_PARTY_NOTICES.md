@@ -11,6 +11,7 @@ The license names below describe the upstream source or tool. A release must ver
 | Docker Compose CLI | Local orchestration for the Docker-based Linux runtime. | Apache-2.0. | [Docker Compose LICENSE](https://github.com/docker/compose/blob/main/LICENSE) |
 | Go toolchain and standard library | Control service build and test execution. | BSD-style license described by the upstream `LICENSE` file. | [Go LICENSE](https://go.googlesource.com/go/+/master/LICENSE) |
 | Playwright | Test-only browser automation for synthetic persistence and performance lanes. | Apache-2.0. | [Playwright LICENSE](https://github.com/microsoft/playwright/blob/main/LICENSE) |
+| Tesseract OCR | Test-only rendered-pixel screening for public screenshot receipts. | Apache-2.0. | [Tesseract LICENSE](https://github.com/tesseract-ocr/tesseract/blob/main/LICENSE) |
 | Trivy | Test-only image vulnerability scanner in the scheduled browser-update lane. | Apache-2.0. | [Trivy LICENSE](https://github.com/aquasecurity/trivy/blob/main/LICENSE) |
 
 ## Verification queue

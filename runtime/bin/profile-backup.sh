@@ -29,6 +29,24 @@ checksum_path() {
   printf '%s.sha256' "$1"
 }
 
+env_value() {
+  local key="$1"
+  local value
+
+  value="$(awk -F= -v wanted="$key" '
+    $0 !~ /^[[:space:]]*#/ && $0 ~ "^[[:space:]]*" wanted "[[:space:]]*=" {
+      sub(/^[^=]*=/, "", $0)
+      print $0
+      exit
+    }
+  ' "$ENV_FILE")"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  printf '%s' "$value"
+}
+
 stat_mode() {
   if stat -c '%a' "$1" >/dev/null 2>&1; then
     stat -c '%a' "$1"
@@ -149,16 +167,21 @@ verify_checksum() {
 }
 
 quiesce_viewer() {
+  local project_name repo_root
+
   [[ "${PROFILE_BACKUP_SKIP_COMPOSE:-0}" == 1 ]] && return 0
   [[ -f "$ENV_FILE" ]] || die "runtime/.env is required to quiesce the viewer"
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop viewer >/dev/null
+  repo_root="$(cd -- "$RUNTIME_DIR/.." && pwd)"
+  project_name="${COMPOSE_PROJECT_NAME:-$(env_value COMPOSE_PROJECT_NAME)}"
+  project_name="${project_name:-$(basename -- "$repo_root")}"
+  docker compose --project-name "$project_name" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop viewer >/dev/null
 }
 
 backup_profile() {
   local source="$1"
   local requested_archive="$2"
   local archive checksum archive_parent source_parent source_name lock_dir
-  local temporary_archive temporary_checksum digest
+  local temporary_archive temporary_checksum published_checksum digest
 
   [[ -d "$source" ]] || die "profile source is not a directory: $source"
   reject_symlink_components "$source"
@@ -171,15 +194,24 @@ backup_profile() {
   archive="$archive_parent/$(basename -- "$requested_archive")"
   checksum="$(checksum_path "$archive")"
   [[ ! -e "$archive" && ! -L "$archive" ]] || die "refusing to overwrite existing archive: $archive"
-  [[ ! -e "$checksum" && ! -L "$checksum" ]] || die "refusing to overwrite existing checksum: $checksum"
 
   lock_dir="$archive.lock"
   mkdir -m 700 "$lock_dir" 2>/dev/null || die "backup target is already in use: $archive"
+  [[ ! -e "$archive" && ! -L "$archive" ]] || die "refusing to overwrite archive created during backup: $archive"
+  if [[ -e "$checksum" || -L "$checksum" ]]; then
+    [[ -f "$checksum" && ! -L "$checksum" ]] \
+      || die "refusing unsafe orphan checksum path: $checksum"
+    rm -- "$checksum" || die "could not remove orphan checksum from an interrupted backup: $checksum"
+  fi
   temporary_archive="$(mktemp "$archive_parent/.ghostlight-profile.XXXXXX.tar.gz")"
   temporary_checksum="$(mktemp "$archive_parent/.ghostlight-checksum.XXXXXX")"
+  published_checksum=""
   cleanup_backup() {
     [[ -z "${temporary_archive:-}" ]] || rm -f -- "$temporary_archive"
     [[ -z "${temporary_checksum:-}" ]] || rm -f -- "$temporary_checksum"
+    if [[ -n "${published_checksum:-}" && ! -e "$archive" && ! -L "$archive" ]]; then
+      rm -f -- "$published_checksum"
+    fi
     rmdir -- "$lock_dir" 2>/dev/null || true
   }
   trap cleanup_backup EXIT
@@ -200,12 +232,17 @@ backup_profile() {
   chmod 600 "$temporary_checksum"
   verify_checksum "$temporary_archive" "$temporary_checksum"
 
-  mv -n -- "$temporary_archive" "$archive"
-  [[ ! -e "$temporary_archive" ]] || die "refusing to overwrite archive created during backup: $archive"
-  temporary_archive=""
   mv -n -- "$temporary_checksum" "$checksum"
   [[ ! -e "$temporary_checksum" ]] || die "refusing to overwrite checksum created during backup: $checksum"
   temporary_checksum=""
+  published_checksum="$checksum"
+  if [[ "${PROFILE_BACKUP_FAIL_AFTER_CHECKSUM_PUBLISH:-0}" == 1 ]]; then
+    die "injected failure after checksum publication"
+  fi
+  mv -n -- "$temporary_archive" "$archive"
+  [[ ! -e "$temporary_archive" ]] || die "refusing to overwrite archive created during backup: $archive"
+  temporary_archive=""
+  published_checksum=""
   trap - EXIT
   rmdir -- "$lock_dir"
 

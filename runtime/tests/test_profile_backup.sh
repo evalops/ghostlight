@@ -63,10 +63,53 @@ chmod 640 "$source/Default/Sessions/Tabs_1"
 chmod 600 "$source/Default/Local State"
 ln -s "$SCRATCH_DIR/stale-singleton" "$source/SingletonSocket"
 
+fake_bin="$fixture_root/bin"
+docker_log="$fixture_root/docker.log"
+env_file="$fixture_root/runtime.env"
+mkdir -m 700 "$fake_bin"
+printf 'configured\n' >"$env_file"
+chmod 600 "$env_file"
+# These are literal lines in the generated fake Docker script.
+# shellcheck disable=SC2016
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "%s\n" "$*" >>"${FAKE_DOCKER_LOG:?}"' \
+  'if [[ "$*" == *" stop viewer" && "${FAKE_DOCKER_FAIL_STOP:-0}" == 1 ]]; then exit 1; fi' \
+  'exit 0' >"$fake_bin/docker"
+chmod 700 "$fake_bin/docker"
+
+quiesced_archive="$fixture_root/quiesced.tar.gz"
+PATH="$fake_bin:$PATH" FAKE_DOCKER_LOG="$docker_log" GHOSTLIGHT_ENV_FILE="$env_file" \
+  "$BACKUP_SCRIPT" backup "$source" "$quiesced_archive"
+repo_root="$(cd -- "$RUNTIME_DIR/.." && pwd)"
+expected_project_name="$(basename -- "$repo_root")"
+grep --fixed-strings -- "compose --project-name $expected_project_name --env-file $env_file -f $RUNTIME_DIR/docker-compose.yml stop viewer" "$docker_log" >/dev/null \
+  || fail "backup must stop the viewer in the documented root Compose project"
+
+failed_quiesce_archive="$fixture_root/failed-quiesce.tar.gz"
+expect_failure "viewer quiesce failure" env PATH="$fake_bin:$PATH" FAKE_DOCKER_LOG="$docker_log" \
+  FAKE_DOCKER_FAIL_STOP=1 GHOSTLIGHT_ENV_FILE="$env_file" \
+  "$BACKUP_SCRIPT" backup "$source" "$failed_quiesce_archive"
+[[ ! -e "$failed_quiesce_archive" && ! -e "$failed_quiesce_archive.sha256" ]] \
+  || fail "failed viewer quiesce must not publish backup material"
+
 PROFILE_BACKUP_SKIP_COMPOSE=1 "$BACKUP_SCRIPT" backup "$source" "$archive"
 [[ -f "$archive.sha256" ]] || fail "backup checksum is missing"
 [[ "$(stat_mode "$archive")" == 600 ]] \
   || fail "backup archive must have mode 600"
+
+interrupted_archive="$fixture_root/interrupted.tar.gz"
+expect_failure "injected publication failure" env PROFILE_BACKUP_SKIP_COMPOSE=1 \
+  PROFILE_BACKUP_FAIL_AFTER_CHECKSUM_PUBLISH=1 "$BACKUP_SCRIPT" backup "$source" "$interrupted_archive"
+[[ ! -e "$interrupted_archive" && ! -L "$interrupted_archive" ]] \
+  || fail "interrupted backup published an archive"
+[[ ! -e "$interrupted_archive.sha256" && ! -L "$interrupted_archive.sha256" ]] \
+  || fail "interrupted backup left an orphan checksum"
+printf 'orphan-from-killed-backup\n' >"$interrupted_archive.sha256"
+chmod 600 "$interrupted_archive.sha256"
+PROFILE_BACKUP_SKIP_COMPOSE=1 "$BACKUP_SCRIPT" backup "$source" "$interrupted_archive"
+[[ -f "$interrupted_archive" && -f "$interrupted_archive.sha256" ]] \
+  || fail "backup did not recover from an orphan checksum"
 
 printf 'synthetic-cookie=changed-after-backup\n' >"$source/Default/Cookies"
 printf 'synthetic-tab=state-b\n' >"$source/Default/Sessions/Tabs_1"

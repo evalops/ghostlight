@@ -109,9 +109,9 @@ const collectStats = () => page.evaluate(async () => {
 
 const start = performance.now();
 const startStats = await collectStats();
-const inputStart = performance.now();
+const phaseStart = performance.now();
 await page.keyboard.press("Shift");
-const frameCallbackDelayMs = await page.evaluate(() => new Promise((resolve) => {
+const nextPresentedFrameCallbackDelayMs = await page.evaluate(() => new Promise((resolve) => {
   const begun = performance.now();
   const video = document.querySelector("video");
   if (video && "requestVideoFrameCallback" in video) {
@@ -120,7 +120,7 @@ const frameCallbackDelayMs = await page.evaluate(() => new Promise((resolve) => 
     requestAnimationFrame(() => resolve(performance.now() - begun));
   }
 }));
-const inputToPresentedFrameMs = performance.now() - inputStart;
+const dispatchToNextPresentedFramePhaseMs = performance.now() - phaseStart;
 
 await page.waitForTimeout(10000);
 const end = performance.now();
@@ -138,8 +138,8 @@ const result = {
   requestedCodec,
   h264Supported: endStats.h264Supported,
   sampleSeconds: elapsedSeconds,
-  inputToPresentedFrameMs,
-  frameCallbackDelayMs,
+  dispatchToNextPresentedFramePhaseMs,
+  nextPresentedFrameCallbackDelayMs,
   decodedFrames,
   droppedFrames,
   receivedBytes,
@@ -151,8 +151,8 @@ const result = {
     sdpFmtpLine: codec.sdpFmtpLine ?? null,
   } : null,
   limitations: [
-    "Input latency is measured from browser keyboard dispatch until the next presented WebRTC video frame.",
-    "The metric does not include physical keyboard polling or display scanout.",
+    "The dispatch-to-next-frame phase starts immediately before synthetic browser keyboard dispatch and ends at the next presented WebRTC video frame.",
+    "The observed frame is not proven to have been caused by the keyboard event, so this phase metric is not input latency or an input-to-photon measurement.",
     "The H.264 run only changes codec preference when the browser advertises H.264 receiver capability; the Neko default remains unchanged.",
   ],
   decision: requestedCodec === "default"

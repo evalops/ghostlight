@@ -25,6 +25,7 @@ required_files=(
   runtime/.env.example
   runtime/docker-compose.yml
   runtime/tests/test_runtime.sh
+  tests/acceptance/run-linux-persistence.sh
 )
 
 for relative_path in "${required_files[@]}"; do
@@ -49,13 +50,38 @@ else
       failures=$((failures + 1))
     fi
   done
+  if ! grep -Fq -- 'runtime/.env.example' "$repo_root/tests/acceptance/run-linux-persistence.sh"; then
+    printf 'tests/acceptance/run-linux-persistence.sh does not derive its default Neko image from runtime/.env.example\n' >&2
+    failures=$((failures + 1))
+  fi
+  if grep -Eq 'ghcr\.io/m1k1o/neko/chromium@sha256:[0-9a-f]{64}' "$repo_root/tests/acceptance/run-linux-persistence.sh"; then
+    printf 'tests/acceptance/run-linux-persistence.sh contains a stale-prone hardcoded Neko digest\n' >&2
+    failures=$((failures + 1))
+  fi
+fi
+
+compose_count=0
+while IFS= read -r -d '' compose_file; do
+  compose_count=$((compose_count + 1))
+  while IFS= read -r image_line; do
+    image_ref=$(sed -E 's/^[[:space:]]*image[[:space:]]*:[[:space:]]*//' <<<"$image_line")
+    if [[ ! "$image_ref" =~ @sha256:[0-9a-f]{64} ]]; then
+      printf '%s has a non-digest-pinned image: %s\n' "${compose_file#"$repo_root/"}" "$image_ref" >&2
+      failures=$((failures + 1))
+    fi
+  done < <(grep -E '^[[:space:]]*image[[:space:]]*:' "$compose_file" || true)
+done < <(find "$repo_root" -type f \( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \) -not -path "$repo_root/.git/*" -print0)
+
+if (( compose_count == 0 )); then
+  printf 'no Compose files found to validate\n' >&2
+  failures=$((failures + 1))
 fi
 
 workflow_count=0
 while IFS= read -r -d '' workflow; do
   workflow_count=$((workflow_count + 1))
   while IFS= read -r action_line; do
-    action_ref=${action_line#*uses:}
+    action_ref=$(sed -E 's/^[[:space:]]*(-[[:space:]]*)?uses[[:space:]]*:[[:space:]]*//' <<<"$action_line")
     action_ref=${action_ref%%#*}
     action_ref=${action_ref//\"/}
     action_ref=${action_ref//\'/}
@@ -67,7 +93,7 @@ while IFS= read -r -d '' workflow; do
       printf '%s has a non-SHA-pinned action: %s\n' "${workflow#"$repo_root/"}" "$action_ref" >&2
       failures=$((failures + 1))
     fi
-  done < <(grep -E '^[[:space:]]*(-[[:space:]]*)?uses:' "$workflow" || true)
+  done < <(grep -E '^[[:space:]]*(-[[:space:]]*)?uses[[:space:]]*:' "$workflow" || true)
 done < <(find "$repo_root/.github/workflows" -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
 
 if (( workflow_count == 0 )); then

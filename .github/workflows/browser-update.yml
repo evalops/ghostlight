@@ -133,6 +133,7 @@ jobs:
       - name: Boot, recreate, and verify Chromium profile persistence
         env:
           NEKO_IMAGE: ${{ steps.candidate.outputs.image }}
+          GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK: "0"
         run: tests/acceptance/run-linux-persistence.sh
 
       - name: Record candidate image metadata
@@ -229,12 +230,50 @@ jobs:
           git switch -c "$branch"
           git add control/Dockerfile runtime/.env.example runtime/docker-compose.yml runtime/tests/test_runtime.sh
           git commit -m "chore(runtime): update container image digests"
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            echo "The tested update branch already exists: $branch"
+          tested_tree=$(git rev-parse 'HEAD^{tree}')
+          remote_oid=$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 { print $1 }')
+          if [[ -n "$remote_oid" ]]; then
+            git fetch --no-tags origin "refs/heads/$branch"
+            fetched_oid=$(git rev-parse FETCH_HEAD)
+            [[ "$fetched_oid" == "$remote_oid" ]] || {
+              echo "Fetched update branch does not match the advertised remote commit." >&2
+              exit 1
+            }
+            remote_tree=$(git rev-parse 'FETCH_HEAD^{tree}')
+            [[ "$remote_tree" == "$tested_tree" ]] || {
+              echo "The existing update branch does not contain the exact tested tree: $branch" >&2
+              exit 1
+            }
+          else
+            git push --set-upstream origin "$branch"
+          fi
+
+          open_pr=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -n "$open_pr" ]]; then
+            echo "The tested update pull request already exists: #$open_pr"
             exit 0
           fi
-          git push --set-upstream origin "$branch"
+
+          closed_pr=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --state closed \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -n "$closed_pr" ]]; then
+            gh pr reopen --repo "$GITHUB_REPOSITORY" "$closed_pr"
+            exit 0
+          fi
+
           gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
             --base main \
             --head "$branch" \
             --title "chore(runtime): update container image digests" \

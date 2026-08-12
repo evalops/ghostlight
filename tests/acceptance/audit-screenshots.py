@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Reject screenshot metadata and obvious credential or address markers."""
+"""Reject screenshot metadata and credential or address markers, including OCR text."""
 
 from __future__ import annotations
 
 import re
+import shutil
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,16 +21,34 @@ SECRET_PATTERN = re.compile(
 )
 
 
-def visible_marker_failures(data: bytes) -> list[str]:
+def visible_marker_failures(data: bytes, source: str = "encoded image bytes") -> list[str]:
     failures: list[str] = []
     visible_markers = b"\n".join(part for part in re.findall(rb"[ -~]{4,}", data) if part)
     if SECRET_PATTERN.search(visible_markers):
-        failures.append("credential marker")
+        failures.append(f"credential marker in {source}")
     for match in IPV4_PATTERN.finditer(visible_markers):
         if match.group(0) != b"127.0.0.1":
-            failures.append(f"address marker {match.group(0).decode('ascii')}")
+            failures.append(f"address marker {match.group(0).decode('ascii')} in {source}")
             break
     return failures
+
+
+def rendered_pixel_failures(path: Path) -> list[str]:
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return ["required Tesseract OCR executable is unavailable"]
+    try:
+        result = subprocess.run(
+            [tesseract, str(path), "stdout", "--psm", "11"],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return ["Tesseract OCR timed out"]
+    if result.returncode != 0:
+        return [f"Tesseract OCR failed with exit code {result.returncode}"]
+    return visible_marker_failures(result.stdout, "rendered pixels")
 
 
 def audit_png(data: bytes) -> list[str]:
@@ -90,9 +110,9 @@ def audit_jpeg(data: bytes) -> list[str]:
 def audit_image(path: Path) -> list[str]:
     data = path.read_bytes()
     if data.startswith(PNG_SIGNATURE):
-        return audit_png(data)
+        return audit_png(data) + rendered_pixel_failures(path)
     if data.startswith(JPEG_SIGNATURE):
-        return audit_jpeg(data)
+        return audit_jpeg(data) + rendered_pixel_failures(path)
     return ["unsupported image format"]
 
 

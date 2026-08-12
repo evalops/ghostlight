@@ -1,6 +1,6 @@
 # Streaming performance harness
 
-`tests/acceptance/performance.mjs` drives the Neko UI with Playwright, observes the WebRTC inbound-video stats, and records input-to-presented-frame latency, decoded and dropped frames, bytes received, bitrate, codec, and decoder details. `tools/collect-performance.sh` samples the viewer container's CPU and memory alongside that browser receipt and writes timestamped JSON plus SHA-256 sidecars.
+`tests/acceptance/performance.mjs` drives the Neko UI with Playwright, observes the WebRTC inbound-video stats, and records the dispatch-to-next-presented-frame phase, decoded and dropped frames, bytes received, bitrate, codec, and decoder details. The phase ends at the next presented frame but does not prove that the synthetic key event caused that frame, so it is not an input-latency measurement. `tools/collect-performance.sh` samples the viewer container's CPU and memory alongside that browser receipt and writes timestamped JSON plus SHA-256 sidecars.
 
 Run the live Linux/browser measurement with the synthetic acceptance viewer:
 
@@ -11,7 +11,9 @@ GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD=<synthetic-or-test-password> \
 tools/collect-performance.sh
 ```
 
-The scheduled candidate lane runs the persistence harness and image scans. A measurement receipt is only valid when it records the exact source SHA, pinned Neko image, runtime, browser, duration, and redacted test endpoint.
+The collector refuses a dirty source tree or a viewer image without a digest-pinned reference. A future exact-source measurement records the source SHA and clean-tree state, viewer container ID, image reference and immutable image ID, acceptance lockfile hash, runtime versions, duration, and redacted test endpoint.
+
+The committed 2026-08-12 VP8 baseline records `source_sha=working-tree-20260812T1720Z`. It remains a measurement and is not an exact-source receipt.
 
 ```sh
 shasum -a 256 output/playwright/performance/*.json \

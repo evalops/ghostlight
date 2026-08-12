@@ -37,6 +37,8 @@ macOS client:
 
 Repository verification uses a Go 1.24-compatible module, a Go 1.25.12 container builder, and ShellCheck.
 
+Live browser acceptance requires Node.js with npm, Python 3, `shasum`, and Tesseract OCR. The reviewed container-update commands require Docker Buildx, `jq`, and Perl.
+
 ## Start the Linux runtime
 
 Run from the repository root on the Linux host:
@@ -152,9 +154,9 @@ The [2026-08-12 day-one receipt](docs/acceptance/2026-08-12/README.md) records o
 tests/acceptance/run-linux-persistence.sh
 ```
 
-This command creates a temporary mode-`700` profile, a mode-`600` environment file, and a Compose override. The override adds an AppArmor exception, shares the viewer network namespace with control to accommodate nested-host bridge filtering, exposes a loopback-only CDP endpoint, and serves two synthetic pages inside the Neko container. The lane runs preflight, builds and starts the stack, creates two Chromium tabs, records their cookie and local-storage marker, tears down and recreates both containers, requires new viewer and control container IDs, and checks both restored tabs and markers. It writes screenshots, JSON evidence, hashes, request logs, and `transcript.txt` under `output/playwright/acceptance/` by default.
+This command creates a temporary mode-`700` profile, a mode-`600` environment file, and a Compose override. The override adds an AppArmor exception, exposes a loopback-only CDP endpoint, and serves two synthetic pages inside the Neko container. Set `GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK=1` only on nested hosts that filter sibling-container bridge traffic; the default keeps separate viewer and control network namespaces. The lane runs preflight, builds and starts the stack, creates two Chromium tabs, records their cookie and local-storage marker, tears down and recreates both containers, requires new viewer and control container IDs, and checks both restored tabs and markers. It writes screenshots, JSON evidence, hashes, request logs, and `transcript.txt` under `output/playwright/acceptance/` by default.
 
-The screenshot audit rejects metadata segments plus configured plaintext credential and non-loopback IPv4 marker patterns found in PNG and JPEG bytes. It does not perform optical-character recognition. Review each screenshot before publication. Set `GHOSTLIGHT_ACCEPTANCE_KEEP_STACK=1` only when the temporary stack and work directory are needed for debugging.
+The screenshot audit rejects metadata segments plus configured plaintext credential and non-loopback IPv4 marker patterns found in PNG and JPEG bytes and in required Tesseract OCR output. Review each screenshot before publication. Set `GHOSTLIGHT_ACCEPTANCE_KEEP_STACK=1` only when the temporary stack and work directory are needed for debugging.
 
 The [improvement receipt](docs/acceptance/2026-08-12-improvements/README.md) passed at source `f94bb784316e206674234407a75170b10dd0e7bc`. Both services were healthy, both container IDs changed, Chromium restored both synthetic tabs, and the post-recreation server log contained the saved cookie and local-storage marker for each tab. Four inspected screenshots, JSON evidence, request logs, hashes, and the raw transcript are committed with the receipt.
 
@@ -171,7 +173,7 @@ The first launch receives the URL through its environment. The script waits thro
 
 This lane requires Accessibility permission, Screen Recording permission, an unlocked interactive session, and a synthetic endpoint. `Viewer loaded` remains a WebKit navigation assertion; the lane does not inspect decoded WebRTC frames.
 
-The first scripted improvement attempt failed because its terminal runner did not receive the required Accessibility response. A later Computer Use run against the packaged binary reached `Viewer loaded`, terminated the target process, relaunched without another Connect action, and reached `Viewer loaded` again from the saved control URL. The [native receipt and screenshots](docs/acceptance/2026-08-12/README.md#native-macos-receipt) record the binary hash and the narrower WebKit-navigation claim; they do not claim authenticated Neko or decoded WebRTC media.
+The first scripted improvement attempt failed because its terminal runner did not receive the required Accessibility response. A later Computer Use run against the packaged binary reached `Viewer loaded`, exited through Cmd-Q, relaunched the exact bundle without an environment override, and reached `Viewer loaded` again from the saved control URL without another Connect action. The [native receipt and screenshots](docs/acceptance/2026-08-12/README.md#native-macos-navigation-receipt) bind that result to macOS source commit `af26a8b47f4598038b06604aab34134ebccaf674` and the packaged binary hash; they do not claim authenticated Neko or decoded WebRTC media.
 
 ### Streaming performance lane
 
@@ -184,11 +186,11 @@ GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD=<synthetic-test-password> \
 tools/collect-performance.sh
 ```
 
-The Playwright client authenticates to Neko and samples inbound WebRTC for ten seconds. It records decoded frames, dropped frames, received bytes, bitrate, negotiated codec, H.264 receiver capability, a keyboard-dispatch-to-next-presented-frame approximation, one-second container statistics, Neko pipeline logs, a transcript, and SHA-256 receipts under `output/playwright/performance/`. It fails when no decoded inbound video frames appear.
+The Playwright client authenticates to Neko and samples inbound WebRTC for ten seconds. It records decoded frames, dropped frames, received bytes, bitrate, negotiated codec, H.264 receiver capability, a dispatch-to-next-presented-frame phase, one-second container statistics, Neko pipeline logs, a transcript, and SHA-256 receipts under `output/playwright/performance/`. It fails when no decoded inbound video frames appear. The harness does not prove that the input caused the next frame, so this phase is not an input-latency measurement.
 
-Set `GHOSTLIGHT_PERFORMANCE_CODEC=h264` for a measurement-only H.264 preference run. The H.264 setting does not change the runtime default. Retain the pinned Neko default until paired default/H.264 receipts and a native WKWebView decode receipt support a change. The input metric excludes physical keyboard polling and display scanout.
+Set `GHOSTLIGHT_PERFORMANCE_CODEC=h264` for a measurement-only H.264 preference run. The H.264 setting does not change the runtime default. Retain the pinned Neko default until paired default/H.264 receipts and a native WKWebView decode receipt support a change. The phase excludes physical keyboard polling and display scanout.
 
-The committed [VP8 baseline](docs/performance/2026-08-12-vp8-baseline/README.md) passed on `2026-08-12`: 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, 72.43 ms from browser keyboard dispatch to the next presented video frame, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB. The browser advertised H.264 receive support, but no paired H.264 or native WKWebView decode receipt exists.
+The committed [VP8 measurement](docs/performance/2026-08-12-vp8-baseline/README.md) captured 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, a 72.43 ms dispatch-to-next-presented-frame phase, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB on `2026-08-12`. The next frame was not proven to have been caused by the input, so 72.43 ms is not input latency. Its transcript records a working-tree source label instead of an exact commit SHA. The browser advertised H.264 receive support, but no paired H.264 or native WKWebView decode receipt exists.
 
 ## Container updates
 
@@ -198,7 +200,7 @@ The Neko image, both control base images, GitHub Actions, and Trivy are pinned t
 
 After a green schedule or manual candidate job, a separate write-scoped job opens a pull request containing only `control/Dockerfile` and the three mirrored Neko references. It creates no pull request when those files already contain the resolved digests. Review, required checks, and merge remain manual. Dependabot also checks the Docker bases in `control/` each Monday at `04:47 UTC`.
 
-The exact-head Linux candidate produced a passing build, health, and persistence receipt. The local builder scan was interrupted by Docker container-store I/O errors, so image scanning remains a protected-CI receipt rather than a local one. In GitHub Actions, a failure in the `candidate` job prevents `propose-update` from running.
+The Linux persistence run at source `f94bb784316e206674234407a75170b10dd0e7bc` produced a passing build, health, and persistence receipt. The local builder scan was interrupted by Docker container-store I/O errors, so image scanning has no local receipt and remains delegated to protected CI. In GitHub Actions, a failure in the `candidate` job prevents `propose-update` from running.
 
 For a reviewed local Neko update:
 

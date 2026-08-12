@@ -58,11 +58,28 @@ request_with_retry() {
   return 1
 }
 
+url_with_path() {
+  local raw_url="$1"
+  local path="$2"
+
+  python3 - "$raw_url" "$path" <<'PY'
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+parsed = urlsplit(sys.argv[1])
+if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+    raise SystemExit(1)
+path = "/" + sys.argv[2].lstrip("/")
+print(urlunsplit((parsed.scheme, parsed.netloc, path, "", "")))
+PY
+}
+
 require_command docker
 require_command curl
 require_command awk
 require_command grep
 require_command sed
+require_command python3
 
 [[ -f "$ENV_FILE" ]] || die "runtime/.env is missing; run 'cp runtime/.env.example runtime/.env' and replace the placeholders"
 if "$SCRIPT_DIR/find-placeholders.sh" "$ENV_FILE"; then
@@ -84,9 +101,15 @@ VIEWER_HEALTH_PATH="${VIEWER_HEALTH_PATH:-$(env_value VIEWER_HEALTH_PATH)}"
 VIEWER_HEALTH_PATH="${VIEWER_HEALTH_PATH:-/health}"
 VIEWER_DISCOVERY_PATH="${VIEWER_DISCOVERY_PATH:-$(env_value VIEWER_DISCOVERY_PATH)}"
 VIEWER_DISCOVERY_PATH="${VIEWER_DISCOVERY_PATH:-/v1/viewer}"
+bind_address="${GHOSTLIGHT_BIND_ADDRESS:-$(env_value GHOSTLIGHT_BIND_ADDRESS)}"
+[[ -n "$bind_address" ]] || die "GHOSTLIGHT_BIND_ADDRESS must be configured"
+url_host="$bind_address"
+if [[ "$url_host" == *:* && "$url_host" != \[*\] ]]; then
+  url_host="[$url_host]"
+fi
 
-CONTROL_URL="${GHOSTLIGHT_CONTROL_URL:-http://127.0.0.1:$CONTROL_PORT}"
-DIRECT_VIEWER_URL="${GHOSTLIGHT_SMOKE_VIEWER_URL:-http://127.0.0.1:$VIEWER_PORT}"
+CONTROL_URL="${GHOSTLIGHT_CONTROL_URL:-http://$url_host:$CONTROL_PORT}"
+DIRECT_VIEWER_URL="${GHOSTLIGHT_SMOKE_VIEWER_URL:-http://$url_host:$VIEWER_PORT}"
 
 CONTROL_HEALTH_URL="${CONTROL_URL%/}${CONTROL_HEALTH_PATH}"
 CONTROL_READY_URL="${CONTROL_URL%/}${CONTROL_READY_PATH}"
@@ -113,7 +136,9 @@ printf '%s' "$discovery_response" | grep -Eq '"viewer_url"[[:space:]]*:[[:space:
 
 discovered_viewer_url="$(printf '%s' "$discovery_response" | sed -n 's/.*"viewer_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 [[ -n "$discovered_viewer_url" ]] || die "could not read viewer_url from the discovery response"
-request_with_retry "${discovered_viewer_url%/}${VIEWER_HEALTH_PATH}" \
+discovered_viewer_health_url="$(url_with_path "$discovered_viewer_url" "$VIEWER_HEALTH_PATH")" \
+  || die "could not normalize viewer health URL from discovery response"
+request_with_retry "$discovered_viewer_health_url" \
   || die "discovered viewer health failed at $discovered_viewer_url; check GHOSTLIGHT_VIEWER_URL and NEKO_WEBRTC_NAT1TO1"
 
 printf 'smoke passed: control liveness, viewer /health, control readiness, and stateless viewer discovery (%s)\n' "$discovered_viewer_url"

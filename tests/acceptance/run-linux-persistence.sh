@@ -13,7 +13,17 @@ WEBRTC_PORT="${GHOSTLIGHT_ACCEPTANCE_WEBRTC_PORT:-52080}"
 CDP_PORT="${GHOSTLIGHT_ACCEPTANCE_CDP_PORT:-29280}"
 MARKER="${GHOSTLIGHT_ACCEPTANCE_MARKER:-synthetic-$(date -u +%Y%m%dT%H%M%SZ)}"
 SKIP_PROFILE_CHECK="${GHOSTLIGHT_ACCEPTANCE_SKIP_PROFILE_CHECK:-0}"
-NEKO_IMAGE_REF="${NEKO_IMAGE:-ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7}"
+share_viewer_network="${GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK:-0}"
+DEFAULT_NEKO_IMAGE_REF="$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$ROOT_DIR/runtime/.env.example")"
+[[ "$DEFAULT_NEKO_IMAGE_REF" =~ ^ghcr\.io/m1k1o/neko/chromium@sha256:[0-9a-f]{64}$ ]] || {
+  printf 'runtime/.env.example does not contain a canonical Neko image pin\n' >&2
+  exit 1
+}
+NEKO_IMAGE_REF="${NEKO_IMAGE:-$DEFAULT_NEKO_IMAGE_REF}"
+[[ "$share_viewer_network" =~ ^[01]$ ]] || {
+  printf 'GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK must be 0 or 1\n' >&2
+  exit 1
+}
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ghostlight-acceptance.XXXXXX")"
 PROFILE_DIR="$WORK_DIR/chromium-profile"
 ENV_FILE="$WORK_DIR/runtime.env"
@@ -24,11 +34,21 @@ export COMPOSE_BAKE="${COMPOSE_BAKE:-false}"
 
 finish() {
   local status=$?
+  local cleanup_status=0
   if [[ "${GHOSTLIGHT_ACCEPTANCE_KEEP_STACK:-0}" != 1 ]]; then
-    docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down --remove-orphans >>"$TRANSCRIPT" 2>&1 || true
-    rm -rf -- "$WORK_DIR" || true
+    if ! docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down --remove-orphans >>"$TRANSCRIPT" 2>&1; then
+      cleanup_status=1
+      printf 'cleanup failed; acceptance work directory retained: %s\n' "$WORK_DIR" >&2
+    elif ! rm -rf -- "$WORK_DIR"; then
+      cleanup_status=1
+      printf 'cleanup failed while removing acceptance work directory: %s\n' "$WORK_DIR" >&2
+    fi
   else
     printf 'acceptance work directory retained: %s\n' "$WORK_DIR" >&2
+  fi
+  if (( status == 0 && cleanup_status != 0 )); then
+    printf 'cleanup failed; acceptance result changed to failure\n' >&2
+    status=$cleanup_status
   fi
   trap - EXIT
   exit "$status"
@@ -56,6 +76,17 @@ NEKO_IMAGE=$NEKO_IMAGE_REF
 EOF
 chmod 600 "$ENV_FILE"
 
+shared_viewer_port=''
+if (( share_viewer_network == 1 )); then
+  shared_viewer_port="$(cat <<EOF
+      - target: 8082
+        published: \"$CONTROL_PORT\"
+        host_ip: 127.0.0.1
+        protocol: tcp
+EOF
+)"
+fi
+
 cat >"$OVERRIDE_FILE" <<EOF
 services:
   viewer:
@@ -66,10 +97,7 @@ services:
         published: "$CDP_PORT"
         host_ip: 127.0.0.1
         protocol: tcp
-      - target: 8082
-        published: "$CONTROL_PORT"
-        host_ip: 127.0.0.1
-        protocol: tcp
+$shared_viewer_port
     environment:
       GHOSTLIGHT_ACCEPTANCE_MARKER: "$MARKER"
     volumes:
@@ -79,18 +107,23 @@ services:
       - "$FIXTURE_DIR/synthetic_server.py:/usr/local/bin/ghostlight-synthetic-server.py:ro"
       - "$FIXTURE_DIR/synthetic_server.conf:/etc/neko/supervisord/ghostlight-synthetic-server.conf:ro"
   control:
-    # The nested acceptance host drops sibling-container bridge traffic. Sharing the
-    # viewer namespace keeps the readiness request inside loopback for this test only.
-    network_mode: "service:viewer"
-    ports: !reset []
     security_opt:
       - apparmor=unconfined
+EOF
+
+if (( share_viewer_network == 1 )); then
+  cat >>"$OVERRIDE_FILE" <<EOF
+    # The nested acceptance host drops sibling-container bridge traffic. Sharing the
+    # viewer namespace keeps the readiness request inside loopback for this opt-in mode.
+    network_mode: "service:viewer"
+    ports: !reset []
     environment:
       GHOSTLIGHT_LISTEN_ADDR: "0.0.0.0:8082"
       GHOSTLIGHT_VIEWER_HEALTH_URL: "http://127.0.0.1:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/readyz || exit 1"]
 EOF
+fi
 
 : >"$TRANSCRIPT"
 {

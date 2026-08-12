@@ -23,14 +23,14 @@ while IFS= read -r -d '' dockerfile; do
 done < <(find "$REPO_ROOT" -type f -name 'Dockerfile*' -not -path "$REPO_ROOT/.git/*" -print0)
 
 while IFS= read -r line; do
-  image="${line#*image: }"
+  image=$(sed -E 's/^[[:space:]]*image[[:space:]]*:[[:space:]]*//' <<<"$line")
   image="${image%\"}"
   image="${image#\"}"
   if [[ ! "$image" =~ @sha256:[0-9a-f]{64} ]]; then
     printf 'Compose image is not digest-pinned: %s\n' "$image" >&2
     failures=$((failures + 1))
   fi
-done < <(rg -n '^[[:space:]]*image:' "$REPO_ROOT" -g 'compose*.yml' -g 'compose*.yaml' -g 'docker-compose*.yml' -g 'docker-compose*.yaml' | sed -E 's/^[^:]+:[0-9]+://')
+done < <(rg -n '^[[:space:]]*image[[:space:]]*:' "$REPO_ROOT" -g 'compose*.yml' -g 'compose*.yaml' -g 'docker-compose*.yml' -g 'docker-compose*.yaml' | sed -E 's/^[^:]+:[0-9]+://')
 
 while IFS= read -r line; do
   ref="${line##*@}"
@@ -38,7 +38,7 @@ while IFS= read -r line; do
     printf 'GitHub Action is not pinned to a full commit: %s\n' "$line" >&2
     failures=$((failures + 1))
   fi
-done < <(rg -n '^[[:space:]]*uses:[[:space:]]*[^[:space:]]+@' "$REPO_ROOT/.github/workflows" -g '*.yml' -g '*.yaml' | sed -E 's/^[^:]+:[0-9]+:[[:space:]]*uses:[[:space:]]*[^@]+@//')
+done < <(rg -n '^[[:space:]]*(-[[:space:]]*)?uses[[:space:]]*:[[:space:]]*[^[:space:]]+@' "$REPO_ROOT/.github/workflows" -g '*.yml' -g '*.yaml' | sed -E 's/^[^:]+:[0-9]+:[[:space:]]*(-[[:space:]]*)?uses[[:space:]]*:[[:space:]]*[^@]+@//')
 
 if (( failures > 0 )); then
   printf 'container and workflow pin check failed with %d issue(s)\n' "$failures" >&2

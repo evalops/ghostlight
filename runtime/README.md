@@ -121,6 +121,6 @@ The runtime test checks configuration contracts, shell syntax, optional ShellChe
 
 ## Image update lane
 
-The Neko reference in `.env.example` is mirrored in `docker-compose.yml` and `tests/test_runtime.sh`. `scripts/update-neko-image.sh` accepts only a canonical `ghcr.io/m1k1o/neko/chromium@sha256:<digest>` reference and updates those three files together. `scripts/check-image-safety.sh` rejects mismatched Neko references, mutable Docker bases, and GitHub Actions that lack a full commit SHA.
+The Neko reference in `.env.example` is mirrored in `docker-compose.yml` and `tests/test_runtime.sh`. The live persistence harness reads its default from `.env.example`. `scripts/update-neko-image.sh` accepts only a canonical `ghcr.io/m1k1o/neko/chromium@sha256:<digest>` reference and updates the three mirrored files together. `scripts/check-image-safety.sh` rejects mismatched pins, a hardcoded acceptance-harness digest, mutable Docker bases, and GitHub Actions that lack a full commit SHA.
 
 The scheduled browser-update workflow resolves Neko plus both control base tags, builds the candidate, runs these runtime and backup checks, runs the live synthetic Linux persistence lane, and scans the candidate viewer and control images. The workflow opens a digest-update pull request only after those blocking jobs succeed. It does not merge the pull request or change a running Linux host.

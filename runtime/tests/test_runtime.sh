@@ -30,6 +30,17 @@ expect_failure() {
   fi
 }
 
+expect_failure_contains() {
+  local label="$1"
+  local expected="$2"
+  shift 2
+  if "$@" >"$root_compose_fixture/failure-output" 2>&1; then
+    fail "$label unexpectedly passed"
+  fi
+  grep --fixed-strings -- "$expected" "$root_compose_fixture/failure-output" >/dev/null \
+    || fail "$label failed without expected message: $expected"
+}
+
 for path in \
   "$RUNTIME_DIR/docker-compose.yml" \
   "$REPO_DIR/compose.yaml" \
@@ -117,6 +128,7 @@ fake_bin="$root_compose_fixture/bin"
 profile_fixture="$root_compose_fixture/profile"
 env_fixture="$root_compose_fixture/runtime.env"
 docker_log="$root_compose_fixture/docker.log"
+curl_log="$root_compose_fixture/curl.log"
 mkdir -p "$fake_bin"
 mkdir -m 700 "$profile_fixture"
 # These are literal lines in the generated fake Docker script.
@@ -124,9 +136,29 @@ mkdir -m 700 "$profile_fixture"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "%s\n" "$*" >>"${FAKE_DOCKER_LOG:?}"' \
+  'if [[ "$*" == *"config --format json"* ]]; then' \
+  '  cat <<'\''JSON'\''' \
+  '{"services":{"viewer":{"image":"ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"0","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
+  'JSON' \
+  '  exit 0' \
+  'fi' \
   'if [[ "${1:-}" == run && "${FAKE_DOCKER_FAIL_RUN:-0}" == 1 ]]; then exit 1; fi' \
   'exit 0' >"$fake_bin/docker"
 chmod 700 "$fake_bin/docker"
+# These are literal lines in the generated fake curl script.
+# shellcheck disable=SC2016
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'url="${!#}"' \
+  'printf "%s\n" "$url" >>"${FAKE_CURL_LOG:?}"' \
+  'case "$url" in' \
+  '  http://192.168.50.20:8080/healthz) printf '\''{"status":"ok"}\n'\'' ;;' \
+  '  http://192.168.50.20:8080/readyz) printf '\''{"viewer":"ready"}\n'\'' ;;' \
+  '  http://192.168.50.20:8080/v1/viewer) printf '\''{"viewer_url":"http://192.168.50.20:8081/session?mode=control"}\n'\'' ;;' \
+  '  http://192.168.50.20:8081/health) printf '\''{"status":"ok"}\n'\'' ;;' \
+  '  *) exit 22 ;;' \
+  'esac' >"$fake_bin/curl"
+chmod 700 "$fake_bin/curl"
 sed \
   -e 's|GHOSTLIGHT_BIND_ADDRESS=.*|GHOSTLIGHT_BIND_ADDRESS=127.0.0.1|' \
   -e 's|GHOSTLIGHT_VIEWER_URL=.*|GHOSTLIGHT_VIEWER_URL=http://127.0.0.1:8081|' \
@@ -139,6 +171,9 @@ PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$env_fixture" CHROMIUM_PROFILE_DIR="
   FAKE_DOCKER_LOG="$docker_log" "$RUNTIME_DIR/bin/preflight.sh" >/dev/null
 grep --fixed-strings -- 'run --rm --user 1000:1000' "$docker_log" >/dev/null \
   || fail "preflight must verify profile writability as viewer uid 1000"
+expect_failure "shell environment Compose override" env PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$env_fixture" \
+  CHROMIUM_PROFILE_DIR="$profile_fixture" GHOSTLIGHT_BIND_ADDRESS=0.0.0.0 FAKE_DOCKER_LOG="$docker_log" \
+  GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK=1 "$RUNTIME_DIR/bin/preflight.sh"
 expect_failure "uid 1000 profile write denial" env PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$env_fixture" \
   CHROMIUM_PROFILE_DIR="$profile_fixture" FAKE_DOCKER_LOG="$docker_log" FAKE_DOCKER_FAIL_RUN=1 "$RUNTIME_DIR/bin/preflight.sh"
 
@@ -156,6 +191,53 @@ chmod 750 "$profile_fixture"
 expect_failure "group-readable profile" env PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$env_fixture" \
   CHROMIUM_PROFILE_DIR="$profile_fixture" FAKE_DOCKER_LOG="$docker_log" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK=1 "$RUNTIME_DIR/bin/preflight.sh"
 chmod 700 "$profile_fixture"
+
+invalid_viewer_env="$root_compose_fixture/invalid-viewer.env"
+sed 's|GHOSTLIGHT_VIEWER_URL=.*|GHOSTLIGHT_VIEWER_URL=ftp://127.0.0.1:8081|' "$env_fixture" >"$invalid_viewer_env"
+chmod 600 "$invalid_viewer_env"
+expect_failure_contains "control-rejected viewer URL" "GHOSTLIGHT_VIEWER_URL must use an absolute HTTP or HTTPS URL" \
+  env PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$invalid_viewer_env" CHROMIUM_PROFILE_DIR="$profile_fixture" \
+  FAKE_DOCKER_LOG="$docker_log" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK=1 "$RUNTIME_DIR/bin/preflight.sh"
+
+invalid_health_env="$root_compose_fixture/invalid-health.env"
+sed 's|GHOSTLIGHT_VIEWER_HEALTH_URL=.*|GHOSTLIGHT_VIEWER_HEALTH_URL=file:///tmp/viewer|' "$env_fixture" >"$invalid_health_env"
+chmod 600 "$invalid_health_env"
+expect_failure_contains "control-rejected health URL" "GHOSTLIGHT_VIEWER_HEALTH_URL must use an absolute HTTP or HTTPS URL" \
+  env PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$invalid_health_env" CHROMIUM_PROFILE_DIR="$profile_fixture" \
+  FAKE_DOCKER_LOG="$docker_log" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK=1 "$RUNTIME_DIR/bin/preflight.sh"
+
+canonical_profile_fixture="$(cd -P -- "$profile_fixture" && pwd)"
+relative_profile_fixture="$(python3 - "$RUNTIME_DIR" "$canonical_profile_fixture" <<'PY'
+import os
+import sys
+
+print(os.path.relpath(sys.argv[2], sys.argv[1]))
+PY
+)"
+profile_env_fixture="$root_compose_fixture/profile-from-env.env"
+cp "$env_fixture" "$profile_env_fixture"
+printf 'CHROMIUM_PROFILE_DIR=%s\n' "$relative_profile_fixture" >>"$profile_env_fixture"
+chmod 600 "$profile_env_fixture"
+: >"$docker_log"
+PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$profile_env_fixture" FAKE_DOCKER_LOG="$docker_log" \
+  "$RUNTIME_DIR/bin/preflight.sh" >/dev/null
+grep --fixed-strings -- "-v $canonical_profile_fixture:/profile" "$docker_log" >/dev/null \
+  || fail "preflight must validate the env-file profile directory that Compose mounts"
+
+smoke_env_fixture="$root_compose_fixture/smoke.env"
+sed \
+  -e 's|GHOSTLIGHT_BIND_ADDRESS=.*|GHOSTLIGHT_BIND_ADDRESS=192.168.50.20|' \
+  -e 's|GHOSTLIGHT_VIEWER_URL=.*|GHOSTLIGHT_VIEWER_URL=http://192.168.50.20:8081/session?mode=control|' \
+  -e 's|NEKO_WEBRTC_NAT1TO1=.*|NEKO_WEBRTC_NAT1TO1=192.168.50.20|' \
+  "$env_fixture" >"$smoke_env_fixture"
+chmod 600 "$smoke_env_fixture"
+: >"$curl_log"
+PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$smoke_env_fixture" FAKE_DOCKER_LOG="$docker_log" \
+  FAKE_CURL_LOG="$curl_log" SMOKE_ATTEMPTS=1 "$RUNTIME_DIR/bin/smoke.sh" >/dev/null \
+  || fail "smoke must probe the configured private bind and normalize discovered viewer health URLs"
+expected_smoke_requests=$'http://192.168.50.20:8080/healthz\nhttp://192.168.50.20:8081/health\nhttp://192.168.50.20:8080/readyz\nhttp://192.168.50.20:8080/v1/viewer\nhttp://192.168.50.20:8081/health'
+[[ "$(<"$curl_log")" == "$expected_smoke_requests" ]] \
+  || fail "smoke requested unexpected URLs: $(tr '\n' ' ' <"$curl_log")"
 
 bash -n "$RUNTIME_DIR/bin/find-placeholders.sh"
 bash -n "$RUNTIME_DIR/bin/preflight.sh"

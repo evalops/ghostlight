@@ -22,7 +22,7 @@ expect_failure() {
 }
 
 fixture="$scratch_dir/repository"
-mkdir -p "$fixture/.github/workflows" "$fixture/control" "$fixture/runtime/tests"
+mkdir -p "$fixture/.github/workflows" "$fixture/control" "$fixture/runtime/tests" "$fixture/tests/acceptance"
 
 old_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 new_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -47,6 +47,12 @@ printf '%s\n' \
   "    image: \"\${NEKO_IMAGE:-$old_image}\"" \
   >"$fixture/runtime/docker-compose.yml"
 printf "assert_contains runtime/docker-compose.yml '%s'\n" "$old_image" >"$fixture/runtime/tests/test_runtime.sh"
+# These are literal lines in the generated acceptance script.
+# shellcheck disable=SC2016
+printf '%s\n' \
+  'ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"' \
+  'DEFAULT_NEKO_IMAGE_REF="$(awk -F= '\''$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }'\'' "$ROOT_DIR/runtime/.env.example")"' \
+  >"$fixture/tests/acceptance/run-linux-persistence.sh"
 
 "$checker" "$fixture"
 
@@ -67,11 +73,30 @@ rm "$fixture/.github/workflows/ci.yml.bak"
 expect_failure 'mutable action tag' "$checker" "$fixture"
 cp "$scratch_dir/ci.yml" "$fixture/.github/workflows/ci.yml"
 
+sed -i.bak 's|uses: actions/checkout@[0-9a-f]*|uses : actions/checkout@v4|' "$fixture/.github/workflows/ci.yml"
+rm "$fixture/.github/workflows/ci.yml.bak"
+expect_failure 'mutable action with spaced key separator' "$checker" "$fixture"
+cp "$scratch_dir/ci.yml" "$fixture/.github/workflows/ci.yml"
+
 cp "$fixture/control/Dockerfile" "$scratch_dir/Dockerfile"
 printf 'FROM golang:1.25.12-alpine@sha256:%s AS build\nFROM alpine:3.22\n' \
   "$old_digest" >"$fixture/control/Dockerfile"
 expect_failure 'mutable Docker base image' "$checker" "$fixture"
 cp "$scratch_dir/Dockerfile" "$fixture/control/Dockerfile"
+
+printf '%s\n' \
+  'services:' \
+  '  viewer:' \
+  "    image: \"\${NEKO_IMAGE:-$old_image}\"" \
+  '  rogue:' \
+  '    image : alpine:latest' \
+  >"$fixture/runtime/docker-compose.yml"
+expect_failure 'mutable Compose image with spaced key separator' "$checker" "$fixture"
+printf '%s\n' \
+  'services:' \
+  '  viewer:' \
+  "    image: \"\${NEKO_IMAGE:-$old_image}\"" \
+  >"$fixture/runtime/docker-compose.yml"
 
 sed -i.bak "s|$old_image|$new_image|" "$fixture/runtime/.env.example"
 rm "$fixture/runtime/.env.example.bak"
@@ -86,6 +111,8 @@ grep -Fq -- "$new_image" "$fixture/runtime/docker-compose.yml" \
   || fail 'updater did not replace the Compose fallback pin'
 grep -Fq -- "$new_image" "$fixture/runtime/tests/test_runtime.sh" \
   || fail 'updater did not replace the runtime assertion pin'
+grep -Fq -- 'runtime/.env.example' "$fixture/tests/acceptance/run-linux-persistence.sh" \
+  || fail 'acceptance harness must derive the default Neko pin from the environment example'
 "$updater" --check --root "$fixture" "$new_image"
 "$checker" "$fixture"
 
