@@ -64,18 +64,34 @@ printf '# __GENERATE_AT_INSTALL__ is allowed in comments\nNEKO_USER_PASSWORD=con
 if "$RUNTIME_DIR/bin/find-placeholders.sh" "$placeholder_fixture"; then
   fail "comment-only placeholder must not block a configured environment"
 fi
+printf 'NEKO_USER_PASSWORD=configured # __GENERATE_AT_INSTALL__ is allowed in an inline comment\n' >"$placeholder_fixture"
+if "$RUNTIME_DIR/bin/find-placeholders.sh" "$placeholder_fixture"; then
+  fail "inline comment placeholder must not block an unquoted configured value"
+fi
+printf 'NEKO_USER_PASSWORD="configured" # __GENERATE_AT_INSTALL__ is allowed after a quoted value\n' >"$placeholder_fixture"
+if "$RUNTIME_DIR/bin/find-placeholders.sh" "$placeholder_fixture"; then
+  fail "inline comment placeholder must not block a quoted configured value"
+fi
 printf 'NEKO_USER_PASSWORD=__GENERATE_AT_INSTALL__\n' >"$placeholder_fixture"
 "$RUNTIME_DIR/bin/find-placeholders.sh" "$placeholder_fixture" >/dev/null \
   || fail "assignment placeholder must be detected"
+printf 'NEKO_USER_PASSWORD="__GENERATE_AT_INSTALL__" # configured later\n' >"$placeholder_fixture"
+"$RUNTIME_DIR/bin/find-placeholders.sh" "$placeholder_fixture" >/dev/null \
+  || fail "quoted assignment placeholder must be detected"
 
 bash -n "$RUNTIME_DIR/bin/find-placeholders.sh"
 bash -n "$RUNTIME_DIR/bin/preflight.sh"
 bash -n "$RUNTIME_DIR/bin/smoke.sh"
 
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck "$RUNTIME_DIR/bin/preflight.sh" "$RUNTIME_DIR/bin/smoke.sh"
+  shellcheck "$RUNTIME_DIR/bin/find-placeholders.sh" "$RUNTIME_DIR/bin/preflight.sh" "$RUNTIME_DIR/bin/smoke.sh"
 fi
 
+expected_neko_image="$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$RUNTIME_DIR/.env.example")"
+[[ "$expected_neko_image" == *@sha256:* ]] || fail "NEKO_IMAGE in .env.example must be digest-pinned"
+resolved_images="$(cd "$RUNTIME_DIR" && docker compose --env-file .env.example -f docker-compose.yml config --images)"
+grep --fixed-strings --line-regexp -- "$expected_neko_image" <<<"$resolved_images" >/dev/null \
+  || fail "Compose viewer image must resolve to NEKO_IMAGE from .env.example"
 (cd "$RUNTIME_DIR" && docker compose --env-file .env.example -f docker-compose.yml config --quiet)
 
 printf 'runtime tests passed\n'
