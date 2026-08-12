@@ -1,0 +1,67 @@
+Ghostlight main viewer image security transcript
+Captured: 2026-08-12 UTC
+
+SOURCE
+$ git rev-parse origin/main
+518b3bc2274cbc115322d6fde35cf7d23bdb8b22
+
+PUBLIC TAG RESOLUTION WITH AN EMPTY DOCKER CONFIGURATION
+$ DOCKER_CONFIG="$(mktemp -d)" crane digest ghcr.io/evalops/ghostlight-viewer:sha-518b3bc2274cbc115322d6fde35cf7d23bdb8b22
+sha256:bc657e706af0615606fd6837f8ccfb1bd1d6f013b8dafb765ef08ea973a7d327
+anonymous_config=empty
+
+INDEX MANIFESTS
+$ crane manifest ghcr.io/evalops/ghostlight-viewer@sha256:bc657e706af0615606fd6837f8ccfb1bd1d6f013b8dafb765ef08ea973a7d327 | jq -r '.manifests[] | [.platform.os,.platform.architecture,.digest,(.annotations["vnd.docker.reference.type"] // "image-manifest"),(.annotations["vnd.docker.reference.digest"] // "-")] | @tsv'
+linux	amd64	sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c	image-manifest	-
+linux	arm64	sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df	image-manifest	-
+unknown	unknown	sha256:0b0110a3d3da83553820cdd04a261ef60acc1c9a43b5dbbd0b5dfe931020a302	attestation-manifest	sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c
+unknown	unknown	sha256:e3b607d28805fe3cb28880aa433c54e0266bf7220265dc2bd60ec2fc91af3a94	attestation-manifest	sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df
+
+PLATFORM LABELS
+$ crane config ghcr.io/evalops/ghostlight-viewer@${CHILD_DIGEST} | jq -r '[.os,.architecture,.config.Labels["org.opencontainers.image.version"],.config.Labels["org.opencontainers.image.revision"],.config.Labels["org.opencontainers.image.source"]] | @tsv'
+linux	amd64	neko-v3.1.5-ghostlight.1	395ca1a6f62b7b0e270e654d366a2d57b8042efd	https://github.com/evalops/ghostlight
+linux	arm64	neko-v3.1.5-ghostlight.1	395ca1a6f62b7b0e270e654d366a2d57b8042efd	https://github.com/evalops/ghostlight
+
+AMD64 NEKO VERSION
+$ docker run --rm --platform linux/amd64 --entrypoint /usr/bin/neko ghcr.io/evalops/ghostlight-viewer@sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c --version
+Version v3.1.5@395ca1a6f62b7b0e270e654d366a2d57b8042efd
+GitCommit 395ca1a6f62b7b0e270e654d366a2d57b8042efd
+GitBranch detached
+GitTag v3.1.5
+BuildDate 2026-08-05T14:28:51Z
+GoVersion go1.25.12
+Compiler gc
+Platform linux/amd64
+
+AMD64 HEALTH
+The health test used the exact amd64 child digest.
+$ curl --fail --silent --show-error http://127.0.0.1:48083/health
+true
+$ docker inspect ghostlight-viewer-main-receipt --format 'status={{.State.Status}} image={{.Config.Image}} image_id={{.Image}}'
+status=running image=ghcr.io/evalops/ghostlight-viewer@sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c image_id=sha256:bf0f6dfff6690f1a3f6158ade8b3a10c8d7963869bfe99e831884019569b153b
+
+SBOM AND PROVENANCE
+$ crane blob ghcr.io/evalops/ghostlight-viewer@${SBOM_LAYER_DIGEST} | jq -r '[.predicateType,.subject[0].digest.sha256,.predicate.name,(.predicate.packages|length)] | @tsv'
+$ crane blob ghcr.io/evalops/ghostlight-viewer@${PROVENANCE_LAYER_DIGEST} | jq -r '[.predicateType,.subject[0].digest.sha256,.predicate.buildDefinition.externalParameters.request.root.request.args["vcs:source"],.predicate.buildDefinition.externalParameters.request.root.request.args["vcs:revision"],.predicate.runDetails.builder.id] | @tsv'
+platform=linux/amd64 child=sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c
+sbom_type=https://spdx.dev/Document subject=sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c document=sbom packages=627
+provenance_type=https://slsa.dev/provenance/v1 subject=sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c source=https://github.com/evalops/ghostlight revision=518b3bc2274cbc115322d6fde35cf7d23bdb8b22 builder=https://github.com/evalops/ghostlight/actions/runs/31628573668/attempts/1
+platform=linux/arm64 child=sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df
+sbom_type=https://spdx.dev/Document subject=sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df document=sbom packages=625
+provenance_type=https://slsa.dev/provenance/v1 subject=sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df source=https://github.com/evalops/ghostlight revision=518b3bc2274cbc115322d6fde35cf7d23bdb8b22 builder=https://github.com/evalops/ghostlight/actions/runs/31628573668/attempts/1
+
+TRIVY POLICY
+$ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c image --scanners vuln --format json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed ghcr.io/evalops/ghostlight-viewer@${CHILD_DIGEST}
+
+AMD64 TRIVY RESULT
+created_at=2026-08-12T19:06:14.828490801Z
+artifact=ghcr.io/evalops/ghostlight-viewer@sha256:e33428f6b138fbe3cead6cf3d9b83b10ae8d45261ef61badcbab4b493b97013c
+scanner=trivy-0.73.0 os=debian-13.6 findings=0 targets=debian,gobinary exit=0
+
+ARM64 TRIVY RESULT
+created_at=2026-08-12T19:06:41.650548802Z
+artifact=ghcr.io/evalops/ghostlight-viewer@sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df
+scanner=trivy-0.73.0 os=debian-13.6 findings=0 targets=debian,gobinary exit=0
+
+TRIVY JSON REDUCTION
+$ jq '{SchemaVersion,CreatedAt,ArtifactName,ArtifactType,Metadata:{OS:.Metadata.OS,ImageID:.Metadata.ImageID,RepoDigests:.Metadata.RepoDigests,Size:.Metadata.Size},Results:(.Results|map({Target,Class,Type,Vulnerabilities:(.Vulnerabilities // [])})),Trivy}' trivy-raw.json > trivy-reduced.json

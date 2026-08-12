@@ -1,0 +1,103 @@
+name: Release macOS app
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghostlight-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(plutil -extract CFBundleShortVersionString raw -o - macos/Resources/Info.plist)"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            printf 'tag %s does not match app version %s\n' "$GITHUB_REF_NAME" "$version" >&2
+            exit 1
+          fi
+
+      - name: Test the macOS client
+        run: swift test --package-path macos
+
+      - name: Build the universal release archive
+        env:
+          GHOSTLIGHT_SOURCE_REVISION: ${{ github.sha }}
+        run: macos/package-release.sh dist
+
+      - name: Verify the packaged application
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/Ghostlight-*-macos-universal.zip)
+          [[ ${#archives[@]} == 1 ]]
+          (cd dist && shasum -a 256 --check SHA256SUMS)
+          receipt="$(mktemp -d)"
+          ditto -x -k "${archives[0]}" "$receipt"
+          codesign --verify --deep --strict "$receipt/Ghostlight.app"
+          architectures="$(lipo -archs "$receipt/Ghostlight.app/Contents/MacOS/GhostlightApp")"
+          [[ "$architectures" == *arm64* ]]
+          [[ "$architectures" == *x86_64* ]]
+
+      - name: Upload the package receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ghostlight-macos-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download the verified package receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ghostlight-macos-${{ github.sha }}
+          path: dist
+
+      - name: Verify the downloaded release assets
+        run: cd dist && sha256sum --check SHA256SUMS
+
+      - name: Publish the tagged GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          [[ -f "$notes" ]] || {
+            printf 'release notes are missing: %s\n' "$notes" >&2
+            exit 1
+          }
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              dist/* \
+              --verify-tag \
+              --prerelease \
+              --title "Ghostlight ${GITHUB_REF_NAME#v} alpha" \
+              --notes-file "$notes"
+          fi

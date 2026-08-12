@@ -1,0 +1,34 @@
+{
+  "SchemaVersion": 2,
+  "CreatedAt": "2026-08-12T19:06:41.650548802Z",
+  "ArtifactName": "ghcr.io/evalops/ghostlight-viewer@sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df",
+  "ArtifactType": "container_image",
+  "Metadata": {
+    "OS": {
+      "Family": "debian",
+      "Name": "13.6"
+    },
+    "ImageID": "sha256:620cf37d1d19862c8982b3e132e5da19ba231cbd211914bcd94490fbd7b8b820",
+    "RepoDigests": [
+      "ghcr.io/evalops/ghostlight-viewer@sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df"
+    ],
+    "Size": 1949652992
+  },
+  "Results": [
+    {
+      "Target": "ghcr.io/evalops/ghostlight-viewer@sha256:5886f85b575060f32bc12c060b5881bbddabbe0cc0273526f9173a7c2ca9d7df (debian 13.6)",
+      "Class": "os-pkgs",
+      "Type": "debian",
+      "Vulnerabilities": []
+    },
+    {
+      "Target": "usr/bin/neko",
+      "Class": "lang-pkgs",
+      "Type": "gobinary",
+      "Vulnerabilities": []
+    }
+  ],
+  "Trivy": {
+    "Version": "0.73.0"
+  }
+}

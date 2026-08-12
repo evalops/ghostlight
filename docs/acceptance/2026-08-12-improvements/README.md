@@ -38,7 +38,7 @@ Its 2026-08-12 VP8 result is committed under `docs/performance`.
   the [native receipt and screenshots](../2026-08-12/README.md#native-macos-navigation-receipt)
   record that WebKit-navigation result.
 - **Performance: measured.** The VP8 working-tree measurement observed live
-  inbound media, 251 decoded frames, zero dropped frames, bitrate, latency,
+  inbound media, 251 decoded frames, zero dropped frames, bitrate, a dispatch-to-next-presented-frame phase,
   CPU, and memory. Its transcript does not record an exact commit SHA.
 
 These lanes do not exercise Gmail or make any claim about seven-day daily-driver
