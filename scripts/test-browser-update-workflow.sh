@@ -29,7 +29,17 @@ require_text() {
 }
 
 dollar='$'
-require_text "GHOSTLIGHT_DRIFT_STRICT: ${dollar}{{ github.event_name != 'pull_request' && '1' || '0' }}"
+# Drift detection must never fail the candidate job: on schedule/dispatch the
+# drift signal is what drives the digest-update PR created below.
+grep -Fq -- 'GHOSTLIGHT_DRIFT_STRICT' "$workflow" && {
+  printf 'browser update workflow must not gate the update lane on digest drift\n' >&2
+  exit 1
+}
+grep -Fq -- 'continue-on-error' "$workflow" && {
+  printf 'browser update workflow must not swallow step failures with continue-on-error\n' >&2
+  exit 1
+}
+require_text 'GHOSTLIGHT_NEKO_CANDIDATE_IMAGE'
 require_text 'bash scripts/update-neko-image.sh'
 require_text 'bash scripts/update-control-base-images.sh'
 require_text 'needs: candidate'
