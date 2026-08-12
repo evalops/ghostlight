@@ -3,10 +3,11 @@ name: Publish hardened viewer
 "on":
   push:
     branches:
-      - codex/ghostlight-all-improvements
+      - main
     paths:
       - viewer/**
       - .github/workflows/viewer-image.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
