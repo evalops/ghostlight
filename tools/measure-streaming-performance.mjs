@@ -127,8 +127,9 @@ function composeConfig() {
 function chromiumConfig() {
   return [
     "[program:chromium]",
+    "environment=HOME=\"/home/neko\",USER=\"neko\",DISPLAY=\":99.0\"",
     "command=/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*",
-    "directory=/home/neko",
+    "stopsignal=INT",
     "user=neko",
     "autostart=true",
     "autorestart=true",
@@ -139,8 +140,8 @@ function chromiumConfig() {
     "stderr_logfile_maxbytes=0",
     "",
     "[program:openbox]",
+    "environment=HOME=\"/home/neko\",USER=\"neko\",DISPLAY=\":99.0\"",
     "command=/usr/bin/openbox --config-file /etc/neko/openbox.xml",
-    "directory=/home/neko",
     "user=neko",
     "autostart=true",
     "autorestart=true",
