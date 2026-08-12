@@ -866,6 +866,8 @@ async function main() {
     remoteBrowser = await chromium.connectOverCDP(CDP_URL);
     const remoteContext = remoteBrowser.contexts()[0];
     if (!remoteContext) throw new Error("CDP browser context is missing");
+    const remoteCdp = await remoteBrowser.newBrowserCDPSession();
+    await remoteCdp.send("Target.createTarget", { url: REMOTE_FIXTURE_URL });
     let remotePage = remoteContext.pages()[0] ?? null;
     const pageDeadline = Date.now() + 30000;
     while (!remotePage && Date.now() < pageDeadline) {
