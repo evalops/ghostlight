@@ -1,0 +1,215 @@
+---
+name: CI
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghostlight-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-modules:
+    name: Detect optional modules
+    runs-on: ubuntu-latest
+    outputs:
+      has_control: ${{ steps.detect.outputs.has_control }}
+      has_macos: ${{ steps.detect.outputs.has_macos }}
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Detect module paths
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d control ]]; then
+            if find control -type f -print -quit | grep -q .; then
+              echo "has_control=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_control=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "has_control=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ -d macos ]]; then
+            if find macos -type f -print -quit | grep -q .; then
+              echo "has_macos=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_macos=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "has_macos=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  hygiene:
+    name: License and prose hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Run repository hygiene check
+        run: bash scripts/check-repo-hygiene.sh
+
+      - name: Run repository-script tests
+        run: bash scripts/test-repo-hygiene.sh
+
+  optional-shell-and-compose:
+    name: Optional shell and Compose checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install ShellCheck when shell scripts exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          shell_files=()
+          shell_pattern='^#!.*[[:space:]](ba)?sh([[:space:]]|$)'
+          for directory in scripts runtime; do
+            if [[ ! -d "$directory" ]]; then
+              continue
+            fi
+            while IFS= read -r -d '' file; do
+              if [[ "$file" == *.sh ]]; then
+                shell_files+=("$file")
+              elif grep -qE "$shell_pattern" "$file"; then
+                shell_files+=("$file")
+              fi
+            done < <(find "$directory" -type f -print0)
+          done
+
+          if (( ${#shell_files[@]} == 0 )); then
+            echo "No shell scripts found under scripts/ or runtime/;"
+            echo "Skipping ShellCheck."
+            exit 0
+          fi
+
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes shellcheck
+          fi
+          shellcheck "${shell_files[@]}"
+
+      - name: Validate Docker Compose files without starting containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose_files=()
+          if [[ -d runtime ]]; then
+            while IFS= read -r -d '' file; do
+              compose_files+=("$file")
+            done < <(
+              find runtime -type f \( \
+                -name 'compose.yml' -o \
+                -name 'compose.yaml' -o \
+                -name 'docker-compose.yml' -o \
+                -name 'docker-compose.yaml' \
+              \) -print0
+            )
+          fi
+
+          if (( ${#compose_files[@]} == 0 )); then
+            echo "No Docker Compose file found under runtime/;"
+            echo "Skipping Compose validation."
+            exit 0
+          fi
+
+          for file in "${compose_files[@]}"; do
+            echo "Validating $file"
+            docker compose -f "$file" config --quiet
+          done
+
+  go-tests:
+    name: Go tests
+    needs: detect-modules
+    if: ${{ needs.detect-modules.outputs.has_control == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Run control tests
+        working-directory: control
+        run: go test ./...
+
+  swift-tests:
+    name: Swift tests
+    needs: detect-modules
+    if: ${{ needs.detect-modules.outputs.has_macos == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Run macOS tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f macos/Package.swift ]]; then
+            swift test --package-path macos
+            exit 0
+          fi
+
+          shopt -s nullglob
+          workspaces=(macos/*.xcworkspace)
+          projects=(macos/*.xcodeproj)
+
+          if (( ${#workspaces[@]} > 0 )); then
+            workspace=${workspaces[0]}
+            scheme=${XCODE_SCHEME:-}
+            if [[ -z "$scheme" ]]; then
+              scheme=$(
+                xcodebuild -list -json -workspace "$workspace" |
+                  plutil -extract \
+                    workspace.schemes.0 raw -o - - 2>/dev/null || true
+              )
+            fi
+            if [[ -z "$scheme" ]]; then
+              echo "No Xcode scheme found for $workspace; set XCODE_SCHEME." >&2
+              exit 1
+            fi
+            xcodebuild test \
+              -workspace "$workspace" \
+              -scheme "$scheme" \
+              -destination 'platform=macOS'
+            exit 0
+          fi
+
+          if (( ${#projects[@]} > 0 )); then
+            project=${projects[0]}
+            scheme=${XCODE_SCHEME:-}
+            if [[ -z "$scheme" ]]; then
+              scheme=$(
+                xcodebuild -list -json -project "$project" |
+                  plutil -extract \
+                    project.schemes.0 raw -o - - 2>/dev/null || true
+              )
+            fi
+            if [[ -z "$scheme" ]]; then
+              echo "No Xcode scheme found for $project; set XCODE_SCHEME." >&2
+              exit 1
+            fi
+            xcodebuild test \
+              -project "$project" \
+              -scheme "$scheme" \
+              -destination 'platform=macOS'
+            exit 0
+          fi
+
+          echo "macos/ has no Package.swift, Xcode workspace, or Xcode project."
+          echo "Skipping Swift tests."
