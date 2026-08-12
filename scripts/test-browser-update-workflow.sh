@@ -89,6 +89,12 @@ grep -Fq -- 'if (( share_viewer_network == 1 )); then' "$acceptance" || {
   printf 'acceptance harness does not make the shared viewer network opt-in\n' >&2
   exit 1
 }
+# This is a literal source-contract assertion, not a shell expansion.
+# shellcheck disable=SC2016
+if grep -Fq -- 'published: \"$CONTROL_PORT\"' "$acceptance"; then
+  printf 'shared-network acceptance override contains escaped YAML port quotes\n' >&2
+  exit 1
+fi
 # These are literal source-contract assertions, not shell expansions.
 # shellcheck disable=SC2016
 for setting in \

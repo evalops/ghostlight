@@ -96,7 +96,7 @@ shared_viewer_port=''
 if (( share_viewer_network == 1 )); then
   shared_viewer_port="$(cat <<EOF
       - target: 8082
-        published: \"$CONTROL_PORT\"
+        published: "$CONTROL_PORT"
         host_ip: 127.0.0.1
         protocol: tcp
 EOF
