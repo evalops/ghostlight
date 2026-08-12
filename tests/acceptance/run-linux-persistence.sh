@@ -92,7 +92,7 @@ EOF
 
   npm ci --prefix "$TEST_DIR"
   GHOSTLIGHT_ENV_FILE="$ENV_FILE" CHROMIUM_PROFILE_DIR="$PROFILE_DIR" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK="$SKIP_PROFILE_CHECK" "$ROOT_DIR/runtime/bin/preflight.sh"
-  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build --wait --wait-timeout 120
 
 for _attempt in {1..60}; do
   curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
@@ -106,7 +106,7 @@ docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/ru
 BEFORE_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 BEFORE_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down
-  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build --wait --wait-timeout 120
 
 for _attempt in {1..60}; do
   curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
