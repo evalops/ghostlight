@@ -1,0 +1,10 @@
+{"cookie": "", "path": "/state-a", "query": {}, "time": "2026-08-12T16:28:24.759515+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/state-b", "query": {}, "time": "2026-08-12T16:28:24.822378+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/favicon.ico", "query": {}, "time": "2026-08-12T16:28:24.824846+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["A"], "value": ["none"]}, "time": "2026-08-12T16:28:24.824722+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["B"], "value": ["synthetic-20260812T162811Z"]}, "time": "2026-08-12T16:28:24.840666+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/state-b", "query": {}, "time": "2026-08-12T16:28:31.979924+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/state-a", "query": {}, "time": "2026-08-12T16:28:32.000530+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["A"], "value": ["synthetic-20260812T162811Z"]}, "time": "2026-08-12T16:28:32.029626+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/storage-report", "query": {"tab": ["B"], "value": ["synthetic-20260812T162811Z"]}, "time": "2026-08-12T16:28:32.060619+00:00"}
+{"cookie": "ghostlight_acceptance=synthetic-20260812T162811Z", "path": "/favicon.ico", "query": {}, "time": "2026-08-12T16:28:32.073921+00:00"}

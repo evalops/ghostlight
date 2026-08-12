@@ -21,21 +21,36 @@ Its 2026-08-12 VP8 result is committed under `docs/performance`.
 
 ## Executed status
 
-- **Linux persistence: blocked on this nested test host.** Compose booted the
-  isolated digest-pinned viewer and test pages were reachable, but Chromium
-  151 did not complete target-scoped CDP commands through the committed TCP
-  proxy. The lane failed closed before producing or publishing screenshots.
-  The final raw failure is in `linux-persistence/transcript.txt`. An earlier
-  repository receipt under `docs/acceptance/2026-08-12` remains the live proof,
-  but it used uncommitted instrumentation and is not misrepresented as a run of
-  this new harness.
-- **macOS relaunch: blocked.** The app bundle built and launched, but the
-  terminal runner did not receive the macOS Accessibility response required
-  for the semantic `Viewer loaded` assertion. The lane failed closed and did
-  not publish screenshots. `macos-relaunch/transcript.txt` records only bundle
-  provenance; it is not a passing receipt.
+- **Linux persistence: passed.** Source `f94bb784316e206674234407a75170b10dd0e7bc`
+  built and started with healthy viewer and control services. Compose then
+  removed and recreated both containers with new IDs. Chromium restored both
+  synthetic tabs, and the new server requests carried the saved cookie and
+  local-storage marker for tabs A and B. The transcript, target lists, request
+  logs, hashes, and four screenshots are in `linux-persistence/`.
+- **macOS relaunch: passed through Computer Use.** The first scripted attempt
+  did not receive the required Accessibility response and remains recorded in
+  `macos-relaunch/transcript.txt`. A later interactive run reached `Viewer
+  loaded`, terminated the packaged app, and relaunched from the saved loopback
+  control URL without another Connect action. The packaged binary still hashes
+  to `26581f3d480584a3216f9494835f6fcade02054fe5cfe3de877d5e49c3f27fcf`;
+  the [native receipt and screenshots](../2026-08-12/README.md#native-macos-receipt)
+  record that WebKit-navigation result.
 - **Performance: passed.** The VP8 receipt observed live inbound media, 251
   decoded frames, zero dropped frames, bitrate, latency, CPU, and memory.
 
 These lanes do not exercise Gmail or make any claim about seven-day daily-driver
 acceptance. Synthetic pages are deliberate so receipts contain no account data.
+
+## Linux screenshots
+
+Before recreation:
+
+![Synthetic tab A before recreation](linux-persistence/before-tab-a.jpg)
+
+![Synthetic tab B before recreation](linux-persistence/before-tab-b.jpg)
+
+After recreation:
+
+![Restored synthetic tab A](linux-persistence/after-tab-a.jpg)
+
+![Restored synthetic tab B](linux-persistence/after-tab-b.jpg)

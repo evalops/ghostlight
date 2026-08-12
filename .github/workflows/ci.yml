@@ -245,7 +245,6 @@ jobs:
           set -euo pipefail
           node --check tests/acceptance/persistence.mjs
           node --check tests/acceptance/performance.mjs
-          python3 -m py_compile tests/acceptance/audit-screenshots.py tests/acceptance/validate-persistence.py
           python3 -m py_compile tests/acceptance/audit-screenshots.py tests/acceptance/fixtures/synthetic_server.py tests/acceptance/validate-persistence.py
           if node tests/acceptance/persistence.mjs; then
             echo "persistence harness accepted missing arguments" >&2
@@ -262,7 +261,9 @@ jobs:
           set -euo pipefail
           bash scripts/test-container-pins.sh
           bash runtime/tests/test_profile_backup.sh
-          python3 tests/acceptance/audit-screenshots.py docs/acceptance/2026-08-12/*.png
+          mapfile -d '' screenshots < <(find docs/acceptance -type f \( -name '*.png' -o -name '*.jpg' \) -print0)
+          (( ${#screenshots[@]} > 0 ))
+          python3 tests/acceptance/audit-screenshots.py "${screenshots[@]}"
 
       - name: Upload deterministic harness receipts
         if: always()
