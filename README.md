@@ -199,7 +199,7 @@ scripts/test-check-shell.sh
 bash scripts/check-shell.sh
 ```
 
-The runtime test requires Docker Compose to render the Compose model. CI runs `go test ./...`, repository hygiene, ShellCheck, and Compose validation on Linux. It runs `swift test --package-path macos` on macOS.
+The runtime test requires Docker Compose to render the Compose model. CI runs `go test ./...`, repository hygiene, ShellCheck, runtime regression tests, and Compose validation on Linux. It runs `swift test --package-path macos` and builds the local app bundle on macOS.
 
 ## Troubleshooting
 

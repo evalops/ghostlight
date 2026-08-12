@@ -169,3 +169,9 @@ jobs:
 
           echo "macos/ has no Package.swift, Xcode workspace, or Xcode project."
           echo "Skipping Swift tests."
+
+      - name: Build the Ghostlight app bundle
+        run: |
+          macos/package-app.sh
+          test -x macos/.build/Ghostlight.app/Contents/MacOS/GhostlightApp
+          test "$(plutil -extract CFBundleIdentifier raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "org.evalops.Ghostlight"
