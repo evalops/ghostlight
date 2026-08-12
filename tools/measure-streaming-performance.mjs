@@ -26,6 +26,7 @@ const USE_DAMAGE = process.env.GHOSTLIGHT_PERFORMANCE_USE_DAMAGE === "true";
 const BITRATE_KBPS = Number(process.env.GHOSTLIGHT_PERFORMANCE_BITRATE_KBPS ?? 3072);
 const PHASE_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS ?? 30);
 const WARMUP_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_WARMUP_SECONDS ?? 10);
+const CDP_COMMAND_TIMEOUT_MS = Number(process.env.GHOSTLIGHT_PERFORMANCE_CDP_TIMEOUT_MS ?? 5000);
 const OUTPUT_DIR = process.env.GHOSTLIGHT_PERFORMANCE_OUTPUT_DIR ?? join(ROOT_DIR, "output", "playwright", "performance", `run-${Date.now()}`);
 const DISPLAY_NAME = process.env.GHOSTLIGHT_PERFORMANCE_DISPLAY_NAME ?? "Ghostlight Performance";
 const PASSWORD = process.env.GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD ?? "ghostlight-performance-user";
@@ -49,6 +50,7 @@ if (!Number.isInteger(WIDTH) || !Number.isInteger(HEIGHT) || WIDTH < 640 || HEIG
 if (!Number.isInteger(CPU_USED) || CPU_USED < 0 || CPU_USED > 16) throw new Error("GHOSTLIGHT_PERFORMANCE_CPU_USED must be 0..16");
 if (!Number.isInteger(BITRATE_KBPS) || BITRATE_KBPS < 128) throw new Error("GHOSTLIGHT_PERFORMANCE_BITRATE_KBPS must be at least 128");
 if (!Number.isInteger(PHASE_SECONDS) || PHASE_SECONDS < 5) throw new Error("GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS must be at least 5");
+if (!Number.isInteger(CDP_COMMAND_TIMEOUT_MS) || CDP_COMMAND_TIMEOUT_MS < 100 || CDP_COMMAND_TIMEOUT_MS > 60000) throw new Error("GHOSTLIGHT_PERFORMANCE_CDP_TIMEOUT_MS must be 100..60000");
 
 const command = (program, args, options = {}) => execFileSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options });
 const remoteCommand = (script, options = {}) => command("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, script], options);
@@ -526,8 +528,9 @@ class RemoteCdpPage {
   async connect() {
     this.socket = new WebSocket(localWebSocketUrl(this.target.webSocketDebuggerUrl));
     await new Promise((resolve, reject) => {
-      this.socket.once("open", resolve);
-      this.socket.once("error", reject);
+      const timeout = setTimeout(() => reject(new Error(`remote CDP websocket open timed out after ${CDP_COMMAND_TIMEOUT_MS}ms`)), CDP_COMMAND_TIMEOUT_MS);
+      this.socket.once("open", () => { clearTimeout(timeout); resolve(); });
+      this.socket.once("error", (error) => { clearTimeout(timeout); reject(error); });
     });
     this.socket.on("message", (message) => {
       const packet = JSON.parse(message.toString());
@@ -540,16 +543,39 @@ class RemoteCdpPage {
       }
       for (const listener of this.events.get(packet.method) ?? []) listener(packet.params ?? {});
     });
-    await this.send("Page.enable");
-    await this.send("Runtime.enable");
+    this.socket.once("close", () => {
+      for (const { reject } of this.pending.values()) reject(new Error("remote CDP websocket closed"));
+      this.pending.clear();
+    });
+    try {
+      await this.send("Page.enable");
+      await this.send("Runtime.enable");
+    } catch (error) {
+      this.socket.close();
+      this.socket = null;
+      throw error;
+    }
     return this;
   }
 
   send(method, params = {}) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`remote CDP command timed out after ${CDP_COMMAND_TIMEOUT_MS}ms: ${method}`));
+      }, CDP_COMMAND_TIMEOUT_MS);
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timeout); resolve(value); },
+        reject: (error) => { clearTimeout(timeout); reject(error); },
+      });
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
