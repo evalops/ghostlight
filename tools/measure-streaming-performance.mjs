@@ -268,7 +268,7 @@ function startSshTunnel() {
     `127.0.0.1:${CDP_PORT}:${BIND_ADDRESS}:${CDP_PORT}`,
   ];
   const tunnel = spawn("ssh", [
-    "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=10",
+    "-N", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=10",
     ...forwards.flatMap((forward) => ["-L", forward]),
     REMOTE,
   ], { stdio: ["ignore", "ignore", "pipe"] });
@@ -276,6 +276,12 @@ function startSshTunnel() {
   tunnel.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   tunnel.getStderr = () => stderr;
   return tunnel;
+}
+
+async function waitForSshTunnel(tunnel) {
+  if (!tunnel) return;
+  await sleep(500);
+  if (tunnel.exitCode !== null) throw new Error(`SSH tunnel exited before the client connected (code ${tunnel.exitCode}): ${tunnel.getStderr?.() ?? "no stderr"}`);
 }
 
 async function stopSshTunnel(tunnel) {
@@ -918,6 +924,7 @@ async function main() {
     remote = await startRemote();
     cdpBridge = startRemoteCdpBridge(remote.containerId);
     tunnel = startSshTunnel();
+    await waitForSshTunnel(tunnel);
     processStart = await processSnapshot(remote.containerId, "start");
     await waitForHTTP(`${VIEWER_URL}/health`);
     await waitForHTTP(`${CDP_URL}/json/version`);
