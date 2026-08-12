@@ -196,6 +196,24 @@ jobs:
           test "$(plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
           test "$(plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
 
+      - name: Build and verify the universal release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$(mktemp -d)"
+          receipt_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$release_dir" "$receipt_dir"' EXIT
+          macos/package-release.sh "$release_dir"
+          (cd "$release_dir" && shasum -a 256 --check SHA256SUMS)
+          shopt -s nullglob
+          archives=("$release_dir"/Ghostlight-*-macos-universal.zip)
+          [[ ${#archives[@]} == 1 ]]
+          ditto -x -k "${archives[0]}" "$receipt_dir"
+          codesign --verify --deep --strict "$receipt_dir/Ghostlight.app"
+          architectures="$(lipo -archs "$receipt_dir/Ghostlight.app/Contents/MacOS/GhostlightApp")"
+          [[ "$architectures" == *arm64* ]]
+          [[ "$architectures" == *x86_64* ]]
+
   deterministic-harnesses:
     name: Deterministic harnesses
     runs-on: ubuntu-latest

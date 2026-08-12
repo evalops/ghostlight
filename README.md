@@ -35,9 +35,19 @@ macOS client:
 - Swift 5.10 or later for local builds
 - access to the Linux control, viewer, and WebRTC ports
 
-Repository verification uses a Go 1.24-compatible module, a Go 1.25.12 container builder, and ShellCheck.
+Repository verification uses a Go 1.24-compatible module, a Go 1.26.5 container builder, and ShellCheck.
 
 Live browser acceptance requires Node.js with npm, Python 3, `shasum`, and Tesseract OCR. The reviewed container-update commands require Docker Buildx, `jq`, and Perl.
+
+## Download the macOS app
+
+The [GitHub releases page](https://github.com/evalops/ghostlight/releases) provides a universal ZIP for Apple silicon and Intel Macs. Download the ZIP, `BUILD-INFO.txt`, and `SHA256SUMS`, then verify the archive and build receipt in the download directory:
+
+```sh
+shasum -a 256 --check SHA256SUMS
+```
+
+Extract the ZIP, move `Ghostlight.app` to `/Applications`, and complete the Linux runtime setup below. The alpha package has an ad-hoc code signature and no notarization ticket. For the first launch, Control-click the app, select **Open**, and confirm the prompt if macOS blocks a normal double-click.
 
 ## Start the Linux runtime
 
@@ -194,11 +204,11 @@ The committed [VP8 measurement](docs/performance/2026-08-12-vp8-baseline/README.
 
 ## Container updates
 
-The runtime pins the public `ghcr.io/evalops/ghostlight-viewer` image by its multi-architecture index digest. That image starts from the exact upstream Neko Chromium 3.1.5 digest. [`viewer/Dockerfile`](viewer/Dockerfile) verifies Neko source commit `395ca1a6f62b7b0e270e654d366a2d57b8042efd` by tarball SHA-256 and rebuilds `/usr/bin/neko` after the module-only changes in [`viewer/neko-go-modules.patch`](viewer/neko-go-modules.patch): `x/crypto` 0.52.0, `x/net` 0.55.0, `x/sys` 0.45.0, and `x/text` 0.39.0. It installs Chromium, chromium-common, and chromium-sandbox 151.0.7922.108-1~deb13u1 plus libheif1 and its dav1d and libde265 plugins 1.19.8-1+deb13u1 from the Debian `20260812T000000Z` snapshot. The image retains Neko's Apache-2.0 license and the Debian package copyright files inherited from the upstream image.
+The runtime pins the public `ghcr.io/evalops/ghostlight-viewer` image by its multi-architecture index digest. That image starts from the exact upstream Neko Chromium 3.1.5 digest. [`viewer/Dockerfile`](viewer/Dockerfile) verifies Neko source commit `395ca1a6f62b7b0e270e654d366a2d57b8042efd` by tarball SHA-256 and rebuilds `/usr/bin/neko` after the module-only changes in [`viewer/neko-go-modules.patch`](viewer/neko-go-modules.patch): `x/crypto` 0.53.0, `x/net` 0.56.0, `x/sys` 0.46.0, and `x/text` 0.39.0. It installs Chromium, chromium-common, and chromium-sandbox 151.0.7922.108-1~deb13u1 plus libheif1 and its dav1d and libde265 plugins 1.19.8-1+deb13u1 from the Debian `20260812T000000Z` snapshot. The image retains Neko's Apache-2.0 license and the Debian package copyright files inherited from the upstream image.
 
 The upstream Neko 3.1.5 image is not eligible for the runtime pin under the repository's scanner gate. Protected run `31621725290` found 32 fixed `HIGH` vulnerabilities: 18 in Debian packages and 14 in `/usr/bin/neko`. A fixed `HIGH` or `CRITICAL` finding blocks a candidate; `--ignore-unfixed` excludes findings without an available fix from that blocking command.
 
-The hardened viewer publish workflow builds `linux/amd64` and `linux/arm64` images with SBOM and provenance attestations. Publish run `31625537828` built source `5af30266d65493fa10049281800c1803a3ff7e49` and produced the public index `ghcr.io/evalops/ghostlight-viewer@sha256:9c822dfd7713953af6a443960376fc59e3fd478fd3047c7880d0f0a5ad6d9e9f`, which is the digest mirrored in the runtime configuration and tests. The unchanged Trivy 0.73.0 fixed-vulnerability gate reported zero `HIGH` or `CRITICAL` findings for both exact child images. The amd64 image reported Neko `v3.1.5` at the full upstream commit and returned `true` from `/health`. The arm64 binary is an AArch64 executable with the same embedded version provenance; it was inspected but was not booted natively. Both control base images, GitHub Actions, and Trivy also use immutable digests or commit SHAs. Repository checks reject mutable or inconsistent references.
+The hardened viewer publish workflow builds `linux/amd64` and `linux/arm64` images with SBOM and provenance attestations. Publish run [`31632547870`](https://github.com/evalops/ghostlight/actions/runs/31632547870) built source `d6cba42d564e1cc8bb9fc3d3f6842915e9f221d5` and produced the public index `ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44`, which is mirrored in the runtime configuration and tests. The earlier [main viewer security receipt](docs/security/2026-08-12-viewer-main/README.md) records the same build pipeline's child digests, attestations, version metadata, amd64 health check, and Trivy format. The release candidate workflow repeats live persistence and fixed-vulnerability checks against the promoted digest before merge. Both control base images, GitHub Actions, and Trivy also use immutable digests or commit SHAs. Repository checks reject mutable or inconsistent references.
 
 `.github/workflows/browser-update.yml` runs at `04:17 UTC` each Monday, accepts a manual upstream Neko candidate, and runs on pull requests that change its inputs. Schedule and manual runs resolve the selected Neko tag plus the Go and Alpine base tags to digests. The candidate job then builds control, runs runtime and backup checks, boots and recreates the synthetic Linux persistence stack, scans the viewer and control images with the pinned Trivy image, and retains `output/` receipts for 30 days.
 

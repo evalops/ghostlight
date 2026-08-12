@@ -38,7 +38,7 @@ printf '%s\n' \
   '    steps:' \
   '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' \
   >"$fixture/.github/workflows/ci.yml"
-printf 'FROM golang:1.25.12-alpine@sha256:%s AS build\nFROM alpine:3.22@sha256:%s\n' \
+printf 'FROM golang:1.26.5-alpine@sha256:%s AS build\nFROM alpine:3.24@sha256:%s\n' \
   "$old_digest" "$old_digest" >"$fixture/control/Dockerfile"
 printf 'NEKO_IMAGE=%s\n' "$old_image" >"$fixture/runtime/.env.example"
 printf '%s\n' \
@@ -61,9 +61,9 @@ alpine_new_digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 GHOSTLIGHT_GO_BASE_RESOLVED_DIGEST="sha256:$go_new_digest" \
 GHOSTLIGHT_ALPINE_BASE_RESOLVED_DIGEST="sha256:$alpine_new_digest" \
   "$base_updater" --root "$fixture"
-grep -Fqx -- "FROM golang:1.25.12-alpine@sha256:$go_new_digest AS build" "$fixture/control/Dockerfile" \
+grep -Fqx -- "FROM golang:1.26.5-alpine@sha256:$go_new_digest AS build" "$fixture/control/Dockerfile" \
   || fail 'base updater did not update the Go build image'
-grep -Fqx -- "FROM alpine:3.22@sha256:$alpine_new_digest" "$fixture/control/Dockerfile" \
+grep -Fqx -- "FROM alpine:3.24@sha256:$alpine_new_digest" "$fixture/control/Dockerfile" \
   || fail 'base updater did not update the Alpine runtime image'
 "$checker" "$fixture"
 
@@ -79,7 +79,7 @@ expect_failure 'mutable action with spaced key separator' "$checker" "$fixture"
 cp "$scratch_dir/ci.yml" "$fixture/.github/workflows/ci.yml"
 
 cp "$fixture/control/Dockerfile" "$scratch_dir/Dockerfile"
-printf 'FROM golang:1.25.12-alpine@sha256:%s AS build\nFROM alpine:3.22\n' \
+printf 'FROM golang:1.26.5-alpine@sha256:%s AS build\nFROM alpine:3.24\n' \
   "$old_digest" >"$fixture/control/Dockerfile"
 expect_failure 'mutable Docker base image' "$checker" "$fixture"
 cp "$scratch_dir/Dockerfile" "$fixture/control/Dockerfile"
@@ -124,5 +124,18 @@ owned_image="ghcr.io/evalops/ghostlight-viewer@sha256:$old_digest"
 grep -Fqx -- "NEKO_IMAGE=$owned_image" "$fixture/runtime/.env.example" \
   || fail 'updater did not accept the owned hardened viewer namespace'
 "$checker" "$fixture"
+
+actual_contract="$scratch_dir/actual-control-contract"
+mkdir -p "$actual_contract/control"
+cp "$script_dir/../control/Dockerfile" "$actual_contract/control/Dockerfile"
+actual_go_digest=$(awk '$1 == "FROM" && $2 ~ /^golang:/ { image = $2; sub(/^[^@]*@/, "", image); print image; exit }' "$actual_contract/control/Dockerfile")
+actual_alpine_digest=$(awk '$1 == "FROM" && $2 ~ /^alpine:/ { image = $2; sub(/^[^@]*@/, "", image); print image; exit }' "$actual_contract/control/Dockerfile")
+before_update=$(shasum -a 256 "$actual_contract/control/Dockerfile")
+GHOSTLIGHT_GO_BASE_RESOLVED_DIGEST="$actual_go_digest" \
+GHOSTLIGHT_ALPINE_BASE_RESOLVED_DIGEST="$actual_alpine_digest" \
+  "$base_updater" --root "$actual_contract"
+after_update=$(shasum -a 256 "$actual_contract/control/Dockerfile")
+[[ "$before_update" == "$after_update" ]] \
+  || fail 'base updater changed the checked-in control base contract'
 
 printf 'image safety tests passed\n'

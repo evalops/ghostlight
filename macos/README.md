@@ -11,6 +11,15 @@ open macos/.build/Ghostlight.app
 
 The packaging script performs a release Swift build, creates `macos/.build/Ghostlight.app`, copies the executable and `Info.plist`, and applies an ad-hoc signature when `codesign` is available. The bundle identifier is `org.evalops.Ghostlight`. The output has no Developer ID signature or notarization receipt.
 
+For the distributable universal ZIP:
+
+```sh
+macos/package-release.sh dist
+shasum -a 256 --check dist/SHA256SUMS
+```
+
+The release script refuses tracked source changes, cross-builds arm64 and x86_64 executables with a macOS 14 deployment target, combines them with `lipo`, and creates an ad-hoc-signed app. It writes `Ghostlight-<version>-macos-universal.zip`, `BUILD-INFO.txt`, and `SHA256SUMS`. The build receipt records the source revision, Swift toolchain, architectures, signing state, and archive digest. A `v<version>` Git tag publishes those files through `.github/workflows/release.yml` after the tag matches `CFBundleShortVersionString`.
+
 The app uses SwiftUI, WebKit, Foundation, and `URLSession`. `Package.swift` declares no third-party Swift package dependency.
 
 ## Viewer discovery

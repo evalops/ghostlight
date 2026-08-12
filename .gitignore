@@ -9,5 +9,6 @@ control/*.db
 runtime/.env
 runtime/data/
 coverage/
+dist/
 output/
 output/
