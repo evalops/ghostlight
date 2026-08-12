@@ -140,7 +140,7 @@ function chromiumConfig() {
   return [
     "[program:chromium]",
     "environment=HOME=\"/home/neko\",USER=\"neko\",DISPLAY=\":99.0\"",
-    "command=/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222 --remote-allow-origins=*",
+    "command=/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*",
     "stopsignal=INT",
     "user=neko",
     "autostart=true",
@@ -296,26 +296,49 @@ function stopRemoteCdpBridge(bridge) {
 
 function startSshTunnel() {
   if (!USE_SSH_TUNNEL) return null;
+  const forwardedPorts = [VIEWER_PORT, WEBRTC_PORT, CDP_PORT];
+  assertLocalPorts(forwardedPorts, "before SSH tunnel spawn");
   const forwards = [
     `127.0.0.1:${VIEWER_PORT}:${BIND_ADDRESS}:${VIEWER_PORT}`,
     `127.0.0.1:${WEBRTC_PORT}:${BIND_ADDRESS}:${WEBRTC_PORT}`,
     `127.0.0.1:${CDP_PORT}:${BIND_ADDRESS}:${CDP_PORT}`,
   ];
   const tunnel = spawn("ssh", [
-    "-N", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=10",
+    "-4", "-N", "-o", "AddressFamily=inet", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=10",
     ...forwards.flatMap((forward) => ["-L", forward]),
     REMOTE,
   ], { stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   tunnel.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   tunnel.getStderr = () => stderr;
+  tunnel.forwardedPorts = forwardedPorts;
   return tunnel;
+}
+
+function localPortListeners(ports) {
+  return ports.map((port) => {
+    try {
+      return { port, listeners: command("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]).trim() };
+    } catch (error) {
+      if (error?.status === 1) return { port, listeners: "" };
+      throw error;
+    }
+  });
+}
+
+function assertLocalPorts(ports, phase) {
+  const occupied = localPortListeners(ports).filter((entry) => entry.listeners);
+  if (occupied.length) {
+    throw new Error(`${phase}: local TCP port(s) already in use: ${occupied.map((entry) => `${entry.port} by ${entry.listeners}`).join(", ")}`);
+  }
 }
 
 async function waitForSshTunnel(tunnel) {
   if (!tunnel) return;
   await sleep(500);
   if (tunnel.exitCode !== null) throw new Error(`SSH tunnel exited before the client connected (code ${tunnel.exitCode}): ${tunnel.getStderr?.() ?? "no stderr"}`);
+  const missing = localPortListeners(tunnel.forwardedPorts).filter((entry) => !entry.listeners);
+  if (missing.length) throw new Error(`SSH tunnel did not bind expected IPv4 local port(s): ${missing.map((entry) => entry.port).join(", ")}; stderr: ${tunnel.getStderr?.() ?? "no stderr"}`);
 }
 
 async function stopSshTunnel(tunnel) {
