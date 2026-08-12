@@ -102,7 +102,8 @@ done
 curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >>"$TRANSCRIPT"
 printf '\n' >>"$TRANSCRIPT"
 
-node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" before "$OUTPUT_DIR" "$MARKER" >>"$TRANSCRIPT" 2>&1
+node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" before "$OUTPUT_DIR" "$MARKER" >>"$TRANSCRIPT" 2>&1
+docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" exec -T viewer sh -lc 'cat /home/neko/.config/chromium/acceptance-requests.jsonl' >"$OUTPUT_DIR/before-requests.jsonl"
 BEFORE_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 BEFORE_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
 docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down >>"$TRANSCRIPT" 2>&1
@@ -112,18 +113,24 @@ for _attempt in {1..60}; do
   curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
   sleep 1
 done
-node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" after "$OUTPUT_DIR" "$MARKER" >>"$TRANSCRIPT" 2>&1
+node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" after "$OUTPUT_DIR" "$MARKER" >>"$TRANSCRIPT" 2>&1
 AFTER_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 AFTER_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
 [[ "$BEFORE_VIEWER" != "$AFTER_VIEWER" && "$BEFORE_CONTROL" != "$AFTER_CONTROL" ]]
+docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" exec -T viewer sh -lc 'cat /home/neko/.config/chromium/acceptance-requests.jsonl' >"$OUTPUT_DIR/after-requests.jsonl"
+python3 "$TEST_DIR/validate-persistence.py" "$OUTPUT_DIR/before-requests.jsonl" "$OUTPUT_DIR/after-requests.jsonl" "$MARKER" >>"$TRANSCRIPT" 2>&1
 
 {
   printf 'before_viewer=%s\nafter_viewer=%s\n' "$BEFORE_VIEWER" "$AFTER_VIEWER"
   printf 'before_control=%s\nafter_control=%s\n' "$BEFORE_CONTROL" "$AFTER_CONTROL"
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" exec -T viewer sh -lc 'tail -20 /home/neko/.config/chromium/acceptance-requests.jsonl'
-  python3 "$TEST_DIR/audit-screenshots.py" "$OUTPUT_DIR"/*.png
-  shasum -a 256 "$OUTPUT_DIR"/*.png "$OUTPUT_DIR"/*-evidence.json
+  shopt -s nullglob
+  image_files=("$OUTPUT_DIR"/*.png "$OUTPUT_DIR"/*.jpg)
+  evidence_files=("$OUTPUT_DIR"/*-evidence.json)
+  request_files=("$OUTPUT_DIR"/*-requests.jsonl)
+  python3 "$TEST_DIR/audit-screenshots.py" "${image_files[@]}"
+  shasum -a 256 "${image_files[@]}" "${evidence_files[@]}" "${request_files[@]}"
 } >>"$TRANSCRIPT" 2>&1
 
 printf 'acceptance passed; evidence: %s\n' "$OUTPUT_DIR"

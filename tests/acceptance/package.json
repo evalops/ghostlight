@@ -10,8 +10,5 @@
   },
   "devDependencies": {
     "playwright": "1.62.1"
-  },
-  "dependencies": {
-    "ws": "8.21.3"
   }
 }
