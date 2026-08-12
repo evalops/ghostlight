@@ -14,7 +14,7 @@ The next milestone has one acceptance path:
 
 The acceptance gate is seven consecutive days with one successful close-and-reopen check and one successful Compose-restart check each day. Dex control lease work starts after that gate passes.
 
-Today, the repository provides the Compose runtime and a development Swift executable. A signed `Ghostlight.app`, flag-free Compose startup from the repository root, and repeated Gmail persistence testing remain acceptance work.
+Today, the repository provides flag-free Compose startup and a script that builds an ad-hoc signed `Ghostlight.app` for local testing. Notarized distribution and repeated Gmail persistence testing remain acceptance work.
 
 ## What works
 
@@ -79,11 +79,11 @@ NEKO_WEBRTC_NAT1TO1=192.168.1.20
 
 Replace `192.168.1.20` with the Linux address reachable from the Mac. Keep `GHOSTLIGHT_VIEWER_URL` and `NEKO_WEBRTC_NAT1TO1` on the same reachable host unless the network has an explicit proxy or NAT arrangement.
 
-Validate and start the stack:
+Validate and start the stack from the repository root:
 
 ```sh
 runtime/bin/preflight.sh
-docker compose --env-file runtime/.env -f runtime/docker-compose.yml up --build -d
+docker compose up --build -d
 runtime/bin/smoke.sh
 ```
 
@@ -104,13 +104,16 @@ docker compose --env-file runtime/.env -f runtime/docker-compose.yml down
 
 ## Launch the macOS client
 
-The current development entry point is:
+Build the local test application:
 
 ```sh
-swift run --package-path macos GhostlightApp
+macos/package-app.sh
+open macos/.build/Ghostlight.app
 ```
 
-Enter the Linux control URL, such as `http://192.168.1.20:8080`, and select **Connect**. The app sends `POST /v1/sessions`, receives the configured viewer URL, and loads the Neko login screen.
+The bundle is ad-hoc signed with the stable identifier `org.evalops.Ghostlight`. It is intended for local development and is not notarized for distribution.
+
+Enter the Linux control URL, such as `http://192.168.1.20:8080`, and select **Connect**. The app saves a successful URL and reconnects to it on later launches. It sends `POST /v1/sessions`, receives the configured viewer URL, and loads the Neko login screen.
 
 Sign in with `NEKO_USER_PASSWORD`. Website sessions, cookies, local storage, and tabs belong to the Chromium profile on the Linux host rather than the Mac app process.
 

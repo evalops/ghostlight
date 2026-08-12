@@ -18,10 +18,15 @@ public struct CreateSessionResponse: Codable, Equatable, Sendable {
 
 struct APIErrorPayload: Decodable {
     let message: String?
-    let error: String?
     let detail: String?
+    let error: APIErrorDetail?
 
     var bestMessage: String? {
-        message ?? error ?? detail
+        message ?? error?.message ?? detail
     }
+}
+
+struct APIErrorDetail: Decodable {
+    let code: String?
+    let message: String?
 }

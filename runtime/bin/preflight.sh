@@ -9,7 +9,6 @@ EXAMPLE_ENV="$RUNTIME_DIR/.env.example"
 ENV_FILE="${GHOSTLIGHT_ENV_FILE:-$RUNTIME_DIR/.env}"
 CONTROL_DIR="$RUNTIME_DIR/../control"
 PROFILE_DIR="$RUNTIME_DIR/data/chromium"
-CONTROL_DATA_DIR="$RUNTIME_DIR/data/control"
 
 die() {
   printf 'preflight: %s\n' "$*" >&2
@@ -46,8 +45,7 @@ fi
 [[ -d "$CONTROL_DIR" ]] || die "control source is missing at $CONTROL_DIR; check out the control API beside runtime"
 [[ -f "$CONTROL_DIR/Dockerfile" ]] || die "control/Dockerfile is missing; the control service must be buildable from ../control"
 
-mkdir -p "$PROFILE_DIR" "$CONTROL_DATA_DIR"
+mkdir -p "$PROFILE_DIR"
 [[ -w "$PROFILE_DIR" ]] || die "Chromium profile directory is not writable: $PROFILE_DIR; grant the Docker user access"
-[[ -w "$CONTROL_DATA_DIR" ]] || die "control data directory is not writable: $CONTROL_DATA_DIR; grant the Docker user access"
 
-printf 'preflight passed: Compose config, control source, data directories, and environment checks\n'
+printf 'preflight passed: Compose config, control source, profile directory, and environment checks\n'

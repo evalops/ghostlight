@@ -15,37 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  detect-modules:
-    name: Detect optional modules
-    runs-on: ubuntu-latest
-    outputs:
-      has_control: ${{ steps.detect.outputs.has_control }}
-      has_macos: ${{ steps.detect.outputs.has_macos }}
-    steps:
-      - name: Check out source
-        # actions/checkout v4.2.2
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Detect module paths
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -f control/go.mod ]]; then
-            echo "has_control=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_control=false" >> "$GITHUB_OUTPUT"
-          fi
-          if [[ -d macos ]]; then
-            if find macos -type f -print -quit | grep -q .; then
-              echo "has_macos=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "has_macos=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "has_macos=false" >> "$GITHUB_OUTPUT"
-          fi
-
   hygiene:
     name: License and prose hygiene
     runs-on: ubuntu-latest
@@ -115,10 +84,16 @@ jobs:
             docker compose -f "$file" config --quiet
           done
 
+      - name: Run runtime regression tests
+        run: bash runtime/tests/test_runtime.sh
+
+      - name: Validate flag-free root Compose entrypoint
+        run: |
+          cp runtime/.env.example runtime/.env
+          docker compose config --quiet
+
   go-tests:
     name: Go tests
-    needs: detect-modules
-    if: ${{ needs.detect-modules.outputs.has_control == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -131,8 +106,6 @@ jobs:
 
   swift-tests:
     name: Swift tests
-    needs: detect-modules
-    if: ${{ needs.detect-modules.outputs.has_macos == 'true' }}
     runs-on: macos-latest
     steps:
       - name: Check out source

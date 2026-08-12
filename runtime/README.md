@@ -24,15 +24,15 @@ Edit `.env` before starting the stack:
 - Set `NEKO_WEBRTC_NAT1TO1` to the Linux host address reachable by the client when the host is behind NAT or a routed LAN.
 - Set `GHOSTLIGHT_VIEWER_URL` to the same reachable address with port `8081`.
 
-Then run:
+Then run from the repository root:
 
 ```sh
-./bin/preflight.sh
+runtime/bin/preflight.sh
 docker compose up -d
-./bin/smoke.sh
+runtime/bin/smoke.sh
 ```
 
-`runtime/.env` and `runtime/data/` are ignored by Git. Do not commit passwords, session records, or browser profile files.
+`runtime/.env` and `runtime/data/` are ignored by Git. Do not commit passwords, session records, or browser profile files. Compose mounts `chromium-policy.json` to preserve cookies and restore the previous Chromium session; keep that file aligned with the defaults in the pinned Neko image when updating the digest.
 
 ## HTTP and WebRTC ports
 

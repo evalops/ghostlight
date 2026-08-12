@@ -8,13 +8,14 @@ viewer normally.
 
 ## Run
 
-From this directory:
+From the repository root:
 
 ```sh
-swift run GhostlightApp
+macos/package-app.sh
+open macos/.build/Ghostlight.app
 ```
 
-The default control-plane URL is `http://localhost:8080`.
+The local bundle is ad-hoc signed with identifier `org.evalops.Ghostlight`; it is not notarized for distribution. The default control-plane URL is `http://localhost:8080`. After a successful connection, Ghostlight saves the URL and reconnects automatically on a later launch.
 
 ## Test
 
