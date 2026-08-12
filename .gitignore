@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+control/ghostlight-control
+control/*.db
+runtime/.env
+runtime/data/
+coverage/
