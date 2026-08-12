@@ -866,7 +866,17 @@ async function main() {
     remoteBrowser = await chromium.connectOverCDP(CDP_URL);
     const remoteContext = remoteBrowser.contexts()[0];
     if (!remoteContext) throw new Error("CDP browser context is missing");
-    const remotePage = remoteContext.pages()[0] ?? await remoteContext.newPage();
+    let remotePage = remoteContext.pages()[0] ?? null;
+    const pageDeadline = Date.now() + 30000;
+    while (!remotePage && Date.now() < pageDeadline) {
+      await sleep(250);
+      remotePage = remoteContext.pages()[0] ?? null;
+    }
+    if (!remotePage) {
+      try { remotePage = await remoteContext.newPage(); } catch (error) {
+        throw new Error(`CDP browser exposed no page after 30s: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     const initialClientStats = await collectClientStats(clientPage);
     await fs.writeFile(join(OUTPUT_DIR, "initial-webrtc.json"), `${JSON.stringify({ ...initialClientStats, reports: undefined }, null, 2)}\n`, { mode: 0o600 });
     if (!initialClientStats.inbound_count) throw new Error("no inbound video RTP stream was negotiated");
