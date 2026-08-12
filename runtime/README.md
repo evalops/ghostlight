@@ -45,7 +45,7 @@ docker compose logs --tail=100 viewer control
 docker compose down
 ```
 
-The viewer uses `restart: unless-stopped`, a 2 GiB shared-memory allocation, and the digest-pinned `NEKO_IMAGE`. The control container starts only after the viewer healthcheck receives a successful response from Neko `/health`. Inside Compose, `GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080` gives control a reachable service-network health target while `GHOSTLIGHT_VIEWER_URL` remains the client-facing address returned by discovery.
+The viewer uses `restart: unless-stopped`, a 2 GiB shared-memory allocation, and the digest-pinned `NEKO_IMAGE`. Neko listens on the private Compose network so control can probe it, while the published viewer port remains constrained by `GHOSTLIGHT_BIND_ADDRESS`. The control container starts only after the viewer healthcheck receives a successful response from Neko `/health`. Inside Compose, `GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080` gives control a reachable service-network health target while `GHOSTLIGHT_VIEWER_URL` remains the client-facing address returned by discovery.
 
 ## Preflight checks
 

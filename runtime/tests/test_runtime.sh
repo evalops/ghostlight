@@ -58,6 +58,7 @@ assert_contains "$RUNTIME_DIR/docker-compose.yml" 'hostname: ghostlight-chromium
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '/etc/chromium/policies/managed/policies.json:ro'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_VIEWER_URL'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_VIEWER_HEALTH_URL'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'NEKO_SERVER_BIND: "0.0.0.0:8080"'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'healthcheck:'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'http://127.0.0.1:8080/health'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '/v1/viewer'
@@ -183,6 +184,8 @@ grep --fixed-strings -- 'target: /home/neko/.config/chromium' <<<"$resolved_runt
   || fail "Compose viewer profile target must remain the Chromium profile directory"
 grep --fixed-strings -- 'target: /etc/chromium/policies/managed/policies.json' <<<"$resolved_runtime" >/dev/null \
   || fail "Compose must mount the persistent Chromium policy"
+grep --fixed-strings -- 'NEKO_SERVER_BIND: 0.0.0.0:8080' <<<"$resolved_runtime" >/dev/null \
+  || fail "Neko must accept readiness probes from the private Compose network"
 
 mkdir -p "$root_compose_fixture/runtime" "$root_compose_fixture/control"
 cp "$REPO_DIR/compose.yaml" "$root_compose_fixture/compose.yaml"
