@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
@@ -56,9 +57,12 @@ const yamlQuote = (value) => JSON.stringify(String(value));
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function currentSource() {
-  const sourceSha = SOURCE_SHA_OVERRIDE || command("git", ["-C", ROOT_DIR, "rev-parse", "--verify", "HEAD"]).trim();
+  const sourceSha = command("git", ["-C", ROOT_DIR, "rev-parse", "--verify", "HEAD"]).trim();
   const status = command("git", ["-C", ROOT_DIR, "status", "--porcelain", "--untracked-files=all"]).trim();
   if (status) throw new Error(`exact-source measurement requires a clean source tree:\n${status}`);
+  if (SOURCE_SHA_OVERRIDE && SOURCE_SHA_OVERRIDE !== sourceSha) {
+    throw new Error(`GHOSTLIGHT_PERFORMANCE_SOURCE_SHA must match git rev-parse HEAD (${sourceSha})`);
+  }
   return { sourceSha, sourceTree: "clean" };
 }
 
@@ -239,7 +243,33 @@ function startRemoteStats(containerId) {
   remoteCommand(`touch -- ${shellQuote(marker)}`);
   const statsPath = join(OUTPUT_DIR, "container-stats.jsonl");
   const stream = fsSync.createWriteStream(statsPath, { mode: 0o600 });
-  const sampler = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, `while test -f ${shellQuote(marker)}; do docker stats --no-stream --format '{{json .}}' ${shellQuote(containerId)}; sleep 1; done`], { stdio: ["ignore", "pipe", "pipe"] });
+  const loop = `while test -f ${shellQuote(marker)}; do sample="$(docker stats --no-stream --format '{{json .}}' ${shellQuote(containerId)})"; if test -n "$sample"; then printf '{"captured_at":"%s","stats":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$sample"; fi; sleep 1; done`;
+  const sampler = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, loop], { stdio: ["ignore", "pipe", "pipe"] });
+  sampler.stdout.pipe(stream);
+  let stderr = "";
+  sampler.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  return { marker, statsPath, sampler, stream, getStderr: () => stderr };
+}
+
+function startRemoteProcessStats(containerId) {
+  const marker = `${REMOTE_DIR}/process-stats.running`;
+  remoteCommand(`touch -- ${shellQuote(marker)}`);
+  const statsPath = join(OUTPUT_DIR, "process-stats-timeseries.tsv");
+  const stream = fsSync.createWriteStream(statsPath, { mode: 0o600 });
+  const processScript = `for stat_file in /proc/[0-9]*/stat; do
+  test -r "$stat_file" || continue
+  pid="\${stat_file#/proc/}"
+  pid="\${pid%/stat}"
+  stat="$(cat "$stat_file" 2>/dev/null)" || continue
+  comm="\${stat#* (}"
+  comm="\${comm%%) *}"
+  fields="\${stat##*) }"
+  set -- $fields
+  test "$#" -ge 13 || continue
+  printf '%s\\t%s\\t%s\\t%s\\n' "$pid" "$comm" "\${12}" "\${13}"
+done`;
+  const loop = `printf 'meta\\tclk_tck\\t%s\\n' "$(getconf CLK_TCK 2>/dev/null || printf 100)"; while test -f ${shellQuote(marker)}; do captured_at="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"; docker exec ${shellQuote(containerId)} sh -c ${shellQuote(processScript)} | while IFS="$(printf '\\t')" read -r pid comm utime stime; do printf 'sample\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$captured_at" "$pid" "$comm" "$utime" "$stime"; done; sleep 1; done`;
+  const sampler = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, loop], { stdio: ["ignore", "pipe", "pipe"] });
   sampler.stdout.pipe(stream);
   let stderr = "";
   sampler.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -296,9 +326,23 @@ async function stopSshTunnel(tunnel) {
 async function stopRemoteStats(stats) {
   if (!stats) return;
   try { remoteCommand(`rm -f -- ${shellQuote(stats.marker)}`); } catch { /* cleanup continues below */ }
-  await new Promise((resolve) => stats.sampler.once("close", resolve));
+  await new Promise((resolve) => {
+    if (stats.sampler.exitCode !== null) return resolve();
+    stats.sampler.once("close", resolve);
+  });
   await new Promise((resolve) => stats.stream.end(resolve));
   if (stats.getStderr()) await fs.writeFile(join(OUTPUT_DIR, "container-stats.stderr"), stats.getStderr());
+}
+
+async function stopRemoteProcessStats(stats) {
+  if (!stats) return;
+  try { remoteCommand(`rm -f -- ${shellQuote(stats.marker)}`); } catch { /* cleanup continues below */ }
+  await new Promise((resolve) => {
+    if (stats.sampler.exitCode !== null) return resolve();
+    stats.sampler.once("close", resolve);
+  });
+  await new Promise((resolve) => stats.stream.end(resolve));
+  if (stats.getStderr()) await fs.writeFile(join(OUTPUT_DIR, "process-stats-timeseries.stderr"), stats.getStderr());
 }
 
 function parseCpu(value) {
@@ -319,6 +363,7 @@ function parseMemoryMiB(value) {
 }
 
 async function processSnapshot(containerId, label) {
+  const capturedAt = new Date().toISOString();
   let text = "";
   try { text = remoteCommand(`docker top ${shellQuote(containerId)} -eo pid,comm,pcpu,pmem`); } catch (error) { text = `error: ${error instanceof Error ? error.message : String(error)}`; }
   await fs.writeFile(join(OUTPUT_DIR, `process-stats-${label}.txt`), text, { mode: 0o600 });
@@ -326,7 +371,7 @@ async function processSnapshot(containerId, label) {
     const match = line.trim().match(/^(\d+)\s+(\S+)\s+([0-9.]+)\s+([0-9.]+)/);
     return match ? { pid: Number(match[1]), command: match[2], cpu_pct: Number(match[3]), memory_pct: Number(match[4]) } : null;
   }).filter(Boolean);
-  return { label, processes, process_cpu_sum_pct: processes.reduce((sum, process) => sum + process.cpu_pct, 0) };
+  return { label, captured_at: capturedAt, processes, process_cpu_sum_pct: processes.reduce((sum, process) => sum + process.cpu_pct, 0) };
 }
 
 function readContainerStats(statsPath) {
@@ -334,8 +379,10 @@ function readContainerStats(statsPath) {
   return fsSync.readFileSync(statsPath, "utf8").split(/\r?\n/).map((line) => {
     if (!line.trim()) return null;
     try {
-      const parsed = JSON.parse(line);
+      const envelope = JSON.parse(line);
+      const parsed = envelope.stats ?? envelope;
       return {
+        captured_at: envelope.captured_at ?? null,
         cpu_pct: parseCpu(parsed.CPUPerc),
         memory_mib: parseMemoryMiB(String(parsed.MemUsage ?? "").split("/")[0]),
         memory_pct: parseCpu(parsed.MemPerc),
@@ -343,6 +390,88 @@ function readContainerStats(statsPath) {
       };
     } catch { return null; }
   }).filter((sample) => sample && sample.cpu_pct !== null);
+}
+
+function processCategory(commandName) {
+  const name = String(commandName).toLowerCase();
+  if (name === "neko" || name.includes("neko")) return "neko";
+  if (name.includes("chrom") || name.includes("chrome_crashpad")) return "chromium";
+  if (name.includes("xorg") || name.includes("openbox") || name.includes("xwayland")) return "x-related";
+  if (name.includes("gst") || name.includes("vp8enc")) return "gstreamer-external";
+  return "other";
+}
+
+function readProcessTimeSeries(statsPath) {
+  if (!fsSync.existsSync(statsPath)) return { clk_tck: null, samples: [] };
+  const previous = new Map();
+  const grouped = new Map();
+  let clkTck = null;
+  for (const line of fsSync.readFileSync(statsPath, "utf8").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const fields = line.split("\t");
+    if (fields[0] === "meta" && fields[1] === "clk_tck") {
+      const parsed = Number(fields[2]);
+      if (Number.isFinite(parsed) && parsed > 0) clkTck = parsed;
+      continue;
+    }
+    if (fields[0] !== "sample" || fields.length < 6) continue;
+    const [, capturedAt, pid, commandName, utimeText, stimeText] = fields;
+    const capturedMs = Date.parse(capturedAt);
+    const totalTicks = Number(utimeText) + Number(stimeText);
+    if (!Number.isFinite(capturedMs) || !Number.isFinite(totalTicks)) continue;
+    const key = String(pid);
+    const prior = previous.get(key);
+    const elapsedSeconds = prior ? (capturedMs - prior.capturedMs) / 1000 : 0;
+    const deltaTicks = prior ? totalTicks - prior.totalTicks : 0;
+    const cpuPct = clkTck && elapsedSeconds > 0 && deltaTicks >= 0 ? (deltaTicks / clkTck / elapsedSeconds) * 100 : null;
+    previous.set(key, { capturedMs, totalTicks });
+    const sample = grouped.get(capturedAt) ?? { captured_at: capturedAt, processes: [], category_cpu_pct: {} };
+    const category = processCategory(commandName);
+    sample.processes.push({ pid: Number(pid), command: commandName, category, cpu_time_ticks: totalTicks, cpu_pct: cpuPct });
+    if (Number.isFinite(cpuPct)) sample.category_cpu_pct[category] = (sample.category_cpu_pct[category] ?? 0) + cpuPct;
+    grouped.set(capturedAt, sample);
+  }
+  return { clk_tck: clkTck, samples: [...grouped.values()].sort((left, right) => Date.parse(left.captured_at) - Date.parse(right.captured_at)) };
+}
+
+function samplesInWindow(samples, phaseStart, phaseEnd) {
+  const startMs = Date.parse(phaseStart);
+  const endMs = Date.parse(phaseEnd);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return [];
+  return samples.filter((sample) => {
+    const capturedMs = Date.parse(sample.captured_at ?? "");
+    return Number.isFinite(capturedMs) && capturedMs >= startMs && capturedMs <= endMs;
+  });
+}
+
+function aggregateResourceStats(samples) {
+  return {
+    resource_sample_count: samples.length,
+    resource_sample_start: samples.at(0)?.captured_at ?? null,
+    resource_sample_end: samples.at(-1)?.captured_at ?? null,
+    viewer_cpu_median_pct: median(samples.map((sample) => sample.cpu_pct)),
+    viewer_cpu_p95_pct: percentile(samples.map((sample) => sample.cpu_pct), 0.95),
+    viewer_memory_p95_mib: percentile(samples.map((sample) => sample.memory_mib), 0.95),
+    process_container_cpu_samples: samples.length,
+  };
+}
+
+function summarizeProcessSamples(samples) {
+  const categoryValues = new Map();
+  for (const sample of samples) {
+    for (const [category, value] of Object.entries(sample.category_cpu_pct ?? {})) {
+      const values = categoryValues.get(category) ?? [];
+      values.push(value);
+      categoryValues.set(category, values);
+    }
+  }
+  return {
+    sample_count: samples.length,
+    captured_at_start: samples.at(0)?.captured_at ?? null,
+    captured_at_end: samples.at(-1)?.captured_at ?? null,
+    category_cpu_pct_median: Object.fromEntries([...categoryValues.entries()].map(([category, values]) => [category, median(values)])),
+    category_cpu_pct_p95: Object.fromEntries([...categoryValues.entries()].map(([category, values]) => [category, percentile(values, 0.95)])),
+  };
 }
 
 function sorted(values) { return values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b); }
@@ -718,7 +847,7 @@ function framePhaseMetrics(frameState, durationSeconds) {
   };
 }
 
-async function runPhase(clientPage, remotePage, phase, containerStats) {
+async function runPhase(clientPage, remotePage, phase) {
   await remotePage.goto(`${REMOTE_FIXTURE_URL}/${phase}`, { waitUntil: "domcontentloaded" });
   await remotePage.waitForSelector("#causal-marker");
   await clientPage.waitForTimeout(WARMUP_SECONDS * 1000);
@@ -748,11 +877,10 @@ async function runPhase(clientPage, remotePage, phase, containerStats) {
   const markerLatencies = markerReceipts.map((receipt) => receipt.input_to_present_ms).filter((value) => Number.isFinite(value));
   const frameMetrics = await clientPage.evaluate(() => window.__ghostlightFrameState ? structuredClone(window.__ghostlightFrameState) : { samples: [] });
   const frameSummary = framePhaseMetrics(frameMetrics, elapsedSeconds);
-  const currentContainerStats = typeof containerStats === "function" ? containerStats() : containerStats;
-  const containerCpu = currentContainerStats.map((sample) => sample.cpu_pct).filter(Number.isFinite);
-  const containerMemory = currentContainerStats.map((sample) => sample.memory_mib).filter(Number.isFinite);
   return {
     phase,
+    phase_start: new Date(startTime).toISOString(),
+    phase_end: new Date(endTime).toISOString(),
     target_fps: TARGET_FPS,
     duration_seconds: elapsedSeconds,
     active_media: startStats.active_media && endStats.active_media && decodedFrames > 0 ? 1 : 0,
@@ -787,10 +915,14 @@ async function runPhase(clientPage, remotePage, phase, containerStats) {
     freeze_events: frameSummary.freeze_events,
     freeze_ratio: frameSummary.freeze_ratio,
     frame_sample_count: frameSummary.frame_sample_count,
-    viewer_cpu_median_pct: median(containerCpu),
-    viewer_cpu_p95_pct: percentile(containerCpu, 0.95),
-    viewer_memory_p95_mib: percentile(containerMemory, 0.95),
-    process_container_cpu_samples: currentContainerStats.length,
+    resource_sample_count: 0,
+    resource_sample_start: null,
+    resource_sample_end: null,
+    viewer_cpu_median_pct: null,
+    viewer_cpu_p95_pct: null,
+    viewer_memory_p95_mib: null,
+    process_container_cpu_samples: 0,
+    process_cpu_attribution: null,
     raw_start_stats: startStats,
     raw_end_stats: endStats,
     raw_frame_samples: frameMetrics.samples,
@@ -801,7 +933,7 @@ function aggregatePhases(phases) {
   const fields = ["actual_fps", "bitrate_bps", "current_rtt_ms", "jitter_ms", "mean_decode_ms", "mean_processing_delay_ms", "input_to_present_median_ms", "input_to_present_p95_ms", "freeze_ratio", "dropped_frame_ratio"];
   const aggregate = {};
   for (const field of fields) aggregate[field] = median(phases.map((phase) => phase[field]));
-  aggregate.active_media = phases.every((phase) => phase.active_media === 1) ? 1 : 0;
+  aggregate.active_media = phases.length > 0 && phases.every((phase) => phase.active_media === 1) ? 1 : 0;
   aggregate.actual_to_target_fps_ratio = median(phases.map((phase) => phase.actual_to_target_fps_ratio));
   aggregate.visual_event_success_rate = ratio(phases.reduce((sum, phase) => sum + phase.visual_event_successes, 0), phases.reduce((sum, phase) => sum + phase.visual_event_attempts, 0));
   aggregate.freeze_ratio = mean(phases.map((phase) => phase.freeze_ratio));
@@ -814,7 +946,7 @@ function aggregatePhases(phases) {
   aggregate.decoded_fps = aggregate.actual_fps;
   aggregate.frame_width = phases.find((phase) => phase.frame_width)?.frame_width ?? null;
   aggregate.frame_height = phases.find((phase) => phase.frame_height)?.frame_height ?? null;
-  aggregate.udp_transport_selected = phases.every((phase) => phase.udp_transport_selected === true);
+  aggregate.udp_transport_selected = phases.length > 0 && phases.every((phase) => phase.udp_transport_selected === true);
   aggregate.power_efficient_decoder = phases.every((phase) => phase.power_efficient_decoder === true) ? true : phases.some((phase) => phase.power_efficient_decoder === false) ? false : null;
   aggregate.nack_count = phases.reduce((sum, phase) => sum + phase.nack_count, 0);
   aggregate.pli_count = phases.reduce((sum, phase) => sum + phase.pli_count, 0);
@@ -896,6 +1028,7 @@ async function main() {
     client_address: CLIENT_ADDRESS,
     ice_address: ICE_ADDRESS,
     ssh_tunnel: USE_SSH_TUNNEL,
+    transport_mode: USE_SSH_TUNNEL ? "ssh-tcp-smoke" : "direct-lan-udp-required",
     ports: { viewer: VIEWER_PORT, webrtc: WEBRTC_PORT, cdp: CDP_PORT },
     target_fps: TARGET_FPS,
     resolution: `${WIDTH}x${HEIGHT}`,
@@ -911,6 +1044,7 @@ async function main() {
   let tunnel;
   let cdpBridge;
   let stats;
+  let processStats;
   let clientBrowser;
   let remotePage;
   let processStart;
@@ -929,6 +1063,7 @@ async function main() {
     await waitForHTTP(`${VIEWER_URL}/health`);
     await waitForHTTP(`${CDP_URL}/json/version`);
     stats = startRemoteStats(remote.containerId);
+    processStats = startRemoteProcessStats(remote.containerId);
 
     clientBrowser = await chromium.launch({ headless: true, executablePath: process.env.GHOSTLIGHT_PERFORMANCE_BROWSER || undefined });
     const clientContext = await clientBrowser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
@@ -953,18 +1088,22 @@ async function main() {
     if (!initialClientStats.inbound_count) throw new Error("no inbound video RTP stream was negotiated");
 
     for (const phase of ["static-gmail", "scrolling", "typing", "animation"]) {
-      const result = await runPhase(clientPage, remotePage, phase, () => readContainerStats(stats.statsPath));
+      const result = await runPhase(clientPage, remotePage, phase);
       phaseResults.push(result);
       await fs.writeFile(join(OUTPUT_DIR, `phase-${phase}.json`), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
       screenshots.push(await savePhaseScreenshot(clientPage, phase));
     }
-    processEnd = await processSnapshot(remote.containerId, "end");
+    if (!USE_SSH_TUNNEL && (!phaseResults.length || phaseResults.some((phase) => phase.selected_ice_pair?.protocol?.toLowerCase() !== "udp"))) {
+      throw new Error("direct-LAN WebRTC receipt requires selected candidatePair protocol=udp in every phase");
+    }
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
   } finally {
     if (remotePage) await remotePage.close().catch(() => {});
     if (clientBrowser) await clientBrowser.close().catch(() => {});
+    if (remote?.containerId) processEnd = await processSnapshot(remote.containerId, "end").catch((error) => ({ label: "end", captured_at: new Date().toISOString(), processes: [], process_cpu_sum_pct: null, error: error instanceof Error ? error.message : String(error) }));
     await stopRemoteStats(stats).catch(() => {});
+    await stopRemoteProcessStats(processStats).catch(() => {});
     if (tunnel?.getStderr?.()) await fs.writeFile(join(OUTPUT_DIR, "ssh-tunnel.stderr"), tunnel.getStderr(), { mode: 0o600 });
     await stopSshTunnel(tunnel).catch(() => {});
     stopRemoteCdpBridge(cdpBridge);
@@ -976,16 +1115,20 @@ async function main() {
   }
 
   const containerStats = stats ? readContainerStats(stats.statsPath) : [];
-  const aggregate = aggregatePhases(phaseResults);
+  const processTimeSeries = processStats ? readProcessTimeSeries(processStats.statsPath) : { clk_tck: null, samples: [] };
   for (const phase of phaseResults) {
-    phase.viewer_cpu_median_pct = median(containerStats.map((sample) => sample.cpu_pct));
-    phase.viewer_cpu_p95_pct = percentile(containerStats.map((sample) => sample.cpu_pct), 0.95);
-    phase.viewer_memory_p95_mib = percentile(containerStats.map((sample) => sample.memory_mib), 0.95);
+    const phaseContainerStats = samplesInWindow(containerStats, phase.phase_start, phase.phase_end);
+    Object.assign(phase, aggregateResourceStats(phaseContainerStats));
+    const phaseProcessStats = samplesInWindow(processTimeSeries.samples, phase.phase_start, phase.phase_end);
+    phase.process_cpu_attribution = {
+      ...summarizeProcessSamples(phaseProcessStats),
+      clk_tck: processTimeSeries.clk_tck,
+      sampling_hz: 1,
+      samples: phaseProcessStats,
+    };
     await fs.writeFile(join(OUTPUT_DIR, `phase-${phase.phase}.json`), `${JSON.stringify(phase, null, 2)}\n`, { mode: 0o600 });
   }
-  aggregate.viewer_cpu_median_pct = median(containerStats.map((sample) => sample.cpu_pct));
-  aggregate.viewer_cpu_p95_pct = percentile(containerStats.map((sample) => sample.cpu_pct), 0.95);
-  aggregate.viewer_memory_p95_mib = percentile(containerStats.map((sample) => sample.memory_mib), 0.95);
+  const aggregate = aggregatePhases(phaseResults);
   const control = await readControl().catch((error) => { failure ??= error; return null; });
   const gates = buildGates(aggregate, control);
   const result = {
@@ -1030,7 +1173,15 @@ async function main() {
       dropped_frame_ratio: aggregate.dropped_frame_ratio,
       freeze_ratio: aggregate.freeze_ratio,
       visual_event_success_rate: aggregate.visual_event_success_rate,
-      process_cpu_attribution: { start: processStart ?? null, end: processEnd ?? null },
+      process_cpu_attribution: {
+        start: processStart ?? null,
+        end: processEnd ?? null,
+        clk_tck: processTimeSeries.clk_tck,
+        sampling_hz: 1,
+        by_phase: Object.fromEntries(phaseResults.map((phase) => [phase.phase, phase.process_cpu_attribution])),
+        samples: processTimeSeries.samples,
+        boundary: "vp8enc runs in-process in Neko/GStreamer and is not separately attributable from the Neko process; no separate vp8enc CPU number is claimed.",
+      },
       container_cpu_samples: containerStats,
       selected_ice_pairs: aggregate.selected_ice_pairs,
     },
@@ -1040,13 +1191,16 @@ async function main() {
       screenshots,
       per_phase_receipts: phaseResults.map((phase) => join(OUTPUT_DIR, `phase-${phase.phase}.json`)),
       container_stats: stats?.statsPath ?? null,
+      process_time_series: processStats?.statsPath ?? null,
       process_start: join(OUTPUT_DIR, "process-stats-start.txt"),
       process_end: join(OUTPUT_DIR, "process-stats-end.txt"),
       viewer_log: join(OUTPUT_DIR, "viewer.log"),
     },
     limitations: [
       "Input-to-present is measured only when the remote fixture's causal marker changes after a WebRTC-client F8 dispatch; the old dispatch-to-next-presented-frame metric is not used or renamed.",
-      "Viewer CPU is attributed to the exact pinned container through Docker stats and correlated with docker top process snapshots; host-wide CPU is not substituted.",
+      "Viewer CPU is attributed to the exact pinned container through timestamped Docker stats sliced to each phase window; host-wide CPU is not substituted.",
+      "Process CPU samples are captured at approximately 1 Hz from /proc utime+stime deltas. Chromium, Neko, X-related, and other categories are reported; vp8enc remains in-process within Neko/GStreamer and is not separately attributable.",
+      USE_SSH_TUNNEL ? "SSH TCP forwarding is smoke-only and is not used as the 1080p25 control transport; a direct-LAN run must set GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL=false and prove selected candidatePair protocol=udp." : "This receipt requires a direct-LAN selected candidatePair protocol=udp in every phase.",
       "The public pinned viewer image and software VP8 fallback were used. No software H.264 or VAAPI claim is made by this harness.",
     ],
     error: failure ? failure.message : null,
@@ -1058,12 +1212,46 @@ async function main() {
   if (result.status !== "measured") process.exitCode = 1;
 }
 
-main().catch(async (error) => {
-  const message = error instanceof Error ? error.stack || error.message : String(error);
+function runSelfTests() {
+  const samples = [
+    { captured_at: "2026-08-12T00:00:00.000Z", cpu_pct: 10, memory_mib: 100 },
+    { captured_at: "2026-08-12T00:00:01.000Z", cpu_pct: 20, memory_mib: 200 },
+    { captured_at: "2026-08-12T00:00:02.000Z", cpu_pct: 80, memory_mib: 800 },
+    { captured_at: "2026-08-12T00:00:03.000Z", cpu_pct: 90, memory_mib: 900 },
+  ];
+  const firstWindow = aggregateResourceStats(samplesInWindow(samples, "2026-08-12T00:00:00.000Z", "2026-08-12T00:00:01.000Z"));
+  const secondWindow = aggregateResourceStats(samplesInWindow(samples, "2026-08-12T00:00:02.000Z", "2026-08-12T00:00:03.000Z"));
+  assert.equal(firstWindow.resource_sample_count, 2);
+  assert.equal(secondWindow.resource_sample_count, 2);
+  assert.notEqual(firstWindow.viewer_cpu_median_pct, secondWindow.viewer_cpu_median_pct);
+  assert.notEqual(firstWindow.viewer_memory_p95_mib, secondWindow.viewer_memory_p95_mib);
+
+  const processSamples = [
+    { captured_at: "2026-08-12T00:00:00.000Z", category_cpu_pct: { chromium: 1, neko: 2 } },
+    { captured_at: "2026-08-12T00:00:01.000Z", category_cpu_pct: { chromium: 3, neko: 4 } },
+    { captured_at: "2026-08-12T00:00:02.000Z", category_cpu_pct: { chromium: 7, neko: 8 } },
+  ];
+  const firstProcessWindow = summarizeProcessSamples(samplesInWindow(processSamples, "2026-08-12T00:00:00.000Z", "2026-08-12T00:00:01.000Z"));
+  const secondProcessWindow = summarizeProcessSamples(samplesInWindow(processSamples, "2026-08-12T00:00:02.000Z", "2026-08-12T00:00:02.000Z"));
+  assert.notEqual(firstProcessWindow.category_cpu_pct_median.chromium, secondProcessWindow.category_cpu_pct_median.chromium);
+  console.log(JSON.stringify({ phase_window_resource_accounting: "passed", phase_window_process_accounting: "passed" }));
+}
+
+if (process.argv.includes("--self-test")) {
   try {
-    await fs.mkdir(OUTPUT_DIR, { recursive: true });
-    await fs.writeFile(join(OUTPUT_DIR, "harness-error.txt"), `${message}\n`, { mode: 0o600 });
-  } catch { /* preserve the original failure */ }
-  console.error(message);
-  process.exitCode = 1;
-});
+    runSelfTests();
+  } catch (error) {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exitCode = 1;
+  }
+} else {
+  main().catch(async (error) => {
+    const message = error instanceof Error ? error.stack || error.message : String(error);
+    try {
+      await fs.mkdir(OUTPUT_DIR, { recursive: true });
+      await fs.writeFile(join(OUTPUT_DIR, "harness-error.txt"), `${message}\n`, { mode: 0o600 });
+    } catch { /* preserve the original failure */ }
+    console.error(message);
+    process.exitCode = 1;
+  });
+}
