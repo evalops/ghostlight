@@ -100,6 +100,14 @@ for setting in \
     exit 1
   }
 done
+grep -Fq -- "chown 1000:1000 /profile; chmod 700 /profile" "$acceptance" || {
+  printf 'acceptance harness does not prepare the bind-mounted profile for Neko uid 1000\n' >&2
+  exit 1
+}
+grep -Fq -- "chown -R \"\$1:\$2\" /profile" "$acceptance" || {
+  printf 'acceptance harness does not restore profile ownership before cleanup\n' >&2
+  exit 1
+}
 # This is a literal source-contract assertion, not a shell expansion.
 # shellcheck disable=SC2016
 if grep -Fq -- 'down --remove-orphans >>"$TRANSCRIPT" 2>&1 || true' "$acceptance"; then

@@ -20,6 +20,8 @@ DEFAULT_NEKO_IMAGE_REF="$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); prin
   exit 1
 }
 NEKO_IMAGE_REF="${NEKO_IMAGE:-$DEFAULT_NEKO_IMAGE_REF}"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
 [[ "$share_viewer_network" =~ ^[01]$ ]] || {
   printf 'GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK must be 0 or 1\n' >&2
   exit 1
@@ -30,6 +32,7 @@ ENV_FILE="$WORK_DIR/runtime.env"
 OVERRIDE_FILE="$WORK_DIR/compose.override.yml"
 TRANSCRIPT="$OUTPUT_DIR/transcript.txt"
 SOURCE_SHA="${GHOSTLIGHT_ACCEPTANCE_SOURCE_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf unknown)}"
+profile_owned_by_viewer=0
 export COMPOSE_BAKE="${COMPOSE_BAKE:-false}"
 
 finish() {
@@ -39,6 +42,11 @@ finish() {
     if ! docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down --remove-orphans >>"$TRANSCRIPT" 2>&1; then
       cleanup_status=1
       printf 'cleanup failed; acceptance work directory retained: %s\n' "$WORK_DIR" >&2
+    elif (( profile_owned_by_viewer == 1 )) && ! docker run --rm --user 0:0 --entrypoint /bin/sh \
+      -v "$PROFILE_DIR:/profile" "$NEKO_IMAGE_REF" \
+      -c 'chown -R "$1:$2" /profile' _ "$HOST_UID" "$HOST_GID" >>"$TRANSCRIPT" 2>&1; then
+      cleanup_status=1
+      printf 'cleanup failed while restoring acceptance profile ownership: %s\n' "$PROFILE_DIR" >&2
     elif ! rm -rf -- "$WORK_DIR"; then
       cleanup_status=1
       printf 'cleanup failed while removing acceptance work directory: %s\n' "$WORK_DIR" >&2
@@ -141,6 +149,10 @@ fi
   npm --version
 
   npm ci --prefix "$TEST_DIR"
+  profile_owned_by_viewer=1
+  docker run --rm --user 0:0 --entrypoint /bin/sh \
+    -v "$PROFILE_DIR:/profile" "$NEKO_IMAGE_REF" \
+    -c 'set -eu; chown 1000:1000 /profile; chmod 700 /profile'
   GHOSTLIGHT_ENV_FILE="$ENV_FILE" CHROMIUM_PROFILE_DIR="$PROFILE_DIR" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK="$SKIP_PROFILE_CHECK" "$ROOT_DIR/runtime/bin/preflight.sh"
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build --wait --wait-timeout 120
 
