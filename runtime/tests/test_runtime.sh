@@ -56,7 +56,7 @@ for path in \
 done
 assert_file "$REPO_DIR/macos/package-app.sh"
 
-assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/evalops/ghostlight-viewer@sha256:bc657e706af0615606fd6837f8ccfb1bd1d6f013b8dafb765ef08ea973a7d327'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'context: ../control'
 # This is a literal Compose interpolation expression, not a shell expansion.
 # shellcheck disable=SC2016
@@ -138,7 +138,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"${FAKE_DOCKER_LOG:?}"' \
   'if [[ "$*" == *"config --format json"* ]]; then' \
   '  cat <<'\''JSON'\''' \
-  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:bc657e706af0615606fd6837f8ccfb1bd1d6f013b8dafb765ef08ea973a7d327","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"0","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
+  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"0","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
   'JSON' \
   '  exit 0' \
   'fi' \

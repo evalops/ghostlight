@@ -2,7 +2,7 @@ services:
   viewer:
     # Source and modifications: ../viewer/Dockerfile and ../viewer/neko-go-modules.patch
     # License: Apache-2.0 for Neko; image dependencies retain their own notices.
-    image: "${NEKO_IMAGE:-ghcr.io/evalops/ghostlight-viewer@sha256:bc657e706af0615606fd6837f8ccfb1bd1d6f013b8dafb765ef08ea973a7d327}"
+    image: "${NEKO_IMAGE:-ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44}"
     init: true
     hostname: ghostlight-chromium
     restart: unless-stopped
