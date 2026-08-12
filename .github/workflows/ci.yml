@@ -299,6 +299,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes ripgrep
+          fi
           bash scripts/test-container-pins.sh
           bash runtime/tests/test_profile_backup.sh
           mapfile -d '' screenshots < <(find docs/acceptance -type f \( -name '*.png' -o -name '*.jpg' \) -print0)

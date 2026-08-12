@@ -60,6 +60,10 @@ jobs:
       - name: Enforce immutable repository inputs
         run: |
           set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes ripgrep
+          fi
           bash scripts/check-container-pins.sh
           bash scripts/test-image-safety.sh
           bash scripts/check-image-safety.sh
