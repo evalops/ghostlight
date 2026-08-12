@@ -109,12 +109,11 @@ function composeConfig() {
       - ${yamlQuote(`${BIND_ADDRESS}:${VIEWER_PORT}:8080/tcp`)}
       - ${yamlQuote(`${BIND_ADDRESS}:${WEBRTC_PORT}:${WEBRTC_PORT}/udp`)}
       - ${yamlQuote(`${BIND_ADDRESS}:${WEBRTC_PORT}:${WEBRTC_PORT}/tcp`)}
-      - ${yamlQuote(`${BIND_ADDRESS}:${CDP_PORT}:9223/tcp`)}
+      - ${yamlQuote(`${BIND_ADDRESS}:${CDP_PORT}:9222/tcp`)}
     volumes:
       - ${yamlQuote(`${REMOTE_DIR}/profile:/home/neko/.config/chromium`)}
       - ${yamlQuote(`${REMOTE_DIR}/neko.yaml:/etc/neko/neko.yaml:ro`)}
       - ${yamlQuote(`${REMOTE_DIR}/chromium.conf:/etc/neko/supervisord/chromium.conf:ro`)}
-      - ${yamlQuote(`${REMOTE_DIR}/cdp-proxy.py:/usr/local/bin/ghostlight-cdp-proxy.py:ro`)}
       - ${yamlQuote(`${REMOTE_DIR}/performance.conf:/etc/neko/supervisord/ghostlight-performance.conf:ro`)}
       - ${yamlQuote(`${REMOTE_DIR}/performance-fixture.py:/usr/local/bin/ghostlight-performance-fixture.py:ro`)}
     environment:
@@ -137,7 +136,7 @@ function chromiumConfig() {
   return [
     "[program:chromium]",
     "environment=HOME=\"/home/neko\",USER=\"neko\",DISPLAY=\":99.0\"",
-    "command=/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*",
+    "command=/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --bwsi --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222 --remote-allow-origins=*",
     "stopsignal=INT",
     "user=neko",
     "autostart=true",
@@ -163,51 +162,8 @@ function chromiumConfig() {
   ].join("\n");
 }
 
-function cdpProxy() {
-  return [
-    "#!/usr/bin/env python3",
-    "import asyncio",
-    "",
-    "async def pipe(reader, writer):",
-    "    try:",
-    "        while data := await reader.read(65536):",
-    "            writer.write(data)",
-    "            await writer.drain()",
-    "    finally:",
-    "        writer.close()",
-    "        await writer.wait_closed()",
-    "",
-    "async def handle(client_reader, client_writer):",
-    "    try:",
-    "        server_reader, server_writer = await asyncio.open_connection('127.0.0.1', 9222)",
-    "        await asyncio.gather(pipe(client_reader, server_writer), pipe(server_reader, client_writer))",
-    "    finally:",
-    "        client_writer.close()",
-    "        await client_writer.wait_closed()",
-    "",
-    "async def main():",
-    "    server = await asyncio.start_server(handle, '0.0.0.0', 9223)",
-    "    async with server:",
-    "        await server.serve_forever()",
-    "",
-    "asyncio.run(main())",
-    "",
-  ].join("\n");
-}
-
 function supervisorConf() {
   return [
-    "[program:ghostlight-cdp-proxy]",
-    "command=/usr/bin/python3 /usr/local/bin/ghostlight-cdp-proxy.py",
-    "user=neko",
-    "priority=40",
-    "autostart=true",
-    "autorestart=true",
-    "stdout_logfile=/dev/fd/1",
-    "stdout_logfile_maxbytes=0",
-    "stderr_logfile=/dev/fd/2",
-    "stderr_logfile_maxbytes=0",
-    "",
     "[program:ghostlight-performance-fixture]",
     "command=/usr/bin/python3 /usr/local/bin/ghostlight-performance-fixture.py",
     "user=neko",
@@ -229,7 +185,6 @@ async function writeRemoteFiles() {
   const files = {
     "neko.yaml": nekoConfig(),
     "chromium.conf": chromiumConfig(),
-    "cdp-proxy.py": cdpProxy(),
     "performance.conf": supervisorConf(),
   };
   const localPaths = [];
@@ -249,7 +204,7 @@ async function writeRemoteFiles() {
   remoteCommand(`rm -rf -- ${shellQuote(REMOTE_DIR)} && mkdir -m 700 -p -- ${shellQuote(`${REMOTE_DIR}/profile`)}`);
   const remoteFiles = [...localPaths, localFixture, localCompose];
   command("scp", ["-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...remoteFiles, `${REMOTE}:${REMOTE_DIR}/`]);
-  remoteCommand(`chmod 600 -- ${shellQuote(`${REMOTE_DIR}/neko.yaml`)} ${shellQuote(`${REMOTE_DIR}/chromium.conf`)} ${shellQuote(`${REMOTE_DIR}/performance.conf`)} ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} && chmod 700 -- ${shellQuote(`${REMOTE_DIR}/cdp-proxy.py`)} ${shellQuote(`${REMOTE_DIR}/performance-fixture.py`)}`);
+  remoteCommand(`chmod 600 -- ${shellQuote(`${REMOTE_DIR}/neko.yaml`)} ${shellQuote(`${REMOTE_DIR}/chromium.conf`)} ${shellQuote(`${REMOTE_DIR}/performance.conf`)} ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} && chmod 700 -- ${shellQuote(`${REMOTE_DIR}/performance-fixture.py`)}`);
   return { localConfigDir, localCompose };
 }
 
