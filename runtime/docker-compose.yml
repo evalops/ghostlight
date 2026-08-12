@@ -1,0 +1,53 @@
+services:
+  viewer:
+    # Source: https://github.com/m1k1o/neko
+    # License: Apache-2.0 for the Neko repository; image dependencies retain their own notices.
+    image: "${NEKO_IMAGE:-ghcr.io/m1k1o/neko/chromium:3.1.0}"
+    init: true
+    restart: unless-stopped
+    shm_size: "2gb"
+    ports:
+      - "${VIEWER_PORT:-8081}:8080"
+      - "${WEBRTC_MUX_PORT:-52000}:${WEBRTC_MUX_PORT:-52000}/udp"
+      - "${WEBRTC_MUX_PORT:-52000}:${WEBRTC_MUX_PORT:-52000}/tcp"
+    volumes:
+      - "${CHROMIUM_PROFILE_DIR:-./data/chromium}:/home/neko/.config/chromium"
+    environment:
+      NEKO_DESKTOP_SCREEN: "${NEKO_DESKTOP_SCREEN:-1920x1080@30}"
+      NEKO_MEMBER_MULTIUSER_USER_PASSWORD: "${NEKO_USER_PASSWORD:-__GENERATE_AT_INSTALL__}"
+      NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: "${NEKO_ADMIN_PASSWORD:-__GENERATE_AT_INSTALL__}"
+      NEKO_WEBRTC_UDPMUX: "${NEKO_WEBRTC_UDPMUX:-52000}"
+      NEKO_WEBRTC_TCPMUX: "${NEKO_WEBRTC_TCPMUX:-52000}"
+      NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-0}"
+      NEKO_WEBRTC_NAT1TO1: "${NEKO_WEBRTC_NAT1TO1:-127.0.0.1}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 12
+
+  control:
+    build:
+      context: ../control
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${CONTROL_PORT:-8080}:8080"
+    environment:
+      GHOSTLIGHT_LISTEN_ADDR: "0.0.0.0:8080"
+      GHOSTLIGHT_VIEWER_URL: "${GHOSTLIGHT_VIEWER_URL:-http://127.0.0.1:8081}"
+      GHOSTLIGHT_STORE_PATH: "${GHOSTLIGHT_STORE_PATH:-/var/lib/ghostlight/sessions.json}"
+    volumes:
+      - "${CONTROL_DATA_DIR:-./data/control}:/var/lib/ghostlight"
+    depends_on:
+      viewer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+    # Control contract: POST /v1/sessions creates the persistent session record.
