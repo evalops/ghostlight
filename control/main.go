@@ -37,15 +37,22 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
-	server := newHTTPServer(newHandlerWithHealthURL(cfg.ViewerURL, cfg.ViewerHealthURL, &http.Client{Timeout: viewerHealthTimeout}))
+	handler, err := newHandlerWithHealthURL(cfg.ViewerURL, cfg.ViewerHealthURL, &http.Client{Timeout: viewerHealthTimeout})
+	if err != nil {
+		return fmt.Errorf("configure viewer health checks: %w", err)
+	}
+	server := newHTTPServer(handler)
+
+	// Register for signals before serving so a signal delivered during
+	// startup still triggers a graceful shutdown.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
 	serveErrors := make(chan error, 1)
 	go func() {
 		serveErrors <- server.Serve(listener)
 	}()
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
 
 	select {
 	case err := <-serveErrors:

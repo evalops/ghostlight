@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -220,7 +222,10 @@ func TestReadinessCanUseInternalHealthURLWithoutChangingDiscovery(t *testing.T) 
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header), Request: r}, nil
 	})}
-	handler := newHandlerWithHealthURL("http://192.0.2.10:8081", "http://viewer:8080", client)
+	handler, err := newHandlerWithHealthURL("http://192.0.2.10:8081", "http://viewer:8080", client)
+	if err != nil {
+		t.Fatalf("newHandlerWithHealthURL() error = %v", err)
+	}
 
 	ready := execute(t, handler, http.MethodGet, readinessPath, nil, "")
 	if ready.StatusCode != http.StatusOK {
@@ -279,7 +284,6 @@ func TestReadinessFailureMapping(t *testing.T) {
 		handler http.Handler
 	}{
 		{name: "invalid viewer URL", handler: newHandler("not-a-url", http.DefaultClient)},
-		{name: "nil client", handler: newHandler("https://viewer.example.test", nil)},
 		{name: "transport error", handler: newHandler("https://viewer.example.test", &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("dial failed")
 		})})},
@@ -317,6 +321,26 @@ func TestReadinessDoesNotFollowRedirects(t *testing.T) {
 	assertErrorResponse(t, response, "viewer_unavailable")
 	if got := redirectedRequests.Load(); got != 1 {
 		t.Fatalf("readiness sent %d health requests, want 1 without following redirect", got)
+	}
+}
+
+func TestNewHandlerWithHealthURLRequiresClient(t *testing.T) {
+	if _, err := newHandlerWithHealthURL("https://viewer.example.test", "https://viewer.example.test", nil); err == nil {
+		t.Fatal("newHandlerWithHealthURL() with nil client returned nil error")
+	}
+}
+
+func TestNewHandlerPreservesCallerRedirectPolicy(t *testing.T) {
+	callerPolicy := func(*http.Request, []*http.Request) error {
+		return errors.New("caller redirect policy")
+	}
+	client := &http.Client{CheckRedirect: callerPolicy}
+	handler := newHandler("https://viewer.example.test", client)
+	if handler.viewerClient == client {
+		t.Fatal("handler reused the caller's client instead of a copy")
+	}
+	if err := handler.viewerClient.CheckRedirect(&http.Request{}, nil); err == nil || err.Error() != "caller redirect policy" {
+		t.Fatalf("CheckRedirect = %v, want caller policy to be preserved", err)
 	}
 }
 
@@ -375,8 +399,13 @@ func TestHTTPIntegrationValidationAndMethods(t *testing.T) {
 
 func TestConcurrentReadiness(t *testing.T) {
 	var probes atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		probes.Add(1)
+		startOnce.Do(func() { close(started) })
+		<-release
 		return responseWithStatus(r, http.StatusNoContent), nil
 	})}
 	handler := newHandler("https://viewer.example.test", client)
@@ -394,21 +423,69 @@ func TestConcurrentReadiness(t *testing.T) {
 			}
 		}()
 	}
+	// Hold the first probe open so the remaining requests coalesce onto it.
+	<-started
+	time.Sleep(100 * time.Millisecond)
+	close(release)
 	wg.Wait()
 	close(errCh)
 	for err := range errCh {
 		t.Fatal(err)
 	}
-	if got := probes.Load(); got != count {
-		t.Fatalf("viewer probes = %d, want %d", got, count)
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("viewer probes = %d, want 1 coalesced probe for %d concurrent requests", got, count)
 	}
 }
 
 func TestShutdownHTTPServerIsBounded(t *testing.T) {
-	server := newHTTPServer(http.NotFoundHandler())
-	if err := shutdownHTTPServer(server); err != nil {
-		t.Fatalf("shutdownHTTPServer() error = %v", err)
-	}
+	t.Run("never started", func(t *testing.T) {
+		server := newHTTPServer(http.NotFoundHandler())
+		if err := shutdownHTTPServer(server); err != nil {
+			t.Fatalf("shutdownHTTPServer() error = %v", err)
+		}
+	})
+
+	t.Run("force closes a blocked handler", func(t *testing.T) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		server := newHTTPServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			close(entered)
+			<-release // block longer than shutdownTimeout
+		}))
+		defer close(release)
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("net.Listen() error = %v", err)
+		}
+		serveErrors := make(chan error, 1)
+		go func() { serveErrors <- server.Serve(listener) }()
+
+		requestDone := make(chan struct{})
+		go func() {
+			defer close(requestDone)
+			_, _ = http.Get("http://" + listener.Addr().String() + "/")
+		}()
+		<-entered
+
+		start := time.Now()
+		shutdownErr := shutdownHTTPServer(server)
+		elapsed := time.Since(start)
+		if shutdownErr == nil {
+			t.Fatal("shutdownHTTPServer() with a blocked handler returned nil error, want timeout")
+		}
+		if !errors.Is(shutdownErr, context.DeadlineExceeded) {
+			t.Fatalf("shutdownHTTPServer() error = %v, want %v", shutdownErr, context.DeadlineExceeded)
+		}
+		if elapsed > shutdownTimeout+2*time.Second {
+			t.Fatalf("force close took %s, want bounded near %s", elapsed, shutdownTimeout)
+		}
+		// The force close must have released the blocked handler and Serve.
+		<-requestDone
+		if err := <-serveErrors; !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("Serve() error = %v, want %v", err, http.ErrServerClosed)
+		}
+	})
 }
 
 func TestHTTPIntegrationConcurrentDiscovery(t *testing.T) {
