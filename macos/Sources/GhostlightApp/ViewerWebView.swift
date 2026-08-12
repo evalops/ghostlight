@@ -67,6 +67,37 @@ struct ViewerWebView: NSViewRepresentable {
             self.onNavigationFailed = onNavigationFailed
         }
 
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            // Only the main frame can navigate the webview away from the viewer.
+            guard navigationAction.targetFrame?.isMainFrame ?? true,
+                  let url = navigationAction.request.url,
+                  let origin = loadedURL else {
+                decisionHandler(.allow)
+                return
+            }
+            decisionHandler(Self.isSameOrigin(url, as: origin) ? .allow : .cancel)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationResponse: WKNavigationResponse,
+            decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+        ) {
+            // Server-side redirects do not produce a navigation action, so the
+            // response URL must be checked against the viewer origin as well.
+            guard navigationResponse.isForMainFrame,
+                  let url = navigationResponse.response.url,
+                  let origin = loadedURL else {
+                decisionHandler(.allow)
+                return
+            }
+            decisionHandler(Self.isSameOrigin(url, as: origin) ? .allow : .cancel)
+        }
+
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             activeNavigation = navigation
             onNavigationStarted()
@@ -113,6 +144,12 @@ struct ViewerWebView: NSViewRepresentable {
                 return false
             }
             return navigation === activeNavigation
+        }
+
+        static func isSameOrigin(_ url: URL, as origin: URL) -> Bool {
+            url.scheme?.lowercased() == origin.scheme?.lowercased()
+                && url.host?.lowercased() == origin.host?.lowercased()
+                && url.port == origin.port
         }
 
         static func shouldReportNavigationError(_ error: Error) -> Bool {

@@ -21,6 +21,7 @@ final class SessionViewModel: ObservableObject {
     private let client: any ViewerDiscovering
     private let defaults: UserDefaults
     private var connectTask: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
     private var connectionID: UUID?
     private var viewerEntryURL: URL?
     private var automaticRetryEnabled = false
@@ -64,6 +65,8 @@ final class SessionViewModel: ObservableObject {
 
     private func connect(automatic: Bool) {
         connectTask?.cancel()
+        retryTask?.cancel()
+        retryTask = nil
         let requestID = UUID()
         connectionID = requestID
         viewerEntryURL = nil
@@ -111,10 +114,16 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
-    func viewerNavigationFinished(at _: URL?) {
+    func viewerNavigationFinished(at url: URL?) {
         guard let viewerEntryURL, case .loadingViewer = state else {
             return
         }
+        if let url, !ViewerWebView.Coordinator.isSameOrigin(url, as: viewerEntryURL) {
+            viewerNavigationFailed("The viewer navigated to an unexpected origin.")
+            return
+        }
+        retryTask?.cancel()
+        retryTask = nil
         state = .viewerLoaded(viewerEntryURL)
         viewerRetryAttempt = 0
         automaticRetryEnabled = false
@@ -135,11 +144,34 @@ final class SessionViewModel: ObservableObject {
         if automaticRetryEnabled, viewerRetryAttempt < Self.automaticRetryLimit {
             viewerRetryAttempt += 1
             state = .loadingViewer(viewerEntryURL, retryAttempt: viewerRetryAttempt)
-            reloadViewer()
+            scheduleAutomaticRetry()
             return
         }
         state = .viewerFailed(viewerEntryURL, message: message)
         automaticRetryEnabled = false
+    }
+
+    private func scheduleAutomaticRetry() {
+        retryTask?.cancel()
+        let attempt = viewerRetryAttempt
+        let requestID = connectionID
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.automaticRetryDelay(forAttempt: attempt))
+            guard !Task.isCancelled, let self else {
+                return
+            }
+            guard self.connectionID == requestID,
+                  self.viewerRetryAttempt == attempt,
+                  case .loadingViewer = self.state else {
+                return
+            }
+            self.reloadViewer()
+        }
+    }
+
+    private static func automaticRetryDelay(forAttempt attempt: Int) -> Duration {
+        // Exponential backoff: 1s after the first failure, 2s after the second.
+        .seconds(1 << (attempt - 1))
     }
 
     func reloadViewer() {
@@ -159,6 +191,8 @@ final class SessionViewModel: ObservableObject {
     func disconnect() {
         connectTask?.cancel()
         connectTask = nil
+        retryTask?.cancel()
+        retryTask = nil
         connectionID = nil
         viewerEntryURL = nil
         defaults.removeObject(forKey: Self.controlPlaneDefaultsKey)

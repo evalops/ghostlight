@@ -18,7 +18,7 @@ macos/package-release.sh dist
 shasum -a 256 --check dist/SHA256SUMS
 ```
 
-The release script refuses tracked source changes, cross-builds arm64 and x86_64 executables with a macOS 14 deployment target, combines them with `lipo`, and creates an ad-hoc-signed app. It writes `Ghostlight-<version>-macos-universal.zip`, `BUILD-INFO.txt`, and `SHA256SUMS`. The build receipt records the source revision, Swift toolchain, architectures, signing state, and archive digest. A `v<version>` Git tag publishes those files through `.github/workflows/release.yml` after the tag matches `CFBundleShortVersionString`.
+The release script refuses tracked source changes, cross-builds arm64 and x86_64 executables with a macOS 14 deployment target, combines them with `lipo`, and signs the app. It applies an ad-hoc signature by default; when `GHOSTLIGHT_SIGNING_IDENTITY` and the `APPLE_*` notarization credentials are set (as the release workflow does when the repository secrets are configured), it signs with that Developer ID identity, notarizes with `notarytool`, and staples the ticket. It writes `Ghostlight-<version>-macos-universal.zip`, `BUILD-INFO.txt`, and `SHA256SUMS`. The build receipt records the source revision, Swift toolchain, architectures, signing state, and archive digest. A `v<version>` Git tag publishes those files through `.github/workflows/release.yml` after the tag matches `CFBundleShortVersionString`.
 
 The app uses SwiftUI, WebKit, Foundation, and `URLSession`. `Package.swift` declares no third-party Swift package dependency.
 

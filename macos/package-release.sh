@@ -115,7 +115,34 @@ architectures="$(lipo -archs "$macos_dir/GhostlightApp")"
 [[ "$(plutil -extract CFBundleIdentifier raw -o - "$contents_dir/Info.plist")" == "org.evalops.Ghostlight" ]]
 [[ "$(plutil -extract CFBundleShortVersionString raw -o - "$contents_dir/Info.plist")" == "$version" ]]
 
-codesign --force --timestamp=none --sign - "$app_dir"
+signing_identity="${GHOSTLIGHT_SIGNING_IDENTITY:--}"
+if [[ "$signing_identity" == "-" ]]; then
+  codesign --force --timestamp=none --sign - "$app_dir"
+  codesign_identity=adhoc
+  notarized=no
+else
+  command -v xcrun >/dev/null 2>&1 || {
+    printf 'required command is unavailable: %s\n' "xcrun" >&2
+    exit 1
+  }
+  codesign --force --timestamp --options runtime --sign "$signing_identity" "$app_dir"
+  codesign_identity="$signing_identity"
+  notarized=no
+  if [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]]; then
+    notarization_zip="$temporary_root/notarization.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$notarization_zip"
+    xcrun notarytool submit "$notarization_zip" \
+      --apple-id "$APPLE_ID" \
+      --team-id "$APPLE_TEAM_ID" \
+      --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      --wait
+    xcrun stapler staple "$app_dir"
+    xcrun stapler validate "$app_dir"
+    notarized=yes
+  else
+    printf 'APPLE_ID/APPLE_TEAM_ID/APPLE_APP_SPECIFIC_PASSWORD are not set; skipping notarization\n' >&2
+  fi
+fi
 codesign --verify --deep --strict "$app_dir"
 
 ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$archive_path"
@@ -129,8 +156,8 @@ source_revision=$source_revision
 source_tree=$source_tree
 minimum_macos=$MINIMUM_MACOS
 architectures=$architectures
-codesign_identity=adhoc
-notarized=no
+codesign_identity=$codesign_identity
+notarized=$notarized
 swift=$swift_version
 archive=$archive_name
 archive_sha256=$archive_sha256

@@ -30,10 +30,80 @@ final class SessionClientTests: XCTestCase {
 
         XCTAssertEqual(capturedRequest?.httpMethod, "GET")
         XCTAssertEqual(capturedRequest?.url?.absoluteString, "http://localhost:8080/v1/viewer")
+        XCTAssertEqual(capturedRequest?.timeoutInterval, SessionClient.discoveryRequestTimeout)
         XCTAssertNil(capturedRequest?.value(forHTTPHeaderField: "Content-Type"))
         XCTAssertEqual(capturedRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
         XCTAssertNil(capturedBody)
         XCTAssertEqual(response.viewerURL.absoluteString, "http://localhost:6080/viewer")
+    }
+
+    func testDiscoverViewerAppendsEndpointToControlPlanePathAndPreservesQuery() async throws {
+        let expectedResponse = Data(#"{"viewer_url":"http://localhost:6080/viewer"}"#.utf8)
+        var capturedRequest: URLRequest?
+        StubURLProtocol.requestHandler = { request in
+            capturedRequest = request
+            return (try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )), expectedResponse)
+        }
+
+        let client = SessionClient(session: makeStubSession())
+        _ = try await client.discoverViewer(
+            at: try XCTUnwrap(URL(string: "http://localhost:8080/control?token=abc"))
+        )
+
+        XCTAssertEqual(
+            capturedRequest?.url?.absoluteString,
+            "http://localhost:8080/control/v1/viewer?token=abc"
+        )
+        XCTAssertEqual(capturedRequest?.timeoutInterval, SessionClient.discoveryRequestTimeout)
+    }
+
+    func testDiscoverViewerRejectsOversizedResponseBody() async throws {
+        let oversizedBody = Data(repeating: 0x20, count: SessionClient.maxDiscoveryResponseBytes + 1)
+        StubURLProtocol.requestHandler = { request in
+            (try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )), oversizedBody)
+        }
+
+        let client = SessionClient(session: makeStubSession())
+        do {
+            _ = try await client.discoverViewer(
+                at: try XCTUnwrap(URL(string: "http://localhost:8080"))
+            )
+            XCTFail("Expected an invalidResponse error for an oversized body")
+        } catch {
+            XCTAssertEqual(error as? SessionClientError, .invalidResponse)
+        }
+    }
+
+    func testDiscoverViewerRejectsUnsupportedViewerURL() async throws {
+        let expectedResponse = Data(#"{"viewer_url":"ftp://viewer.example.test/viewer"}"#.utf8)
+        StubURLProtocol.requestHandler = { request in
+            (try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )), expectedResponse)
+        }
+
+        let client = SessionClient(session: makeStubSession())
+        do {
+            _ = try await client.discoverViewer(
+                at: try XCTUnwrap(URL(string: "http://localhost:8080"))
+            )
+            XCTFail("Expected an invalidViewerURL error")
+        } catch {
+            XCTAssertEqual(error as? SessionClientError, .invalidViewerURL)
+        }
     }
 
     func testViewerDiscoveryResponseDecodesViewerURL() throws {
@@ -65,6 +135,9 @@ final class SessionClientTests: XCTestCase {
         XCTAssertThrowsError(try ControlPlaneURLValidator.validate("http:///v1")) { error in
             XCTAssertEqual(error as? ControlPlaneURLError, .missingHost)
         }
+        XCTAssertThrowsError(try ControlPlaneURLValidator.validate("http://user:password@localhost:8080")) { error in
+            XCTAssertEqual(error as? ControlPlaneURLError, .credentialsNotAllowed)
+        }
     }
 
     func testHTTPErrorMappingPreservesStatusAndServerMessage() {
@@ -79,10 +152,16 @@ final class SessionClientTests: XCTestCase {
         )
     }
 
-    func testTransportErrorMappingRecognizesOfflineNetwork() {
-        let error = SessionClientError.mapTransportError(URLError(.notConnectedToInternet))
+    func testTransportErrorMappingRecognizesOfflineNetwork() throws {
+        let error = try SessionClientError.mapTransportError(URLError(.notConnectedToInternet))
 
         XCTAssertEqual(error, .networkUnavailable)
+    }
+
+    func testTransportErrorMappingRethrowsCancellation() {
+        XCTAssertThrowsError(try SessionClientError.mapTransportError(URLError(.cancelled))) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
     }
 
     @MainActor
@@ -167,10 +246,11 @@ final class SessionClientTests: XCTestCase {
         XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 0))
         viewModel.viewerNavigationFailed("synthetic navigation failure")
         XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 1))
-        XCTAssertEqual(viewModel.reloadToken, 1)
+        XCTAssertEqual(viewModel.reloadToken, 0)
+        await waitUntil(timeout: 3) { viewModel.reloadToken == 1 }
         viewModel.viewerNavigationFailed("synthetic navigation failure")
         XCTAssertEqual(viewModel.state, .loadingViewer(viewerURL, retryAttempt: 2))
-        XCTAssertEqual(viewModel.reloadToken, 2)
+        await waitUntil(timeout: 4) { viewModel.reloadToken == 2 }
         viewModel.viewerNavigationFailed("synthetic navigation failure")
         XCTAssertEqual(
             viewModel.state,
@@ -227,7 +307,7 @@ final class SessionClientTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishedRedirectDoesNotReplaceDiscoveredViewerEntryURL() async throws {
+    func testFinishedSameOriginRedirectKeepsDiscoveredViewerEntryURL() async throws {
         let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -243,6 +323,29 @@ final class SessionClientTests: XCTestCase {
         viewModel.viewerNavigationFinished(at: redirectedURL)
 
         XCTAssertEqual(viewModel.state, .viewerLoaded(viewerURL))
+        XCTAssertEqual(viewModel.viewerURL, viewerURL)
+    }
+
+    @MainActor
+    func testFinishedCrossOriginRedirectFailsViewerLoad() async throws {
+        let suiteName = "GhostlightAppTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let viewerURL = try XCTUnwrap(URL(string: "http://viewer.example.test:8081"))
+        let redirectedURL = try XCTUnwrap(URL(string: "https://attacker.example.test/login"))
+        let client = StubViewerDiscovering(response: ViewerDiscoveryResponse(viewerURL: viewerURL))
+        let viewModel = SessionViewModel(client: client, defaults: defaults, autoConnect: false)
+        viewModel.connect()
+
+        await fulfillment(of: [client.requestExpectation], timeout: 1)
+        await waitUntil { viewModel.state == .loadingViewer(viewerURL, retryAttempt: 0) }
+        viewModel.viewerNavigationFinished(at: redirectedURL)
+
+        XCTAssertEqual(
+            viewModel.state,
+            .viewerFailed(viewerURL, message: "The viewer navigated to an unexpected origin.")
+        )
         XCTAssertEqual(viewModel.viewerURL, viewerURL)
     }
 
@@ -323,6 +426,35 @@ final class SessionClientTests: XCTestCase {
         )
         XCTAssertTrue(
             ViewerWebView.Coordinator.shouldReportNavigationError(URLError(.cannotConnectToHost))
+        )
+    }
+
+    func testNavigationPolicyRequiresMatchingSchemeHostAndPort() throws {
+        let origin = try XCTUnwrap(URL(string: "http://viewer.example.test:8081/viewer"))
+
+        XCTAssertTrue(
+            ViewerWebView.Coordinator.isSameOrigin(
+                try XCTUnwrap(URL(string: "http://viewer.example.test:8081/login")),
+                as: origin
+            )
+        )
+        XCTAssertFalse(
+            ViewerWebView.Coordinator.isSameOrigin(
+                try XCTUnwrap(URL(string: "https://viewer.example.test:8081/login")),
+                as: origin
+            )
+        )
+        XCTAssertFalse(
+            ViewerWebView.Coordinator.isSameOrigin(
+                try XCTUnwrap(URL(string: "http://attacker.example.test:8081/login")),
+                as: origin
+            )
+        )
+        XCTAssertFalse(
+            ViewerWebView.Coordinator.isSameOrigin(
+                try XCTUnwrap(URL(string: "http://viewer.example.test:9090/login")),
+                as: origin
+            )
         )
     }
 
