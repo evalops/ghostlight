@@ -53,7 +53,8 @@ const key = 'ghostlight-acceptance-storage';
 const priorStorage = localStorage.getItem(key) || 'none';
 document.querySelector('#storage').textContent = 'Storage before load: ' + priorStorage;
 localStorage.setItem(key, {json.dumps(MARKER)});
-fetch('/storage-report?tab={tab}&value=' + encodeURIComponent(priorStorage), {{cache: 'no-store'}});
+fetch('/storage-report?tab={tab}&value=' + encodeURIComponent(priorStorage), {{cache: 'no-store'}})
+  .finally(() => window.__ghostlightStorageReported = true);
 document.querySelector('#latency').focus();
 </script></body></html>""".encode()
         self.send_response(200)

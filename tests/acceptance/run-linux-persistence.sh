@@ -89,38 +89,36 @@ EOF
   docker compose version
   node --version
   npm --version
-} >>"$TRANSCRIPT" 2>&1
 
-npm ci --prefix "$TEST_DIR" >>"$TRANSCRIPT" 2>&1
-GHOSTLIGHT_ENV_FILE="$ENV_FILE" CHROMIUM_PROFILE_DIR="$PROFILE_DIR" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK="$SKIP_PROFILE_CHECK" "$ROOT_DIR/runtime/bin/preflight.sh" >>"$TRANSCRIPT" 2>&1
-docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build >>"$TRANSCRIPT" 2>&1
+  npm ci --prefix "$TEST_DIR"
+  GHOSTLIGHT_ENV_FILE="$ENV_FILE" CHROMIUM_PROFILE_DIR="$PROFILE_DIR" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK="$SKIP_PROFILE_CHECK" "$ROOT_DIR/runtime/bin/preflight.sh"
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build
 
 for _attempt in {1..60}; do
   curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
   sleep 1
 done
-curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >>"$TRANSCRIPT"
-printf '\n' >>"$TRANSCRIPT"
+  curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version"
+  printf '\n'
 
-node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" before "$OUTPUT_DIR" "$MARKER" >>"$TRANSCRIPT" 2>&1
+  node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" before "$OUTPUT_DIR"
 docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" exec -T viewer sh -lc 'cat /home/neko/.config/chromium/acceptance-requests.jsonl' >"$OUTPUT_DIR/before-requests.jsonl"
 BEFORE_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 BEFORE_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
-docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down >>"$TRANSCRIPT" 2>&1
-docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build >>"$TRANSCRIPT" 2>&1
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build
 
 for _attempt in {1..60}; do
   curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
   sleep 1
 done
-node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" after "$OUTPUT_DIR" "$MARKER" >>"$TRANSCRIPT" 2>&1
+  node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" after "$OUTPUT_DIR"
 AFTER_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 AFTER_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
 [[ "$BEFORE_VIEWER" != "$AFTER_VIEWER" && "$BEFORE_CONTROL" != "$AFTER_CONTROL" ]]
 docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" exec -T viewer sh -lc 'cat /home/neko/.config/chromium/acceptance-requests.jsonl' >"$OUTPUT_DIR/after-requests.jsonl"
-python3 "$TEST_DIR/validate-persistence.py" "$OUTPUT_DIR/before-requests.jsonl" "$OUTPUT_DIR/after-requests.jsonl" "$MARKER" >>"$TRANSCRIPT" 2>&1
+  python3 "$TEST_DIR/validate-persistence.py" "$OUTPUT_DIR/before-requests.jsonl" "$OUTPUT_DIR/after-requests.jsonl" "$MARKER"
 
-{
   printf 'before_viewer=%s\nafter_viewer=%s\n' "$BEFORE_VIEWER" "$AFTER_VIEWER"
   printf 'before_control=%s\nafter_control=%s\n' "$BEFORE_CONTROL" "$AFTER_CONTROL"
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps
