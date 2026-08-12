@@ -36,8 +36,8 @@ RUN set -eux; \
     test "$(sha256sum go.mod | cut -d' ' -f1)" = a9102a6a216e149cd2a02a2eba5c6416976bdb2db421c5055c7142c05b7c3dfb; \
     test "$(sha256sum go.sum | cut -d' ' -f1)" = 1b0b1eee88525b492fb4430a17d1eb632e2bcc2b2d60fbab1f00a0a3ef7b260c; \
     patch --fuzz=0 --no-backup-if-mismatch --strip=2 < /build/neko-go-modules.patch; \
-    test "$(sha256sum go.mod | cut -d' ' -f1)" = ac570f6b781162a7759e01ed07b7a2511214a0d62132b032deac07bdc338e366; \
-    test "$(sha256sum go.sum | cut -d' ' -f1)" = db7915ede5509f434b5d7162be2cefa72fe47ebac284fb42b13f8398a3653ce8; \
+    test "$(sha256sum go.mod | cut -d' ' -f1)" = 77d3961cb7d266b0e7136ea40bf76ca75c9d47c22532de989def59c83e817834; \
+    test "$(sha256sum go.sum | cut -d' ' -f1)" = 5f5a503acc0e37497dad316600bdb3f981bdf272d66d9923ec87b0e1b944641f; \
     go mod download; \
     go mod verify; \
     go test -mod=readonly ./...; \
@@ -83,5 +83,5 @@ COPY --from=neko-builder /build/SOURCE-PROVENANCE /usr/share/doc/neko/SOURCE-PRO
 LABEL org.opencontainers.image.source="https://github.com/evalops/ghostlight" \
       org.opencontainers.image.description="Ghostlight hardened Neko Chromium 3.1.5 viewer; Go modules and fixed Debian packages differ from upstream" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.version="neko-v3.1.5-ghostlight.1" \
+      org.opencontainers.image.version="neko-v3.1.5-ghostlight.2" \
       org.opencontainers.image.revision="395ca1a6f62b7b0e270e654d366a2d57b8042efd"
