@@ -16,14 +16,6 @@ def log(message):
     print(f"[ghostlight-cdp-pipe] {message}", flush=True)
 
 
-def child_pipe_setup(read_fd, write_fd):
-    os.dup2(read_fd, 3)
-    os.dup2(write_fd, 4)
-    for fd in {read_fd, write_fd}:
-        if fd not in (3, 4):
-            os.close(fd)
-
-
 def http_response(path):
     if path == "/json/version":
         body = {
@@ -59,16 +51,25 @@ class PipeBridge:
     def start_browser(self):
         browser_read, browser_write = os.pipe()
         browser_output_read, browser_output_write = os.pipe()
-        self.browser_write = browser_write
-        self.browser_read = browser_output_read
+        child_read = os.dup(browser_read)
+        child_write = os.dup(browser_output_write)
+        parent_write = os.dup(browser_write)
+        parent_read = os.dup(browser_output_read)
+        for fd in (browser_read, browser_write, browser_output_read, browser_output_write):
+            os.close(fd)
+        os.dup2(child_read, 3, inheritable=True)
+        os.dup2(child_write, 4, inheritable=True)
+        os.close(child_read)
+        os.close(child_write)
+        self.browser_write = parent_write
+        self.browser_read = parent_read
         self.process = subprocess.Popen(
             self.command,
             close_fds=True,
-            pass_fds=(browser_read, browser_output_write),
-            preexec_fn=lambda: child_pipe_setup(browser_read, browser_output_write),
+            pass_fds=(3, 4),
         )
-        os.close(browser_read)
-        os.close(browser_output_write)
+        os.close(3)
+        os.close(4)
         log(f"chromium pid={self.process.pid} cdp=pipe")
 
     def forward_client(self, client, initial):
