@@ -15,6 +15,7 @@ const REMOTE = process.env.GHOSTLIGHT_PERFORMANCE_REMOTE_HOST ?? "developer@192.
 const REMOTE_HOST = process.env.GHOSTLIGHT_PERFORMANCE_REMOTE_ADDRESS ?? "192.168.4.113";
 const BIND_ADDRESS = process.env.GHOSTLIGHT_PERFORMANCE_BIND_ADDRESS ?? REMOTE_HOST;
 const PORT_BASE = Number(process.env.GHOSTLIGHT_PERFORMANCE_PORT_BASE ?? 55000);
+const USE_SSH_TUNNEL = process.env.GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL !== "false";
 const TARGET_FPS = Number(process.env.GHOSTLIGHT_PERFORMANCE_TARGET_FPS ?? 25);
 const WIDTH = Number(process.env.GHOSTLIGHT_PERFORMANCE_WIDTH ?? 1920);
 const HEIGHT = Number(process.env.GHOSTLIGHT_PERFORMANCE_HEIGHT ?? 1080);
@@ -34,8 +35,10 @@ const REMOTE_DIR = `/tmp/${PROJECT}`;
 const VIEWER_PORT = PORT_BASE;
 const WEBRTC_PORT = PORT_BASE + 1;
 const CDP_PORT = PORT_BASE + 2;
-const VIEWER_URL = `http://${REMOTE_HOST}:${VIEWER_PORT}`;
-const CDP_URL = `http://${REMOTE_HOST}:${CDP_PORT}`;
+const CLIENT_ADDRESS = process.env.GHOSTLIGHT_PERFORMANCE_CLIENT_ADDRESS ?? (USE_SSH_TUNNEL ? "127.0.0.1" : REMOTE_HOST);
+const ICE_ADDRESS = process.env.GHOSTLIGHT_PERFORMANCE_ICE_ADDRESS ?? (USE_SSH_TUNNEL ? "127.0.0.1" : BIND_ADDRESS);
+const VIEWER_URL = `http://${CLIENT_ADDRESS}:${VIEWER_PORT}`;
+const CDP_URL = `http://${CLIENT_ADDRESS}:${CDP_PORT}`;
 const REMOTE_FIXTURE_URL = "http://127.0.0.1:18083";
 
 if (!Number.isInteger(PORT_BASE) || PORT_BASE < 1024 || PORT_BASE + 2 > 65535) throw new Error("GHOSTLIGHT_PERFORMANCE_PORT_BASE must leave three valid ports");
@@ -113,7 +116,7 @@ function composeConfig() {
       NEKO_WEBRTC_UDPMUX: ${yamlQuote(String(WEBRTC_PORT))}
       NEKO_WEBRTC_TCPMUX: ${yamlQuote(String(WEBRTC_PORT))}
       NEKO_WEBRTC_ICELITE: "0"
-      NEKO_WEBRTC_NAT1TO1: ${yamlQuote(BIND_ADDRESS)}
+      NEKO_WEBRTC_NAT1TO1: ${yamlQuote(ICE_ADDRESS)}
       NEKO_LEGACY: "true"
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null || exit 1"]
@@ -280,6 +283,33 @@ function startRemoteStats(containerId) {
   let stderr = "";
   sampler.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   return { marker, statsPath, sampler, stream, getStderr: () => stderr };
+}
+
+function startSshTunnel() {
+  if (!USE_SSH_TUNNEL) return null;
+  const forwards = [
+    `127.0.0.1:${VIEWER_PORT}:${BIND_ADDRESS}:${VIEWER_PORT}`,
+    `127.0.0.1:${WEBRTC_PORT}:${BIND_ADDRESS}:${WEBRTC_PORT}`,
+    `127.0.0.1:${CDP_PORT}:${BIND_ADDRESS}:${CDP_PORT}`,
+  ];
+  const tunnel = spawn("ssh", [
+    "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=10",
+    ...forwards.flatMap((forward) => ["-L", forward]),
+    REMOTE,
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  tunnel.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  tunnel.getStderr = () => stderr;
+  return tunnel;
+}
+
+async function stopSshTunnel(tunnel) {
+  if (!tunnel) return;
+  if (!tunnel.killed) tunnel.kill("SIGTERM");
+  await new Promise((resolve) => {
+    const timeout = setTimeout(resolve, 1000);
+    tunnel.once("close", () => { clearTimeout(timeout); resolve(); });
+  });
 }
 
 async function stopRemoteStats(stats) {
@@ -779,6 +809,9 @@ async function main() {
     remote: REMOTE,
     remote_host: REMOTE_HOST,
     bind_address: BIND_ADDRESS,
+    client_address: CLIENT_ADDRESS,
+    ice_address: ICE_ADDRESS,
+    ssh_tunnel: USE_SSH_TUNNEL,
     ports: { viewer: VIEWER_PORT, webrtc: WEBRTC_PORT, cdp: CDP_PORT },
     target_fps: TARGET_FPS,
     resolution: `${WIDTH}x${HEIGHT}`,
@@ -791,6 +824,7 @@ async function main() {
 
   let remote;
   let remoteProvisioned = false;
+  let tunnel;
   let stats;
   let clientBrowser;
   let remoteBrowser;
@@ -803,6 +837,7 @@ async function main() {
     await writeRemoteFiles();
     remoteProvisioned = true;
     remote = await startRemote();
+    tunnel = startSshTunnel();
     processStart = await processSnapshot(remote.containerId, "start");
     await waitForHTTP(`${VIEWER_URL}/health`);
     await waitForHTTP(`${CDP_URL}/json/version`);
@@ -844,6 +879,8 @@ async function main() {
     if (remoteBrowser) await remoteBrowser.close().catch(() => {});
     if (clientBrowser) await clientBrowser.close().catch(() => {});
     await stopRemoteStats(stats).catch(() => {});
+    if (tunnel?.getStderr?.()) await fs.writeFile(join(OUTPUT_DIR, "ssh-tunnel.stderr"), tunnel.getStderr(), { mode: 0o600 });
+    await stopSshTunnel(tunnel).catch(() => {});
     if (remote?.containerId) await captureRemoteLogs(remote.containerId).catch(() => {});
     if (remoteProvisioned) {
       try { remoteCommand(`docker compose --project-name ${shellQuote(PROJECT)} --file ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} down --remove-orphans --volumes`); } catch { /* cleanup receipt records the run even if teardown fails */ }
