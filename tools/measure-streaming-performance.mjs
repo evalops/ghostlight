@@ -212,10 +212,13 @@ async function writeRemoteFiles() {
   return { localConfigDir, localCompose };
 }
 
-async function waitForHTTP(url, timeoutMs = 120000) {
+async function waitForHTTP(url, timeoutMs = 120000, tunnel = null) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "not attempted";
   while (Date.now() < deadline) {
+    if (tunnel?.exitCode !== null) {
+      throw new Error(`SSH tunnel exited while waiting for ${url} (code ${tunnel.exitCode}): ${tunnel.getStderr?.() ?? "no stderr"}`);
+    }
     try {
       const response = await fetch(url);
       if (response.ok) return response;
@@ -1061,8 +1064,8 @@ async function main() {
     tunnel = startSshTunnel();
     await waitForSshTunnel(tunnel);
     processStart = await processSnapshot(remote.containerId, "start");
-    await waitForHTTP(`${VIEWER_URL}/health`);
-    await waitForHTTP(`${CDP_URL}/json/version`);
+    await waitForHTTP(`${VIEWER_URL}/health`, 120000, tunnel);
+    await waitForHTTP(`${CDP_URL}/json/version`, 120000, tunnel);
     stats = startRemoteStats(remote.containerId);
     processStats = startRemoteProcessStats(remote.containerId);
 
