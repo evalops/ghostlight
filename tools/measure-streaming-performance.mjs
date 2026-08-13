@@ -27,6 +27,7 @@ const USE_DAMAGE = process.env.GHOSTLIGHT_PERFORMANCE_USE_DAMAGE === "true";
 const BITRATE_KBPS = Number(process.env.GHOSTLIGHT_PERFORMANCE_BITRATE_KBPS ?? 3072);
 const PHASE_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS ?? 30);
 const WARMUP_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_WARMUP_SECONDS ?? 10);
+const CDP_DIAGNOSTICS = process.env.GHOSTLIGHT_PERFORMANCE_CDP_DIAGNOSTICS === "true";
 const CDP_COMMAND_TIMEOUT_MS = Number(process.env.GHOSTLIGHT_PERFORMANCE_CDP_TIMEOUT_MS ?? 5000);
 const CDP_MODE = process.env.GHOSTLIGHT_PERFORMANCE_CDP_MODE ?? "pipe";
 const OUTPUT_DIR = process.env.GHOSTLIGHT_PERFORMANCE_OUTPUT_DIR ?? join(ROOT_DIR, "output", "playwright", "performance", `run-${Date.now()}`);
@@ -105,6 +106,8 @@ function nekoConfig() {
 }
 
 function composeConfig() {
+  const cdpPort = CDP_DIAGNOSTICS ? `\n      - ${yamlQuote(`${BIND_ADDRESS}:${CDP_PORT}:9223/tcp`)}` : "";
+  const cdpVolume = CDP_DIAGNOSTICS ? `\n      - ${yamlQuote(`${REMOTE_DIR}/performance-cdp-pipe.py:/usr/local/bin/ghostlight-performance-cdp-pipe.py:ro`)}` : "";
   return `services:
   viewer:
     image: ${yamlQuote(IMAGE)}
@@ -117,13 +120,11 @@ function composeConfig() {
     ports:
       - ${yamlQuote(`${BIND_ADDRESS}:${VIEWER_PORT}:8080/tcp`)}
       - ${yamlQuote(`${BIND_ADDRESS}:${WEBRTC_PORT}:${WEBRTC_PORT}/udp`)}
-      - ${yamlQuote(`${BIND_ADDRESS}:${WEBRTC_PORT}:${WEBRTC_PORT}/tcp`)}
-      - ${yamlQuote(`${BIND_ADDRESS}:${CDP_PORT}:9223/tcp`)}
+      - ${yamlQuote(`${BIND_ADDRESS}:${WEBRTC_PORT}:${WEBRTC_PORT}/tcp`)}${cdpPort}
     volumes:
       - ${yamlQuote(`${REMOTE_DIR}/profile:/home/neko/.config/chromium`)}
       - ${yamlQuote(`${REMOTE_DIR}/neko.yaml:/etc/neko/neko.yaml:ro`)}
-      - ${yamlQuote(`${REMOTE_DIR}/chromium.conf:/etc/neko/supervisord/chromium.conf:ro`)}
-      - ${yamlQuote(`${REMOTE_DIR}/performance-cdp-pipe.py:/usr/local/bin/ghostlight-performance-cdp-pipe.py:ro`)}
+      - ${yamlQuote(`${REMOTE_DIR}/chromium.conf:/etc/neko/supervisord/chromium.conf:ro`)}${cdpVolume}
       - ${yamlQuote(`${REMOTE_DIR}/performance.conf:/etc/neko/supervisord/ghostlight-performance.conf:ro`)}
       - ${yamlQuote(`${REMOTE_DIR}/performance-fixture.py:/usr/local/bin/ghostlight-performance-fixture.py:ro`)}
     environment:
@@ -144,9 +145,11 @@ function composeConfig() {
 
 function chromiumConfig() {
   const chromiumCommand = "/usr/bin/chromium --no-sandbox --display=:99.0 --user-data-dir=/home/neko/.config/chromium --no-first-run --start-maximized --enable-automation --force-dark-mode --disable-file-system --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage";
-  const command = CDP_MODE === "pipe"
-    ? `/usr/bin/python3 /usr/local/bin/ghostlight-performance-cdp-pipe.py --bind 0.0.0.0 --port 9222 -- ${chromiumCommand} --remote-debugging-pipe`
-    : `${chromiumCommand} --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*`;
+  const command = !CDP_DIAGNOSTICS
+    ? `${chromiumCommand} ${REMOTE_FIXTURE_URL}/static-gmail`
+    : CDP_MODE === "pipe"
+      ? `/usr/bin/python3 /usr/local/bin/ghostlight-performance-cdp-pipe.py --bind 0.0.0.0 --port 9222 -- ${chromiumCommand} --remote-debugging-pipe ${REMOTE_FIXTURE_URL}/static-gmail`
+      : `${chromiumCommand} --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=* ${REMOTE_FIXTURE_URL}/static-gmail`;
   return [
     "[program:chromium]",
     "environment=HOME=\"/home/neko\",USER=\"neko\",DISPLAY=\":99.0\"",
@@ -211,17 +214,20 @@ async function writeRemoteFiles() {
   await fs.copyFile(FIXTURE_PATH, localFixture);
   await fs.chmod(localFixture, 0o700);
   const localCdpPipe = join(localConfigDir, "performance-cdp-pipe.py");
-  await fs.copyFile(join(ROOT_DIR, "tools", "performance-cdp-pipe.py"), localCdpPipe);
-  await fs.chmod(localCdpPipe, 0o700);
+  if (CDP_DIAGNOSTICS) {
+    await fs.copyFile(join(ROOT_DIR, "tools", "performance-cdp-pipe.py"), localCdpPipe);
+    await fs.chmod(localCdpPipe, 0o700);
+  }
   const localCompose = join(localConfigDir, "compose.yaml");
   await fs.writeFile(localCompose, composeConfig(), { mode: 0o600 });
   await fs.writeFile(join(OUTPUT_DIR, "source.sha"), `${currentSource().sourceSha}\n`);
   await fs.writeFile(join(OUTPUT_DIR, "image.txt"), `${IMAGE}\n`);
 
   remoteCommand(`rm -rf -- ${shellQuote(REMOTE_DIR)} && mkdir -m 700 -p -- ${shellQuote(`${REMOTE_DIR}/profile`)}`);
-  const remoteFiles = [...localPaths, localFixture, localCdpPipe, localCompose];
+  const remoteFiles = [...localPaths, localFixture, ...(CDP_DIAGNOSTICS ? [localCdpPipe] : []), localCompose];
   command("scp", ["-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...remoteFiles, `${REMOTE}:${REMOTE_DIR}/`]);
-  remoteCommand(`chmod 600 -- ${shellQuote(`${REMOTE_DIR}/neko.yaml`)} ${shellQuote(`${REMOTE_DIR}/chromium.conf`)} ${shellQuote(`${REMOTE_DIR}/performance.conf`)} ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} && chmod 700 -- ${shellQuote(`${REMOTE_DIR}/performance-fixture.py`)} ${shellQuote(`${REMOTE_DIR}/performance-cdp-pipe.py`)}`);
+  const executableFiles = [shellQuote(`${REMOTE_DIR}/performance-fixture.py`), ...(CDP_DIAGNOSTICS ? [shellQuote(`${REMOTE_DIR}/performance-cdp-pipe.py`)] : [])];
+  remoteCommand(`chmod 600 -- ${shellQuote(`${REMOTE_DIR}/neko.yaml`)} ${shellQuote(`${REMOTE_DIR}/chromium.conf`)} ${shellQuote(`${REMOTE_DIR}/performance.conf`)} ${shellQuote(`${REMOTE_DIR}/compose.yaml`)} && chmod 700 -- ${executableFiles.join(" ")}`);
   return { localConfigDir, localCompose };
 }
 
@@ -309,12 +315,12 @@ function stopRemoteCdpBridge(bridge) {
 
 function startSshTunnel() {
   if (!USE_SSH_TUNNEL) return null;
-  const forwardedPorts = [VIEWER_PORT, WEBRTC_PORT, CDP_PORT];
+  const forwardedPorts = [VIEWER_PORT, WEBRTC_PORT, ...(CDP_DIAGNOSTICS ? [CDP_PORT] : [])];
   assertLocalPorts(forwardedPorts, "before SSH tunnel spawn");
   const forwards = [
     `127.0.0.1:${VIEWER_PORT}:${BIND_ADDRESS}:${VIEWER_PORT}`,
     `127.0.0.1:${WEBRTC_PORT}:${BIND_ADDRESS}:${WEBRTC_PORT}`,
-    `127.0.0.1:${CDP_PORT}:${BIND_ADDRESS}:${CDP_PORT}`,
+    ...(CDP_DIAGNOSTICS ? [`127.0.0.1:${CDP_PORT}:${BIND_ADDRESS}:${CDP_PORT}`] : []),
   ];
   const tunnel = spawn("ssh", [
     "-4", "-N", "-o", "AddressFamily=inet", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=10",
@@ -662,11 +668,12 @@ class RemoteCdpPipePage {
       this.pending.clear();
     });
     await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
-    const created = await this.send("Target.createTarget", { url: REMOTE_FIXTURE_URL });
-    const targetId = created.targetId;
-    if (!targetId) throw new Error("remote CDP pipe did not return a target id");
     const targetInfos = (await this.send("Target.getTargets")).targetInfos ?? [];
-    this.target = targetInfos.find((entry) => entry.targetId === targetId) ?? { targetId, type: "page", url: REMOTE_FIXTURE_URL };
+    const existingTarget = targetInfos.find((entry) => entry.type === "page" && !entry.url.startsWith("devtools://"));
+    const created = existingTarget ? null : await this.send("Target.createTarget", { url: `${REMOTE_FIXTURE_URL}/static-gmail` });
+    const targetId = existingTarget?.targetId ?? created?.targetId;
+    if (!targetId) throw new Error("remote CDP pipe did not return a target id");
+    this.target = existingTarget ?? { targetId, type: "page", url: `${REMOTE_FIXTURE_URL}/static-gmail` };
     let attached = this.attachedTargets.get(targetId);
     const deadline = Date.now() + CDP_COMMAND_TIMEOUT_MS;
     while (!attached && Date.now() < deadline) {
@@ -790,6 +797,63 @@ async function connectRemoteCdpPage() {
   }
   const page = await new RemoteCdpPage(target).connect();
   return { page, target };
+}
+
+const PERFORMANCE_PHASES = new Set(["static-gmail", "scrolling", "typing", "animation"]);
+
+function x11NavigationScript(phase) {
+  if (!PERFORMANCE_PHASES.has(phase)) throw new Error(`unsupported performance phase: ${phase}`);
+  const url = `${REMOTE_FIXTURE_URL}/${phase}`;
+  const title = `Ghostlight synthetic ${phase}`;
+  return [
+    "command -v xdotool >/dev/null 2>&1 || { echo 'xdotool is required for the X11 benchmark driver' >&2; exit 127; }",
+    "xdotool key --clearmodifiers ctrl+l",
+    "sleep 0.15",
+    `xdotool type --clearmodifiers --delay 1 -- ${shellQuote(url)}`,
+    "xdotool key --clearmodifiers Return",
+    `for attempt in $(seq 1 80); do current_title=$(xdotool getactivewindow getwindowname 2>/dev/null || true); case "$current_title" in ${shellQuote(title)}*) exit 0 ;; esac; sleep 0.25; done`,
+    `echo ${shellQuote(`timed out waiting for Chromium title: ${title}`)} >&2`,
+    "exit 1",
+  ].join("\n");
+}
+
+function runX11(containerId, script, options = {}) {
+  return remoteCommand(`docker exec --user neko --env DISPLAY=:99.0 ${shellQuote(containerId)} sh -lc ${shellQuote(script)}`, options);
+}
+
+async function navigateRemoteFixture(containerId, phase) {
+  runX11(containerId, x11NavigationScript(phase));
+  await sleep(500);
+}
+
+function x11WorkloadMarker(phase) {
+  const safeRunId = RUN_ID.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 80);
+  return `/tmp/ghostlight-${safeRunId}-${phase}.running`;
+}
+
+function startRemoteX11Loop(containerId, phase, body) {
+  const marker = x11WorkloadMarker(phase);
+  runX11(containerId, `touch -- ${shellQuote(marker)}`);
+  const loop = `while test -f ${shellQuote(marker)}; do ${body}; done`;
+  const remoteScript = `docker exec --user neko --env DISPLAY=:99.0 ${shellQuote(containerId)} sh -lc ${shellQuote(loop)}`;
+  const worker = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, remoteScript], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  worker.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  return { marker, worker, getStderr: () => stderr };
+}
+
+async function stopRemoteX11Loop(containerId, workload) {
+  if (!workload) return;
+  try { runX11(containerId, `rm -f -- ${shellQuote(workload.marker)}`); } catch { /* cleanup continues below */ }
+  await Promise.race([
+    new Promise((resolve) => {
+      if (workload.worker.exitCode !== null) resolve();
+      else workload.worker.once("close", resolve);
+    }),
+    sleep(3000),
+  ]);
+  if (workload.worker.exitCode === null) workload.worker.kill("SIGTERM");
+  if (workload.getStderr()) throw new Error(`X11 ${workload.marker} workload failed: ${workload.getStderr()}`);
 }
 
 function addPeerTracking(context) {
@@ -963,14 +1027,13 @@ async function resetFrameState(page) {
   });
 }
 
-async function resetRemoteMarker(clientPage, remotePage) {
-  await remotePage.evaluate(() => window.__ghostlightResetMarker?.());
+async function resetRemoteMarker(clientPage) {
   await resetFrameState(clientPage);
-  await clientPage.waitForFunction(() => (window.__ghostlightFrameState?.markerClearSeenAt ?? 0) > 0, null, { timeout: 2000 }).catch(() => {});
+  await clientPage.waitForFunction(() => (window.__ghostlightFrameState?.markerClearSeenAt ?? 0) > 0, null, { timeout: 2500 }).catch(() => {});
 }
 
-async function measureCausalMarker(clientPage, remotePage) {
-  await resetRemoteMarker(clientPage, remotePage);
+async function measureCausalMarker(clientPage, containerId) {
+  await resetRemoteMarker(clientPage);
   const ready = await clientPage.evaluate(() => {
     const state = window.__ghostlightFrameState;
     if (!state || !state.markerClearSeenAt) return false;
@@ -979,17 +1042,17 @@ async function measureCausalMarker(clientPage, remotePage) {
     state.inputDispatchAt = performance.now();
     return true;
   });
-  if (!ready) return { success: false, input_to_present_ms: null };
+  if (!ready) return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool" };
   try {
-    await clientPage.keyboard.press("F8");
+    runX11(containerId, "xdotool key --clearmodifiers F8");
     await clientPage.waitForFunction(() => (window.__ghostlightFrameState?.markerSeenAt ?? 0) > 0, null, { timeout: 2500 });
     const latency = await clientPage.evaluate(() => {
       const state = window.__ghostlightFrameState;
       return state.markerSeenAt - state.inputDispatchAt;
     });
-    return { success: Number.isFinite(latency) && latency >= 0, input_to_present_ms: Number.isFinite(latency) ? latency : null };
-  } catch {
-    return { success: false, input_to_present_ms: null };
+    return { success: Number.isFinite(latency) && latency >= 0, input_to_present_ms: Number.isFinite(latency) ? latency : null, input_driver: "x11-xdotool" };
+  } catch (error) {
+    return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool", error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -998,44 +1061,18 @@ async function collectClientStats(page) {
   return { ...statsSnapshot(result.reports), h264_supported: result.h264Supported, reports: result.reports };
 }
 
-async function remoteViewportPoint(remotePage, selector) {
-  return remotePage.evaluate((target) => {
-    const element = document.querySelector(target);
-    if (!element) return null;
-    const rect = element.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, viewportWidth: innerWidth, viewportHeight: innerHeight };
-  }, selector);
-}
-
-async function startRemoteWorkload(clientPage, remotePage, phase) {
+async function startRemoteWorkload(containerId, phase) {
   if (phase === "scrolling") {
-    await remotePage.evaluate(() => {
-      window.scrollTo(0, 0);
-      window.__ghostlightWorkloadTimer = window.setInterval(() => window.scrollBy(0, 12), 16);
-    });
-    return async () => remotePage.evaluate(() => { window.clearInterval(window.__ghostlightWorkloadTimer); window.__ghostlightWorkloadTimer = 0; });
+    const workload = startRemoteX11Loop(containerId, phase, "xdotool click --repeat 24 --delay 24 5; xdotool click --repeat 24 --delay 24 4");
+    return async () => stopRemoteX11Loop(containerId, workload);
   }
   if (phase === "animation") {
-    await remotePage.evaluate(() => document.querySelector("#animation-stage")?.scrollIntoView({ block: "start" }));
     return async () => {};
   }
   if (phase === "typing") {
-    const target = await remoteViewportPoint(remotePage, "#typing-input");
-    if (!target) throw new Error("typing fixture input is missing");
-    const videoBox = await clientPage.locator("video").boundingBox();
-    if (!videoBox) throw new Error("viewer video bounds are missing");
-    const x = videoBox.x + (target.x / target.viewportWidth) * videoBox.width;
-    const y = videoBox.y + (target.y / target.viewportHeight) * videoBox.height;
-    await clientPage.mouse.click(x, y);
-    let index = 0;
-    let pending = Promise.resolve();
-    const text = " synthetic review text";
-    const timer = setInterval(() => {
-      pending = pending.then(async () => {
-        await clientPage.keyboard.type(`${text} ${index++}`, { delay: 2 });
-      }).catch(() => {});
-    }, 1200);
-    return async () => { clearInterval(timer); await pending; };
+    runX11(containerId, "xdotool key --clearmodifiers Tab; xdotool key --clearmodifiers Tab");
+    const workload = startRemoteX11Loop(containerId, phase, "xdotool type --clearmodifiers --delay 2 -- ' synthetic review text'; sleep 1.2");
+    return async () => stopRemoteX11Loop(containerId, workload);
   }
   return async () => {};
 }
@@ -1055,21 +1092,20 @@ function framePhaseMetrics(frameState, durationSeconds) {
   };
 }
 
-async function runPhase(clientPage, remotePage, phase) {
-  await remotePage.goto(`${REMOTE_FIXTURE_URL}/${phase}`, { waitUntil: "domcontentloaded" });
-  await remotePage.waitForSelector("#causal-marker");
+async function runPhase(clientPage, containerId, phase) {
+  await navigateRemoteFixture(containerId, phase);
   await clientPage.waitForTimeout(WARMUP_SECONDS * 1000);
-  await resetRemoteMarker(clientPage, remotePage);
+  await resetRemoteMarker(clientPage);
   const startStats = await collectClientStats(clientPage);
   const startTime = Date.now();
-  const stopWorkload = await startRemoteWorkload(clientPage, remotePage, phase);
+  const stopWorkload = await startRemoteWorkload(containerId, phase);
   const markerReceipts = [];
   try {
     const deadline = startTime + PHASE_SECONDS * 1000;
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
       await sleep(Math.min(3000, Math.max(250, remaining)));
-      if (Date.now() <= deadline + 100) markerReceipts.push({ captured_at: new Date().toISOString(), ...(await measureCausalMarker(clientPage, remotePage)) });
+      if (Date.now() <= deadline + 100) markerReceipts.push({ captured_at: new Date().toISOString(), ...(await measureCausalMarker(clientPage, containerId)) });
     }
   } finally {
     await stopWorkload();
@@ -1237,8 +1273,9 @@ async function main() {
     ice_address: ICE_ADDRESS,
     ssh_tunnel: USE_SSH_TUNNEL,
     transport_mode: USE_SSH_TUNNEL ? "ssh-tcp-smoke" : "direct-lan-udp-required",
+    cdp_diagnostics: CDP_DIAGNOSTICS,
     cdp_mode: CDP_MODE,
-    ports: { viewer: VIEWER_PORT, webrtc: WEBRTC_PORT, cdp: CDP_PORT },
+    ports: { viewer: VIEWER_PORT, webrtc: WEBRTC_PORT, ...(CDP_DIAGNOSTICS ? { cdp: CDP_PORT } : {}) },
     target_fps: TARGET_FPS,
     resolution: `${WIDTH}x${HEIGHT}`,
     cpu_used: CPU_USED,
@@ -1256,6 +1293,7 @@ async function main() {
   let processStats;
   let clientBrowser;
   let remotePage;
+  let cdpDiagnostics = { enabled: CDP_DIAGNOSTICS, status: CDP_DIAGNOSTICS ? "not-attempted" : "disabled", target: null, error: null };
   let processStart;
   let processEnd;
   const phaseResults = [];
@@ -1265,12 +1303,11 @@ async function main() {
     await writeRemoteFiles();
     remoteProvisioned = true;
     remote = await startRemote();
-    cdpBridge = startRemoteCdpBridge(remote.containerId);
+    if (CDP_DIAGNOSTICS) cdpBridge = startRemoteCdpBridge(remote.containerId);
     tunnel = startSshTunnel();
     await waitForSshTunnel(tunnel);
     processStart = await processSnapshot(remote.containerId, "start");
     await waitForHTTP(`${VIEWER_URL}/health`, 120000, tunnel);
-    await waitForHTTP(`${CDP_URL}/json/version`, 120000, tunnel);
     stats = startRemoteStats(remote.containerId);
     processStats = startRemoteProcessStats(remote.containerId);
 
@@ -1289,15 +1326,24 @@ async function main() {
     }, null, { timeout: 30000 });
     await installFrameObserver(clientPage);
 
-    const remoteTarget = await connectRemoteCdpPage();
-    remotePage = remoteTarget.page;
-    await fs.writeFile(join(OUTPUT_DIR, "remote-cdp-target.json"), `${JSON.stringify(remoteTarget.target, null, 2)}\n`, { mode: 0o600 });
+    if (CDP_DIAGNOSTICS) {
+      try {
+        if (CDP_MODE === "tcp") await waitForHTTP(`${CDP_URL}/json/version`, 10000, tunnel);
+        const remoteTarget = await connectRemoteCdpPage();
+        remotePage = remoteTarget.page;
+        cdpDiagnostics = { enabled: true, status: "available", target: remoteTarget.target, error: null };
+        await fs.writeFile(join(OUTPUT_DIR, "remote-cdp-target.json"), `${JSON.stringify(remoteTarget.target, null, 2)}\n`, { mode: 0o600 });
+      } catch (error) {
+        cdpDiagnostics = { enabled: true, status: "unavailable", target: null, error: error instanceof Error ? error.message : String(error) };
+        await fs.writeFile(join(OUTPUT_DIR, "remote-cdp-error.txt"), `${cdpDiagnostics.error}\n`, { mode: 0o600 });
+      }
+    }
     const initialClientStats = await collectClientStats(clientPage);
     await fs.writeFile(join(OUTPUT_DIR, "initial-webrtc.json"), `${JSON.stringify({ ...initialClientStats, reports: undefined }, null, 2)}\n`, { mode: 0o600 });
     if (!initialClientStats.inbound_count) throw new Error("no inbound video RTP stream was negotiated");
 
     for (const phase of ["static-gmail", "scrolling", "typing", "animation"]) {
-      const result = await runPhase(clientPage, remotePage, phase);
+      const result = await runPhase(clientPage, remote.containerId, phase);
       phaseResults.push(result);
       await fs.writeFile(join(OUTPUT_DIR, `phase-${phase}.json`), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
       screenshots.push(await savePhaseScreenshot(clientPage, phase));
@@ -1393,6 +1439,7 @@ async function main() {
       },
       container_cpu_samples: containerStats,
       selected_ice_pairs: aggregate.selected_ice_pairs,
+      cdp: cdpDiagnostics,
     },
     comparison: { paired_control: Boolean(control), control_source: CONTROL_JSON || null, control: control ?? null },
     phases: phaseResults.map(sanitizePhase),
@@ -1406,7 +1453,8 @@ async function main() {
       viewer_log: join(OUTPUT_DIR, "viewer.log"),
     },
     limitations: [
-      "Input-to-present is measured only when the remote fixture's causal marker changes after a WebRTC-client F8 dispatch; the old dispatch-to-next-presented-frame metric is not used or renamed.",
+      "Input-to-present is measured only when the remote fixture's causal marker changes after an X11 xdotool F8 dispatch; the timestamp is set immediately before sending the scoped SSH command, so it includes X11-driver command transit and is compared only within paired runs.",
+      "The synthetic fixture is launched and driven through Chromium's real X11 input path with xdotool. CDP is disabled by default and optional diagnostics never gate a measurement.",
       "Viewer CPU is attributed to the exact pinned container through timestamped Docker stats sliced to each phase window; host-wide CPU is not substituted.",
       "Process CPU samples are captured at approximately 1 Hz from /proc utime+stime deltas. Chromium, Neko, X-related, and other categories are reported; vp8enc remains in-process within Neko/GStreamer and is not separately attributable.",
       USE_SSH_TUNNEL ? "SSH TCP forwarding is smoke-only and is not used as the 1080p25 control transport; a direct-LAN run must set GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL=false and prove selected candidatePair protocol=udp." : "This receipt requires a direct-LAN selected candidatePair protocol=udp in every phase.",
@@ -1422,6 +1470,12 @@ async function main() {
 }
 
 function runSelfTests() {
+  assert.equal(CDP_DIAGNOSTICS, false);
+  assert.match(chromiumConfig(), new RegExp(REMOTE_FIXTURE_URL.replaceAll(".", "\\.")));
+  assert.doesNotMatch(chromiumConfig(), /remote-debugging/);
+  assert.doesNotMatch(composeConfig(), /performance-cdp-pipe|9223/);
+  assert.match(x11NavigationScript("typing"), /xdotool key --clearmodifiers ctrl\+l/);
+
   const samples = [
     { captured_at: "2026-08-12T00:00:00.000Z", cpu_pct: 10, memory_mib: 100 },
     { captured_at: "2026-08-12T00:00:01.000Z", cpu_pct: 20, memory_mib: 200 },
