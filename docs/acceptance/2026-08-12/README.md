@@ -47,4 +47,4 @@ This receipt does not claim that Gmail, the native macOS relaunch flow, or the s
 
 The [native macOS receipt](native-macos-receipt.json) binds the packaged app to macOS source commit `af26a8b47f4598038b06604aab34134ebccaf674` and binary SHA-256 `26581f3d480584a3216f9494835f6fcade02054fe5cfe3de877d5e49c3f27fcf`. The app discovered a synthetic loopback viewer, reached `Viewer loaded` through `WKWebView`, exited through Cmd-Q, and relaunched without an environment override from the saved control URL without another Connect action. The [initial screenshot](native-viewer-loaded.png) and [relaunch screenshot](native-relaunch.png) were inspected for privacy and contain only synthetic loopback content. The [transcript and checksum manifest](native-macos-sha256sums.txt) are committed alongside them.
 
-This native receipt does not claim Neko authentication, WebRTC media, Gmail persistence, or the seven-day gate. Those remain separate checks.
+This native receipt does not claim Neko authentication, WebRTC media, or Gmail persistence. Those remain separate checks.

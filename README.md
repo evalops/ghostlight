@@ -22,9 +22,7 @@ The acceptance path is:
 4. Close Ghostlight.
 5. Reopen Ghostlight and find the same Gmail session and tabs.
 
-The acceptance gate requires seven consecutive days with one successful close-and-reopen check and one successful Compose-restart check each day. Dex control-lease work starts after that gate passes.
-
-The repository has a day-one Linux persistence receipt and synthetic acceptance tooling. That receipt does not satisfy the native Mac check, the Gmail check, or the seven-day gate.
+The repository has a Linux persistence receipt and synthetic acceptance tooling. That receipt does not satisfy the native Mac or Gmail checks.
 
 ## Requirements
 
@@ -241,7 +239,7 @@ scripts/update-neko-image.sh "ghcr.io/evalops/ghostlight-viewer@sha256:<digest>"
 scripts/check-image-safety.sh
 ```
 
-The candidate lane checks synthetic Linux profile persistence through one Compose recreation and runs the configured image scans. It does not prove native macOS relaunch, WKWebView decoding, Gmail persistence, or the seven-day gate.
+The candidate lane checks synthetic Linux profile persistence through one Compose recreation and runs the configured image scans. It does not prove native macOS relaunch, WKWebView decoding, or Gmail persistence.
 
 ## Troubleshooting
 
@@ -298,7 +296,7 @@ Check `runtime/data/chromium` ownership, permissions, and free disk space. Resto
 
 The alpha has no control authentication, TLS termination, TURN service, multi-host scheduler, account system, billing, automatic browser upgrade, or public-internet deployment path. The macOS package is ad-hoc signed unless the Apple signing secrets described above are configured.
 
-Changes required by the seven-day acceptance path remain in the current milestone. Multi-user control, fleet scheduling, and production deployment remain gated on that acceptance result.
+Multi-user control, fleet scheduling, and production deployment remain outside the current alpha scope.
 
 ## Contributing and license
 

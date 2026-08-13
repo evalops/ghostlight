@@ -41,8 +41,8 @@ Its 2026-08-12 VP8 result is committed under `docs/performance`.
   inbound media, 251 decoded frames, zero dropped frames, bitrate, a dispatch-to-next-presented-frame phase,
   CPU, and memory. Its transcript does not record an exact commit SHA.
 
-These lanes do not exercise Gmail or make any claim about seven-day daily-driver
-acceptance. Synthetic pages are deliberate so receipts contain no account data.
+These lanes do not exercise Gmail. Synthetic pages are deliberate so receipts
+contain no account data.
 
 ## Linux screenshots
 
