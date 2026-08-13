@@ -811,11 +811,14 @@ function x11NavigationScript(phase) {
   const title = `Ghostlight synthetic ${phase}`;
   return [
     "command -v xdotool >/dev/null 2>&1 || { echo 'xdotool is required for the X11 benchmark driver' >&2; exit 127; }",
+    "chromium_window=$(xdotool search --onlyvisible --class chromium 2>/dev/null | tail -n 1)",
+    "test -n \"$chromium_window\" || { echo 'visible Chromium X11 window is required' >&2; exit 1; }",
+    "xdotool windowactivate --sync \"$chromium_window\"",
     "xdotool key --clearmodifiers ctrl+l",
     "sleep 0.15",
     `xdotool type --clearmodifiers --delay 1 -- ${shellQuote(url)}`,
     "xdotool key --clearmodifiers Return",
-    `for attempt in $(seq 1 80); do current_title=$(xdotool getactivewindow getwindowname 2>/dev/null || true); case "$current_title" in ${shellQuote(title)}*) exit 0 ;; esac; sleep 0.25; done`,
+    `for attempt in $(seq 1 80); do current_title=$(xdotool getwindowname "$chromium_window" 2>/dev/null || true); case "$current_title" in ${shellQuote(title)}*) exit 0 ;; esac; sleep 0.25; done`,
     `echo ${shellQuote(`timed out waiting for Chromium title: ${title}`)} >&2`,
     "exit 1",
   ].join("\n");
@@ -1479,6 +1482,7 @@ function runSelfTests() {
   assert.doesNotMatch(chromiumConfig(), /remote-debugging/);
   assert.doesNotMatch(composeConfig(), /performance-cdp-pipe|9223/);
   assert.match(x11NavigationScript("typing"), /xdotool key --clearmodifiers ctrl\+l/);
+  assert.match(x11NavigationScript("typing"), /xdotool windowactivate --sync/);
   assert.equal(tunnelExited(null), false);
   assert.equal(tunnelExited({ exitCode: null }), false);
   assert.equal(tunnelExited({ exitCode: 1 }), true);
