@@ -155,4 +155,3 @@ sequenceDiagram
 - W3C WebRTC Statistics: https://www.w3.org/TR/webrtc-stats/
 - RFC 8445, ICE: https://www.rfc-editor.org/rfc/rfc8445.html
 - Apple XCTest asynchronous expectations: https://developer.apple.com/documentation/xctest/asynchronous-tests-and-expectations
-

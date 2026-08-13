@@ -4,17 +4,22 @@ import XCTest
 @testable import GhostlightApp
 
 final class ViewerWebViewTests: XCTestCase {
-    func testViewerLoginScriptInjectsCredentialsOnceAndEscapesJSON() {
-        let script = ViewerWebView.viewerLoginScript(
-            username: "viewer\"name",
-            password: "secret\\value"
+    func testViewerCredentialBuildsAnEphemeralCookieWithoutTheGlobalPassword() throws {
+        let expiresAt = Date().addingTimeInterval(30)
+        let credential = ViewerCredential(
+            type: "cookie", name: "neko-session", value: "scoped-value", path: "/",
+            secure: true, httpOnly: true, sameSite: "strict", expiresAt: expiresAt
         )
+        let cookie = try XCTUnwrap(ViewerWebView.viewerCookie(
+            credential,
+            for: try XCTUnwrap(URL(string: "https://viewer.example.test/?embed=1"))
+        ))
 
-        XCTAssertTrue(script.contains(#"sessionStorage.getItem("ghostlight.viewer.authenticated") === "1""#))
-        XCTAssertTrue(script.contains(#"fetch("/api/login""#))
-        XCTAssertTrue(script.contains(#"sessionStorage.setItem("ghostlight.viewer.authenticated", "1")"#))
-        XCTAssertTrue(script.contains(#""username":"viewer\"name""#))
-        XCTAssertTrue(script.contains(#""password":"secret\\value""#))
+        XCTAssertEqual(cookie.name, "neko-session")
+        XCTAssertEqual(cookie.value, "scoped-value")
+        XCTAssertEqual(cookie.domain, "viewer.example.test")
+        XCTAssertEqual(try XCTUnwrap(cookie.expiresDate).timeIntervalSince(expiresAt), 0, accuracy: 1)
+        XCTAssertTrue(cookie.isHTTPOnly)
     }
 
     func testNavigationOriginRequiresMatchingSchemeHostAndEffectivePort() throws {
@@ -93,5 +98,23 @@ final class ViewerWebViewTests: XCTestCase {
         XCTAssertFalse(capabilities.pageAudioMute)
         XCTAssertFalse(capabilities.pointerLockControl)
         XCTAssertFalse(capabilities.cursorControl)
+    }
+
+    func testNativePerformanceScriptEmitsNativeInputToPresentReceipts() {
+        let configuration = NativePerformanceConfiguration(
+            outputURL: URL(fileURLWithPath: "/tmp/native-receipt.json"),
+            sourceSHA: String(repeating: "a", count: 40),
+            runID: "native-test-run",
+            expectedCodec: "vp8",
+            password: "secret",
+            displayName: "Native probe"
+        )
+
+        let script = configuration.userScript
+        XCTAssertTrue(script.contains("native_input_to_present_receipts"))
+        XCTAssertTrue(script.contains("wkwebview-video-frame-callback"))
+        XCTAssertFalse(script.contains(#"addEventListener("keydown""#))
+        XCTAssertTrue(script.contains("requestVideoFrameCallback"))
+        XCTAssertTrue(script.contains("getImageData"))
     }
 }

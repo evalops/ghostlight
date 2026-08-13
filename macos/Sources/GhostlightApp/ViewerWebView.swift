@@ -5,8 +5,7 @@ struct ViewerWebView: NSViewRepresentable {
     typealias RevealDownload = () -> Void
 
     let url: URL
-    let username: String
-    let password: String?
+    let credential: ViewerCredential?
     let reloadToken: Int
     let onNavigationStarted: () -> Void
     let onNavigationFinished: (URL?) -> Void
@@ -17,14 +16,13 @@ struct ViewerWebView: NSViewRepresentable {
     let onDownloadStarted: (URL) -> Void
     let onDownloadFinished: (URL, RevealDownload) -> Void
     let onDownloadFailed: (String) -> Void
-    let onWebContentProcessTerminated: (() -> Void) -> Void
+    let onWebContentProcessTerminated: (@escaping () -> Void) -> Void
     let onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
     let onCapabilitiesChanged: (Capabilities) -> Void
 
     init(
         url: URL,
-        username: String,
-        password: String?,
+        credential: ViewerCredential?,
         reloadToken: Int,
         onNavigationStarted: @escaping () -> Void,
         onNavigationFinished: @escaping (URL?) -> Void,
@@ -35,13 +33,12 @@ struct ViewerWebView: NSViewRepresentable {
         onDownloadStarted: @escaping (URL) -> Void = { _ in },
         onDownloadFinished: @escaping (URL, RevealDownload) -> Void = { _, _ in },
         onDownloadFailed: @escaping (String) -> Void = { _ in },
-        onWebContentProcessTerminated: @escaping (() -> Void) -> Void = { _ in },
+        onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void = { _ in },
         onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void = { _ in },
         onCapabilitiesChanged: @escaping (Capabilities) -> Void = { _ in }
     ) {
         self.url = url
-        self.username = username
-        self.password = password
+        self.credential = credential
         self.reloadToken = reloadToken
         self.onNavigationStarted = onNavigationStarted
         self.onNavigationFinished = onNavigationFinished
@@ -78,15 +75,6 @@ struct ViewerWebView: NSViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         let capabilities = Capabilities.current
         configuration.preferences.isElementFullscreenEnabled = capabilities.elementFullscreen
-        if let password {
-            configuration.userContentController.addUserScript(
-                WKUserScript(
-                    source: Self.viewerLoginScript(username: username, password: password),
-                    injectionTime: .atDocumentStart,
-                    forMainFrameOnly: true
-                )
-            )
-        }
         context.coordinator.configureMediaReadiness(configuration)
         context.coordinator.configureNativePerformance(configuration)
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -98,31 +86,45 @@ struct ViewerWebView: NSViewRepresentable {
         context.coordinator.observeFullscreenState(of: webView)
         context.coordinator.onCapabilitiesChanged(capabilities)
         context.coordinator.performFind(findRequest, in: webView)
-        webView.load(URLRequest(url: url))
+        Self.load(url, credential: credential, in: webView)
         return webView
     }
 
-    static func viewerLoginScript(username: String, password: String) -> String {
-        let payload = try? JSONSerialization.data(withJSONObject: ["username": username, "password": password])
-        let json = payload.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        return #"""
-        (() => {
-          if (sessionStorage.getItem("ghostlight.viewer.authenticated") === "1") return;
-          document.documentElement.style.visibility = "hidden";
-          fetch("/api/login", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Accept": "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify(\#(json))
-          }).then((response) => {
-            if (!response.ok) throw new Error(`viewer login failed (${response.status})`);
-            sessionStorage.setItem("ghostlight.viewer.authenticated", "1");
-            location.replace("/?embed=1");
-          }).catch(() => {
-            document.documentElement.style.visibility = "visible";
-          });
-        })();
-        """#
+    static func load(_ url: URL, credential: ViewerCredential?, in webView: WKWebView) {
+        guard let credential else {
+            webView.load(URLRequest(url: url))
+            return
+        }
+        guard credential.type == "cookie", let cookie = viewerCookie(credential, for: url) else {
+            return
+        }
+        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+            DispatchQueue.main.async { webView.load(URLRequest(url: url)) }
+        }
+    }
+
+    static func viewerCookie(_ credential: ViewerCredential, for url: URL) -> HTTPCookie? {
+        guard credential.type == "cookie",
+              let name = credential.name,
+              !name.isEmpty,
+              !credential.value.isEmpty,
+              let host = url.host,
+              credential.expiresAt > Date() else {
+            return nil
+        }
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .name: name,
+            .value: credential.value,
+            .domain: host,
+            .path: credential.path ?? "/",
+            .expires: credential.expiresAt,
+            .secure: credential.secure == true ? "TRUE" : "FALSE",
+        ]
+        if credential.httpOnly == true { properties[HTTPCookiePropertyKey("HttpOnly")] = "TRUE" }
+        if let sameSite = credential.sameSite, !sameSite.isEmpty {
+            properties[HTTPCookiePropertyKey("SameSite")] = sameSite.capitalized
+        }
+        return HTTPCookie(properties: properties)
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
@@ -144,7 +146,7 @@ struct ViewerWebView: NSViewRepresentable {
         if context.coordinator.loadedURL != url || context.coordinator.reloadToken != reloadToken {
             context.coordinator.loadedURL = url
             context.coordinator.reloadToken = reloadToken
-            webView.load(URLRequest(url: url))
+            Self.load(url, credential: credential, in: webView)
         }
     }
 
@@ -287,7 +289,7 @@ struct ViewerWebView: NSViewRepresentable {
         var onDownloadStarted: (URL) -> Void
         var onDownloadFinished: (URL, RevealDownload) -> Void
         var onDownloadFailed: (String) -> Void
-        var onWebContentProcessTerminated: (() -> Void) -> Void
+        var onWebContentProcessTerminated: (@escaping () -> Void) -> Void
         var onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
         var onCapabilitiesChanged: (Capabilities) -> Void
         private var nativePerformanceRecorder: NativePerformanceRecorder?
@@ -304,7 +306,7 @@ struct ViewerWebView: NSViewRepresentable {
             onDownloadStarted: @escaping (URL) -> Void,
             onDownloadFinished: @escaping (URL, RevealDownload) -> Void,
             onDownloadFailed: @escaping (String) -> Void,
-            onWebContentProcessTerminated: @escaping (() -> Void) -> Void,
+            onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
             onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
             onCapabilitiesChanged: @escaping (Capabilities) -> Void
         ) {
@@ -356,7 +358,7 @@ struct ViewerWebView: NSViewRepresentable {
             onDownloadStarted: @escaping (URL) -> Void,
             onDownloadFinished: @escaping (URL, RevealDownload) -> Void,
             onDownloadFailed: @escaping (String) -> Void,
-            onWebContentProcessTerminated: @escaping (() -> Void) -> Void,
+            onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
             onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
             onCapabilitiesChanged: @escaping (Capabilities) -> Void
         ) {

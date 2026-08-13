@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const evaluator = path.join(root, "tools/evaluate-recovery.mjs");
 const harness = path.join(root, "tests/acceptance/recovery.mjs");
+const runner = path.join(root, "tools/run-recovery-matrix.sh");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ghostlight-recovery-evaluator-"));
 const inputPath = path.join(temporary, "matrix.json");
 const outputPath = path.join(temporary, "evaluation.json");
@@ -38,6 +39,7 @@ const validCycle = (scenario, cycle) => ({
     cleaned: stamp(cycle + 4),
   },
   disruption_receipt: {
+    adapter_receipt: true,
     receipt_id: `${scenario}-${cycle}-disruption`,
     scenario,
     target_id: "fixture-target",
@@ -45,6 +47,7 @@ const validCycle = (scenario, cycle) => ({
     completed_at: stamp(cycle + 1),
   },
   recovery_receipt: {
+    adapter_receipt: true,
     receipt_id: `${scenario}-${cycle}-recovery`,
     target_id: "fixture-target",
     status: "applied",
@@ -58,6 +61,7 @@ const validCycle = (scenario, cycle) => ({
     },
   },
   cleanup_receipt: {
+    adapter_receipt: true,
     receipt_id: `${scenario}-${cycle}-cleanup`,
     target_id: "fixture-target",
     status: "applied",
@@ -71,7 +75,8 @@ const validCycle = (scenario, cycle) => ({
 });
 const validMatrix = () => ({
   schema_version: 1,
-  mode: "deterministic",
+  mode: "live",
+  live_adapter: "/opt/ghostlight/recovery-adapter",
   source_sha: sourceSha,
   target_id: "fixture-target",
   cycles_per_scenario: 25,
@@ -106,6 +111,11 @@ try {
   assert.equal(receipt.gates.passed, true);
 
   expectBlocked((matrix) => {
+    matrix.mode = "deterministic";
+  }, /live recovery receipts|deterministic/i);
+  assert.equal(JSON.parse(fs.readFileSync(outputPath, "utf8")).gates.live_receipts, false);
+
+  expectBlocked((matrix) => {
     matrix.scenarios[0].cycles[0].recovery_receipt.completed_at = stamp(18);
   }, /deadline/i);
   expectBlocked((matrix) => {
@@ -130,6 +140,20 @@ try {
   const broadTarget = spawnSync(process.execPath, [harness, inputPath, sourceSha, "all", "deterministic"], { encoding: "utf8" });
   assert.notEqual(broadTarget.status, 0);
   assert.match(broadTarget.stderr || broadTarget.stdout, /target ID/i);
+
+  const harnessWithoutMode = spawnSync(
+    process.execPath,
+    [harness, inputPath, sourceSha, "fixture-target"],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(harnessWithoutMode.status, 0);
+  assert.match(harnessWithoutMode.stderr || harnessWithoutMode.stdout, /usage|mode/i);
+
+  const defaultEnvironment = { ...process.env, GHOSTLIGHT_RECOVERY_OUTPUT_DIR: temporary };
+  delete defaultEnvironment.GHOSTLIGHT_RECOVERY_MODE;
+  const runnerWithoutMode = spawnSync(runner, [], { encoding: "utf8", env: defaultEnvironment });
+  assert.notEqual(runnerWithoutMode.status, 0);
+  assert.match(runnerWithoutMode.stderr || runnerWithoutMode.stdout, /GHOSTLIGHT_RECOVERY_MODE.*required|explicit.*mode/i);
 
   const liveEnvironment = { ...process.env };
   delete liveEnvironment.GHOSTLIGHT_RECOVERY_LIVE_OPT_IN;

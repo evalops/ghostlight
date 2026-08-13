@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-MODE="${GHOSTLIGHT_RECOVERY_MODE:-deterministic}"
+MODE="${GHOSTLIGHT_RECOVERY_MODE:-}"
 OUTPUT_DIR="${GHOSTLIGHT_RECOVERY_OUTPUT_DIR:-$ROOT_DIR/output/recovery}"
 SOURCE_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 TARGET_ID="${GHOSTLIGHT_RECOVERY_TARGET_ID:-deterministic-fixture}"
@@ -12,7 +12,7 @@ RAW_RECEIPT="$OUTPUT_DIR/matrix.json"
 EVALUATION_RECEIPT="$OUTPUT_DIR/evaluation.json"
 
 [[ "$MODE" == deterministic || "$MODE" == live ]] || {
-  printf 'GHOSTLIGHT_RECOVERY_MODE must be deterministic or live\n' >&2
+  printf 'GHOSTLIGHT_RECOVERY_MODE is required and must be deterministic or live\n' >&2
   exit 1
 }
 command -v node >/dev/null 2>&1 || { printf 'Node.js is required\n' >&2; exit 1; }

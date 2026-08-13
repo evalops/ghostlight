@@ -63,6 +63,24 @@ type StreamConnection struct {
 	Capability string    `json:"capability,omitempty"`
 }
 
+type ViewerCredential struct {
+	Type      string    `json:"type"`
+	Name      string    `json:"name,omitempty"`
+	Value     string    `json:"value"`
+	Path      string    `json:"path,omitempty"`
+	Secure    bool      `json:"secure,omitempty"`
+	HTTPOnly  bool      `json:"http_only,omitempty"`
+	SameSite  string    `json:"same_site,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type ViewerBootstrap struct {
+	StreamID         string           `json:"stream_id"`
+	ViewerURL        string           `json:"viewer_url"`
+	ViewerCredential ViewerCredential `json:"viewer_credential"`
+	ExpiresAt        time.Time        `json:"expires_at"`
+}
+
 type WorkspaceShortcut struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`

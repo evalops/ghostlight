@@ -337,13 +337,13 @@ struct ContentView: View {
             ZStack {
                 ViewerWebView(
                     url: streamURL,
-                    username: "ghostlight-\(viewModel.clientID.prefix(12))",
-                    password: viewModel.viewerBootstrap?.viewerPassword,
-                    reloadToken: streamURL.hashValue,
+                    credential: viewModel.viewerBootstrap?.viewerCredential,
+                    reloadToken: streamURL.hashValue ^ (viewModel.viewerBootstrap?.expiresAt.hashValue ?? 0),
                     onNavigationStarted: viewModel.viewerNavigationStarted,
                     onNavigationFinished: viewModel.viewerNavigationFinished,
                     onNavigationFailed: viewModel.viewerNavigationFailed,
-                    onMediaReady: viewModel.viewerMediaReady
+                    onMediaReady: viewModel.viewerMediaReady,
+                    onWebContentProcessTerminated: viewModel.viewerProcessTerminated
                 )
 
                 switch viewModel.surfaceState {

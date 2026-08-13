@@ -24,6 +24,46 @@ enum CommandStatus: Equatable {
     case failed(code: String, message: String)
 }
 
+struct ViewerProcessRecoveryBudget {
+    let maximumAttempts: Int
+    let window: TimeInterval
+    private var attempts: [Date] = []
+
+    init(maximumAttempts: Int = 3, window: TimeInterval = 60) {
+        self.maximumAttempts = maximumAttempts
+        self.window = window
+    }
+
+    mutating func consume(at date: Date) -> Bool {
+        attempts.removeAll { date.timeIntervalSince($0) >= window }
+        guard attempts.count < maximumAttempts else { return false }
+        attempts.append(date)
+        return true
+    }
+
+    mutating func reset() {
+        attempts.removeAll()
+    }
+}
+
+enum StreamHandoff {
+    static func resolve(
+        connection: StreamConnection,
+        redeem: (String) async throws -> ViewerBootstrap
+    ) async throws -> ViewerBootstrap? {
+        guard let capability = connection.capability else { return nil }
+        do {
+            let bootstrap = try await redeem(capability)
+            guard bootstrap.streamID == connection.id else { throw SessionClientError.invalidResponse }
+            return bootstrap
+        } catch let error as SessionClientError where error.statusCode == 404 || error.statusCode == 405 {
+            return nil
+        } catch is DecodingError {
+            return nil
+        }
+    }
+}
+
 enum NativeBrowserAction: CaseIterable, Equatable {
     case focusLocation
     case newTab
@@ -71,7 +111,9 @@ final class SessionViewModel: ObservableObject {
     private var submissionsByReceiptID: [String: CommandSubmission] = [:]
     private var receiptsByID: [String: CommandReceipt] = [:]
     private var failedSubmission: CommandSubmission?
+    private var failedSubmissionIsTerminal = false
     private var preferenceWriteTail: Task<WorkspacePreferences?, Never>?
+    private var viewerProcessRecoveryBudget = ViewerProcessRecoveryBudget()
 
     init(
         client: any SessionServicing = SessionClient(),
@@ -144,6 +186,7 @@ final class SessionViewModel: ObservableObject {
         preferencesError = nil
         commandError = nil
         clearCommandTracking()
+        viewerProcessRecoveryBudget.reset()
 
         let origin: URL
         do {
@@ -174,12 +217,19 @@ final class SessionViewModel: ObservableObject {
                 do {
                     let connection = try await client.createStream(at: origin, apiToken: apiToken, sessionID: browser.id, clientID: clientID)
                     guard owns(runID) else { return }
-                    guard let capability = connection.capability else { throw SessionClientError.invalidResponse }
-                    let bootstrap = try await client.redeemViewerCapability(at: origin, capability: capability, clientID: clientID)
-                    guard owns(runID), bootstrap.streamID == connection.id else { return }
+                    let bootstrap = try await StreamHandoff.resolve(connection: connection) { capability in
+                        try await self.client.redeemViewerCapability(
+                            at: origin,
+                            capability: capability,
+                            clientID: self.clientID
+                        )
+                    }
+                    guard owns(runID) else { return }
                     stream = connection
                     viewerBootstrap = bootstrap
-                    surfaceState = .loadingPage(bootstrap.viewerURL)
+                    // Legacy and rolling old servers have no capability redemption
+                    // endpoint; their stream URL remains the compatible fallback.
+                    surfaceState = .loadingPage(bootstrap?.viewerURL ?? connection.url)
                 } catch {
                     guard owns(runID) else { return }
                     surfaceState = .failed(error.localizedDescription)
@@ -219,6 +269,7 @@ final class SessionViewModel: ObservableObject {
         controlState = .disconnected
         surfaceState = .idle
         clearCommandTracking()
+        viewerProcessRecoveryBudget.reset()
     }
 
     func apply(_ incoming: BrowserSession) {
@@ -291,7 +342,19 @@ final class SessionViewModel: ObservableObject {
 
     func retryFailedCommand() {
         guard let failedSubmission, canControl else { return }
-        submit(failedSubmission)
+        if !failedSubmissionIsTerminal {
+            submit(failedSubmission)
+            return
+        }
+        let failedCommand = failedSubmission.command
+        let retry = BrowserCommand(
+            type: failedCommand.type,
+            tabID: failedCommand.tabID,
+            url: failedCommand.url,
+            attachmentID: failedCommand.attachmentID,
+            expectedRevision: session?.revision ?? failedCommand.expectedRevision
+        )
+        submit(CommandSubmission(idempotencyKey: UUID().uuidString.lowercased(), command: retry))
     }
 
     func navigate() {
@@ -392,11 +455,46 @@ final class SessionViewModel: ObservableObject {
 
     func viewerMediaReady() {
         guard let url = streamURL else { return }
+        viewerProcessRecoveryBudget.reset()
         surfaceState = .mediaReady(url)
     }
 
     func viewerNavigationFailed(_ message: String) {
         surfaceState = .failed(message)
+    }
+
+    func viewerProcessTerminated(reload: @escaping () -> Void) {
+        guard let url = streamURL else { return }
+        guard viewerProcessRecoveryBudget.consume(at: now()) else {
+            surfaceState = .failed("The viewer process stopped repeatedly. Reconnect to continue.")
+            return
+        }
+        surfaceState = .loadingPage(url)
+        guard let session,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else {
+            reload()
+            return
+        }
+        let runID = lifecycleID
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let connection = try await client.createStream(
+                    at: origin, apiToken: apiToken, sessionID: session.id, clientID: clientID
+                )
+                let bootstrap = try await StreamHandoff.resolve(connection: connection) { capability in
+                    try await self.client.redeemViewerCapability(at: origin, capability: capability, clientID: self.clientID)
+                }
+                guard owns(runID) else { return }
+                stream = connection
+                viewerBootstrap = bootstrap
+                surfaceState = .loadingPage(bootstrap?.viewerURL ?? connection.url)
+                if bootstrap == nil { reload() }
+            } catch {
+                guard owns(runID) else { return }
+                surfaceState = .failed("The viewer could not recover: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func resumeOrCreate(at origin: URL, apiToken: String) async throws -> BrowserSession {
@@ -431,6 +529,7 @@ final class SessionViewModel: ObservableObject {
     ) {
         commandError = nil
         failedSubmission = nil
+        failedSubmissionIsTerminal = false
         submissionsByKey[submission.idempotencyKey] = submission
         updateCommandStatus()
         Task { [weak self] in
@@ -448,6 +547,7 @@ final class SessionViewModel: ObservableObject {
             } catch {
                 submissionsByKey.removeValue(forKey: submission.idempotencyKey)
                 failedSubmission = submission
+                failedSubmissionIsTerminal = false
                 commandError = error.localizedDescription
                 commandStatus = .failed(code: "request_failed", message: error.localizedDescription)
             }
@@ -471,7 +571,7 @@ final class SessionViewModel: ObservableObject {
             break
         case .applied:
             submissionsByReceiptID.removeValue(forKey: receipt.id)
-            if failedSubmission?.idempotencyKey == submission?.idempotencyKey { failedSubmission = nil }
+            if failedSubmission?.idempotencyKey == resolvedSubmission?.idempotencyKey { failedSubmission = nil }
             if previousState != .applied,
                resolvedSubmission?.command.type == .navigate,
                let url = receipt.url ?? resolvedSubmission?.command.url {
@@ -479,22 +579,27 @@ final class SessionViewModel: ObservableObject {
             }
         case .failed:
             failedSubmission = submission ?? submissionsByReceiptID[receipt.id]
+            failedSubmissionIsTerminal = true
         }
         updateCommandStatus()
     }
 
     private func updateCommandStatus() {
-        if let failed = receiptsByID.values
-            .filter({ $0.state == .failed })
-            .max(by: { $0.sequence < $1.sequence }) {
+        let pending = submissionsByKey.count + receiptsByID.values.filter { $0.state == .queued }.count
+        if pending > 0 {
+            commandStatus = .pending(pending)
+            return
+        }
+        if let latest = receiptsByID.values
+            .filter({ $0.state != .queued })
+            .max(by: { $0.sequence < $1.sequence }), latest.state == .failed {
             commandStatus = .failed(
-                code: failed.errorCode ?? "command_failed",
-                message: failed.error ?? failed.errorCode ?? "The browser command failed."
+                code: latest.errorCode ?? "command_failed",
+                message: latest.error ?? latest.errorCode ?? "The browser command failed."
             )
             return
         }
-        let pending = submissionsByKey.count + receiptsByID.values.filter { $0.state == .queued }.count
-        commandStatus = pending == 0 ? .idle : .pending(pending)
+        commandStatus = .idle
     }
 
     private func cycleTab(offset: Int) {
@@ -509,17 +614,19 @@ final class SessionViewModel: ObservableObject {
         submissionsByReceiptID.removeAll()
         receiptsByID.removeAll()
         failedSubmission = nil
+        failedSubmissionIsTerminal = false
         commandStatus = .idle
     }
 
     private func loadWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async {
         do {
-            let preferences = try await client.getWorkspacePreferences(
+            var preferences = try await client.getWorkspacePreferences(
                 at: origin,
                 apiToken: apiToken,
                 workspaceID: workspaceID
             )
             guard session?.workspaceID == workspaceID else { return }
+            preferences.recentURLs = WorkspacePreferences.sanitizedRecentURLs(preferences.recentURLs)
             workspacePreferences = preferences
             preferencesError = nil
         } catch is CancellationError {
@@ -530,7 +637,9 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
-    private func persistWorkspacePreferences(_ preferences: WorkspacePreferences) async -> Bool {
+    private func persistWorkspacePreferences(_ input: WorkspacePreferences) async -> Bool {
+        var preferences = input
+        preferences.recentURLs = WorkspacePreferences.sanitizedRecentURLs(preferences.recentURLs)
         guard let session,
               session.workspaceID == preferences.workspaceID,
               let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return false }
@@ -564,12 +673,14 @@ final class SessionViewModel: ObservableObject {
     }
 
     private func recordRecentURL(_ url: String) {
-        guard var preferences = workspacePreferences else { return }
-        preferences.recentURLs.removeAll { $0 == url }
-        preferences.recentURLs.insert(url, at: 0)
+        guard var preferences = workspacePreferences,
+              let safeURL = WorkspacePreferences.safeRecentURL(url) else { return }
+        preferences.recentURLs.removeAll { $0 == safeURL }
+        preferences.recentURLs.insert(safeURL, at: 0)
         preferences.recentURLs = Array(
             preferences.recentURLs.prefix(WorkspacePreferences.maximumRecentURLCount)
         )
+        workspacePreferences = preferences
         Task { [weak self] in
             _ = await self?.persistWorkspacePreferences(preferences)
         }

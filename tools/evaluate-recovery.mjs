@@ -47,6 +47,8 @@ try {
 if (!SOURCE_PATTERN.test(expectedSourceSha)) fail("expected source SHA must be a 40- or 64-character lowercase hexadecimal commit identifier");
 if (matrix.schema_version !== 1) fail("recovery matrix schema_version must be 1");
 if (!new Set(["deterministic", "live"]).has(matrix.mode)) fail("recovery matrix mode must be deterministic or live");
+if (matrix.mode !== "live") fail("only live recovery receipts can be accepted; deterministic evidence is test-only");
+if (typeof matrix.live_adapter !== "string" || !matrix.live_adapter.startsWith("/")) fail("live recovery receipts require an absolute adapter identity");
 if (matrix.source_sha !== expectedSourceSha) fail("matrix source SHA does not match the expected source SHA");
 if (typeof matrix.target_id !== "string" || matrix.target_id.length === 0) fail("matrix target_id is required");
 if (matrix.cycles_per_scenario !== 25) fail("recovery matrix must use exactly 25 cycles per scenario");
@@ -86,14 +88,14 @@ for (const entry of scenarioEntries) {
       fail(`${label} source receipt is malformed or does not match source and target`);
     }
     if (disruption?.scenario !== scenario || disruption?.target_id !== matrix.target_id
-      || disruption?.status !== "applied" || !isTimestamp(disruption?.completed_at)) {
+      || disruption?.adapter_receipt !== true || disruption?.status !== "applied" || !isTimestamp(disruption?.completed_at)) {
       fail(`${label} disruption receipt is malformed or non-terminal`);
     }
     if (recovery?.target_id !== matrix.target_id || recovery?.status !== "applied"
-      || !isTimestamp(recovery?.completed_at) || !isTimestamp(recovery?.deadline_at)) {
+      || recovery?.adapter_receipt !== true || !isTimestamp(recovery?.completed_at) || !isTimestamp(recovery?.deadline_at)) {
       fail(`${label} recovery receipt is malformed or non-terminal`);
     }
-    if (cleanup?.target_id !== matrix.target_id || cleanup?.status !== "applied" || !isTimestamp(cleanup?.completed_at)) {
+    if (cleanup?.target_id !== matrix.target_id || cleanup?.adapter_receipt !== true || cleanup?.status !== "applied" || !isTimestamp(cleanup?.completed_at)) {
       fail(`${label} cleanup receipt is malformed or failed`);
     }
 
@@ -145,6 +147,7 @@ const result = {
   scenario_count: scenarioEntries.length,
   total_cycles: totalCycles,
   gates: {
+    live_receipts: matrix.mode === "live",
     exact_source: matrix.source_sha === expectedSourceSha,
     fixed_matrix: scenarioEntries.length === 6 && totalCycles === 150,
     bounded_deadlines: matrix.recovery_deadline_ms === 15_000,

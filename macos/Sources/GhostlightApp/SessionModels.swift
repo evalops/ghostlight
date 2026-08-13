@@ -87,6 +87,39 @@ public struct WorkspacePreferences: Codable, Equatable, Sendable {
         return true
     }
 
+    static func safeRecentURL(_ value: String) -> String? {
+        guard let components = URLComponents(string: value),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil else { return nil }
+
+        let sensitiveNames: Set<String> = [
+            "accesstoken", "apikey", "auth", "authorization", "code", "cookie",
+            "credential", "idtoken", "key", "password", "passwd", "secret",
+            "session", "sessionid", "signature", "sig", "token",
+            "xamzcredential", "xamzsecuritytoken", "xamzsignature",
+            "xgoogcredential", "xgoogsecuritytoken", "xgoogsignature",
+        ]
+        let normalizedName: (String) -> String = {
+            String($0.lowercased().filter { $0.isLetter || $0.isNumber })
+        }
+        let isSensitiveName: (String) -> Bool = {
+            let name = normalizedName($0)
+            return sensitiveNames.contains(name) || name.hasSuffix("token") || name.hasSuffix("password")
+        }
+        guard !(components.queryItems ?? []).contains(where: { isSensitiveName($0.name) }) else {
+            return nil
+        }
+        return components.url?.absoluteString
+    }
+
+    static func sanitizedRecentURLs(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.compactMap(safeRecentURL).filter { seen.insert($0).inserted }
+    }
+
     enum CodingKeys: String, CodingKey {
         case shortcuts
         case workspaceID = "workspace_id"
@@ -134,13 +167,31 @@ public struct StreamConnection: Codable, Equatable, Sendable, Identifiable {
 public struct ViewerBootstrap: Codable, Equatable, Sendable {
     public let streamID: String
     public let viewerURL: URL
-    public let viewerPassword: String
+    public let viewerCredential: ViewerCredential
     public let expiresAt: Date
 
     enum CodingKeys: String, CodingKey {
         case streamID = "stream_id"
         case viewerURL = "viewer_url"
-        case viewerPassword = "viewer_password"
+        case viewerCredential = "viewer_credential"
+        case expiresAt = "expires_at"
+    }
+}
+
+public struct ViewerCredential: Codable, Equatable, Sendable {
+    public let type: String
+    public let name: String?
+    public let value: String
+    public let path: String?
+    public let secure: Bool?
+    public let httpOnly: Bool?
+    public let sameSite: String?
+    public let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case type, name, value, path, secure
+        case httpOnly = "http_only"
+        case sameSite = "same_site"
         case expiresAt = "expires_at"
     }
 }

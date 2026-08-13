@@ -6,6 +6,7 @@ struct NativePerformanceConfiguration: Equatable {
 
     let outputURL: URL
     let sourceSHA: String
+    let runID: String
     let expectedCodec: String
     let password: String
     let displayName: String
@@ -17,6 +18,8 @@ struct NativePerformanceConfiguration: Equatable {
               !password.isEmpty,
               let sourceSHA = environment["GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA"],
               sourceSHA.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil,
+              let runID = environment["GHOSTLIGHT_NATIVE_PERFORMANCE_RUN_ID"],
+              !runID.isEmpty,
               let expectedCodec = environment["GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC"]?.lowercased(),
               ["vp8", "h264"].contains(expectedCodec) else {
             return nil
@@ -24,6 +27,7 @@ struct NativePerformanceConfiguration: Equatable {
         return NativePerformanceConfiguration(
             outputURL: URL(fileURLWithPath: outputPath),
             sourceSHA: sourceSHA,
+            runID: runID,
             expectedCodec: expectedCodec,
             password: password,
             displayName: environment["GHOSTLIGHT_NATIVE_PERFORMANCE_DISPLAY_NAME"] ?? "Ghostlight Native Performance"
@@ -72,12 +76,43 @@ struct NativePerformanceConfiguration: Equatable {
           };
 
           let frameCallbacks = 0;
+          let nativeInputToPresentReceipts = [];
+          let nativeInputSequence = 0;
+          let markerWasActive = false;
+          const markerCanvas = document.createElement("canvas");
+          markerCanvas.width = 1;
+          markerCanvas.height = 1;
+          const markerContext = markerCanvas.getContext("2d", { willReadFrequently: true });
+          const markerIsActive = (video) => {
+            if (!video.videoWidth || !video.videoHeight) return false;
+            try {
+              markerContext.drawImage(video, 80, 70, 8, 8, 0, 0, 1, 1);
+              const [red, green, blue] = markerContext.getImageData(0, 0, 1, 1).data;
+              return green > 180 && red < 100 && blue < 180;
+            } catch {
+              return false;
+            }
+          };
           const observeVideo = () => {
             const video = document.querySelector("video");
             if (!video || video.__ghostlightPerformanceObserved) return;
             video.__ghostlightPerformanceObserved = true;
-            const callback = () => {
+            const callback = (presentedAt, metadata) => {
               frameCallbacks += 1;
+              const markerActive = markerIsActive(video);
+              if (markerActive && !markerWasActive) {
+                nativeInputSequence += 1;
+                nativeInputToPresentReceipts.push({
+                  success: true,
+                  sequence: nativeInputSequence,
+                  observer: "wkwebview-video-frame-callback",
+                  presented_at: new Date().toISOString(),
+                  media_time_seconds: metadata?.mediaTime ?? null,
+                  presented_frames: metadata?.presentedFrames ?? null,
+                });
+                if (nativeInputToPresentReceipts.length > 100) nativeInputToPresentReceipts.shift();
+              }
+              markerWasActive = markerActive;
               if ("requestVideoFrameCallback" in video) video.requestVideoFrameCallback(callback);
             };
             if ("requestVideoFrameCallback" in video) video.requestVideoFrameCallback(callback);
@@ -127,6 +162,7 @@ struct NativePerformanceConfiguration: Equatable {
               power_efficient_decoder: sums.hasPowerEfficientDecoder ? sums.powerEfficientDecoder : null,
               decoder_implementation: sums.decoderImplementation,
               frame_callbacks: frameCallbacks,
+              native_input_to_present_receipts: nativeInputToPresentReceipts.slice(),
               codec: codec ? { mime_type: codec.mimeType || null, sdp_fmtp_line: codec.sdpFmtpLine || null } : null,
             });
           };
@@ -153,6 +189,7 @@ struct NativePerformanceConfiguration: Equatable {
 final class NativePerformanceRecorder: NSObject, WKScriptMessageHandler {
     private let configuration: NativePerformanceConfiguration
     private var samples: [Any] = []
+    private var nativeInputToPresentReceipts: [Any] = []
 
     init(configuration: NativePerformanceConfiguration) {
         self.configuration = configuration
@@ -164,14 +201,20 @@ final class NativePerformanceRecorder: NSObject, WKScriptMessageHandler {
             return
         }
         samples.append(message.body)
+        if let sample = message.body as? [String: Any],
+           let receipts = sample["native_input_to_present_receipts"] as? [Any] {
+            nativeInputToPresentReceipts = Array(receipts.suffix(100))
+        }
         if samples.count > 360 {
             samples.removeFirst(samples.count - 360)
         }
         let envelope: [String: Any] = [
             "schema_version": 1,
             "source_sha": configuration.sourceSHA,
+            "run_id": configuration.runID,
             "expected_codec": configuration.expectedCodec,
             "observer": "Ghostlight.app WKWebView",
+            "native_input_to_present_receipts": nativeInputToPresentReceipts,
             "samples": samples,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: envelope, options: [.prettyPrinted, .sortedKeys]) else {

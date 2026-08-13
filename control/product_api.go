@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -26,6 +27,17 @@ const (
 	maxSessionAttachmentBytes = 1 << 30
 	maxBridgeCommands         = 100
 )
+
+var credentialBearingURLQueryKeys = map[string]bool{
+	"accesscode": true, "accesstoken": true, "apikey": true, "auth": true,
+	"authorization": true, "code": true, "cookie": true, "credential": true,
+	"idtoken": true, "jwt": true, "key": true, "password": true, "passwd": true,
+	"refreshtoken": true, "secret": true,
+	"session": true, "sessionid": true, "sessiontoken": true, "sig": true,
+	"signature": true, "token": true, "xamzcredential": true,
+	"xamzsecuritytoken": true, "xamzsignature": true, "xgoogcredential": true,
+	"xgoogsecuritytoken": true, "xgoogsignature": true,
+}
 
 func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if h.store == nil {
@@ -97,7 +109,7 @@ func validWorkspacePreferences(value WorkspacePreferences) bool {
 		seen[shortcut.ID] = true
 	}
 	for _, recent := range value.RecentURLs {
-		if !validNavigationURL(recent) {
+		if !validRecentURL(recent) {
 			return false
 		}
 	}
@@ -346,8 +358,13 @@ func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID
 	var input struct {
 		ClientID string `json:"client_id"`
 	}
-	if _, err := decodeStrictJSON(r, &input); err != nil || strings.TrimSpace(input.ClientID) == "" || len(input.ClientID) > 200 {
-		writeError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+	if _, err := decodeStrictJSON(r, &input); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "stream request is invalid")
+		return
+	}
+	input.ClientID = strings.TrimSpace(input.ClientID)
+	if len(input.ClientID) > 200 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "client_id is too long")
 		return
 	}
 	if _, err := h.store.getSession(r.Context(), sessionID); err != nil {
@@ -358,6 +375,9 @@ func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID
 	if err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	if stream.Capability != "" {
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	writeJSON(w, http.StatusCreated, stream)
 }
@@ -380,12 +400,93 @@ func (h *handler) handleViewerCapabilityRedemption(w http.ResponseWriter, r *htt
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"stream_id":       stream.ID,
-		"viewer_url":      stream.URL,
-		"viewer_password": h.config.ViewerPassword,
-		"expires_at":      stream.ExpiresAt,
+	credential, err := h.createViewerCredential(r.Context(), stream)
+	if err != nil {
+		_ = h.store.releaseViewerCapability(r.Context(), capability)
+		writeError(w, http.StatusBadGateway, "viewer_login_failed", "viewer session could not be created")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, ViewerBootstrap{StreamID: stream.ID, ViewerURL: stream.URL, ViewerCredential: credential, ExpiresAt: stream.ExpiresAt})
+}
+
+func (h *handler) createViewerCredential(ctx context.Context, stream StreamConnection) (ViewerCredential, error) {
+	loginURL, err := endpointURL(h.viewerHealthURL, "/api/login")
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	payload, err := json.Marshal(map[string]string{
+		"username": "ghostlight-" + stream.ID,
+		"password": h.config.ViewerPassword,
 	})
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, bytes.NewReader(payload))
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := h.viewerClient.Do(request)
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxJSONBodyBytes+1))
+	if err != nil || len(body) > maxJSONBodyBytes || response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return ViewerCredential{}, errors.New("Neko login failed")
+	}
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "" || cookie.Value == "" {
+			continue
+		}
+		expiresAt := cookie.Expires
+		if expiresAt.IsZero() || expiresAt.After(stream.ExpiresAt) {
+			expiresAt = stream.ExpiresAt
+		}
+		path := cookie.Path
+		if path == "" {
+			path = "/"
+		}
+		return ViewerCredential{
+			Type:      "cookie",
+			Name:      cookie.Name,
+			Value:     cookie.Value,
+			Path:      path,
+			Secure:    cookie.Secure,
+			HTTPOnly:  cookie.HttpOnly,
+			SameSite:  sameSiteName(cookie.SameSite),
+			ExpiresAt: expiresAt,
+		}, nil
+	}
+	return ViewerCredential{}, errors.New("Neko login returned no WebKit-compatible session cookie")
+}
+
+func endpointURL(base, path string) (string, error) {
+	parsed, err := url.Parse(base)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+		return "", errors.New("viewer endpoint is invalid")
+	}
+	parsed.Path = path
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func sameSiteName(value http.SameSite) string {
+	switch value {
+	case http.SameSiteLaxMode:
+		return "lax"
+	case http.SameSiteStrictMode:
+		return "strict"
+	case http.SameSiteNoneMode:
+		return "none"
+	default:
+		return ""
+	}
 }
 
 func (h *handler) handleAttachments(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -652,6 +753,31 @@ func validCommand(command BrowserCommand) bool {
 func validNavigationURL(raw string) bool {
 	parsed, err := url.Parse(raw)
 	return err == nil && parsed.IsAbs() && parsed.Hostname() != "" && parsed.User == nil && parsed.Fragment == "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
+}
+
+func validRecentURL(raw string) bool {
+	if !validNavigationURL(raw) {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for key := range parsed.Query() {
+		normalized := strings.Map(func(character rune) rune {
+			if character >= 'A' && character <= 'Z' {
+				return character + ('a' - 'A')
+			}
+			if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+				return character
+			}
+			return -1
+		}, key)
+		if credentialBearingURLQueryKeys[normalized] || strings.HasSuffix(normalized, "token") || strings.HasSuffix(normalized, "password") {
+			return false
+		}
+	}
+	return true
 }
 
 func validateAttachmentFilename(value string) (string, error) {

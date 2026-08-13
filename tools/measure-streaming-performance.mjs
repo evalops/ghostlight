@@ -1196,6 +1196,7 @@ async function measureCausalMarker(clientPage, inputDriver) {
     return true;
   });
   if (!ready) return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool-persistent-ssh" };
+  const inputAt = new Date().toISOString();
   try {
     await Promise.all([
       inputDriver.send("f8"),
@@ -1205,9 +1206,9 @@ async function measureCausalMarker(clientPage, inputDriver) {
       const state = window.__ghostlightFrameState;
       return state.markerSeenAt - state.inputDispatchAt;
     });
-    return { success: Number.isFinite(latency) && latency >= 0, input_to_present_ms: Number.isFinite(latency) ? latency : null, input_driver: "x11-xdotool-persistent-ssh" };
+    return { success: Number.isFinite(latency) && latency >= 0, input_at: inputAt, input_to_present_ms: Number.isFinite(latency) ? latency : null, input_driver: "x11-xdotool-persistent-ssh" };
   } catch (error) {
-    return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool-persistent-ssh", error: error instanceof Error ? error.message : String(error) };
+    return { success: false, input_at: inputAt, input_to_present_ms: null, input_driver: "x11-xdotool-persistent-ssh", error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1384,7 +1385,7 @@ function controlMetrics(parsed) {
 }
 
 function validateControlReceipt(parsed, sourceSha) {
-  if (!parsed || parsed.status !== "measured" || parsed.gates?.passed !== true) throw new Error("paired control must be a measured receipt with passing gates");
+  if (!parsed || parsed.status !== "observed" || parsed.gates?.passed !== true) throw new Error("paired control must be an observed receipt with passing gates");
   if (parsed.source?.sourceSha !== sourceSha || parsed.source?.sourceTree !== "clean") throw new Error(`paired control source must match clean HEAD ${sourceSha}`);
   if (parsed.image?.reference !== IMAGE) throw new Error(`paired control image must match ${IMAGE}`);
   if (parsed.configuration?.codec !== "vp8" || parsed.diagnostics?.codec?.mime_type?.toLowerCase() !== "video/vp8") throw new Error("paired control must negotiate the frozen VP8 codec");
@@ -1613,6 +1614,7 @@ async function main() {
           GHOSTLIGHT_NATIVE_PERFORMANCE_NEKO_PASSWORD: PASSWORD,
           GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC: CODEC,
           GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA: source.sourceSha,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_RUN_ID: RUN_ID,
           GHOSTLIGHT_NATIVE_PERFORMANCE_TRANSPORT_MODE: USE_SSH_TUNNEL ? "ssh-tcp-smoke" : "direct-lan-udp-required",
           GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT_DIR: join(OUTPUT_DIR, "native"),
           GHOSTLIGHT_NATIVE_PERFORMANCE_PHASE_DIR: OUTPUT_DIR,
@@ -1696,8 +1698,8 @@ async function main() {
     passed: qualityGates.passed && requiredEvidenceGates.passed,
   };
   const result = {
-    schema_version: 1,
-    status: failure || !phaseResults.length || !gates.passed ? "blocked" : "measured",
+    schema_version: 2,
+    status: failure || !phaseResults.length || !gates.passed ? "blocked" : "observed",
     captured_at: new Date().toISOString(),
     run_id: RUN_ID,
     source,
@@ -1773,7 +1775,7 @@ async function main() {
       "The synthetic fixture is launched and driven through Chromium's real X11 input path with xdotool. CDP is disabled by default and optional diagnostics never gate a measurement.",
       "Viewer CPU is attributed to the exact pinned container through timestamped Docker stats sliced to each phase window; host-wide CPU is not substituted.",
       "Process CPU samples are captured at approximately 1 Hz from /proc utime+stime deltas. Chromium, Neko, X-related, and other categories are reported; the software encoder remains in-process within Neko/GStreamer and is not separately attributable.",
-      USE_SSH_TUNNEL ? "SSH TCP forwarding is smoke-only and always produces a blocked receipt; a measured run must use direct LAN and prove selected candidatePair protocol=udp." : "This receipt requires a direct-LAN selected candidatePair protocol=udp in every phase.",
+      USE_SSH_TUNNEL ? "SSH TCP forwarding is smoke-only and always produces a blocked receipt; a valid observation must use direct LAN and prove selected candidatePair protocol=udp." : "This observation requires a direct-LAN selected candidatePair protocol=udp in every phase.",
       CODEC === "h264" ? "The current public pinned viewer image and its software x264 constrained-baseline pipeline were used; no VAAPI claim is made." : "The current public pinned viewer image and frozen software VP8 pipeline were used.",
     ],
     error: failure ? failure.message : null,
@@ -1782,7 +1784,7 @@ async function main() {
   await fs.writeFile(receiptPath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
   await writeArtifactDigest(receiptPath);
   console.log(JSON.stringify(result, null, 2));
-  if (result.status !== "measured") process.exitCode = 1;
+  if (result.status !== "observed") process.exitCode = 1;
 }
 
 async function runSelfTests() {
@@ -1799,7 +1801,7 @@ async function runSelfTests() {
   assert.equal(tunnelExited({ exitCode: null }), false);
   assert.equal(tunnelExited({ exitCode: 1 }), true);
   const controlReceipt = {
-    status: "measured",
+    status: "observed",
     source: { sourceSha: "test-head", sourceTree: "clean" },
     image: { reference: IMAGE },
     gates: { passed: true },
@@ -1821,7 +1823,7 @@ async function runSelfTests() {
     input_to_present_p95_ms: 300,
     udp_transport_selected: true,
   });
-  assert.throws(() => validateControlReceipt({ ...controlReceipt, status: "blocked" }, "test-head"), /measured receipt/);
+  assert.throws(() => validateControlReceipt({ ...controlReceipt, status: "blocked" }, "test-head"), /observed receipt/);
   assert.throws(() => validateControlReceipt(controlReceipt, "other-head"), /match clean HEAD/);
   assert.throws(() => validateControlReceipt({ ...controlReceipt, diagnostics: { ...controlReceipt.diagnostics, udp_transport_selected: false } }, "test-head"), /protocol=udp/);
   assert.throws(() => validateControlReceipt({ ...controlReceipt, diagnostics: { ...controlReceipt.diagnostics, freeze_ratio: 0.01 } }, "test-head"), /absolute media/);

@@ -24,9 +24,9 @@ if (process.argv.includes("--self-test")) {
   process.exit(0);
 }
 
-const [outputPath, sourceSha, targetId, mode = "deterministic"] = process.argv.slice(2);
+const [outputPath, sourceSha, targetId, mode] = process.argv.slice(2);
 if (!outputPath || !sourceSha || !targetId || !new Set(["deterministic", "live"]).has(mode)) {
-  throw new Error("usage: recovery.mjs <output-json> <source-sha> <target-id> [deterministic|live]");
+  throw new Error("usage: recovery.mjs <output-json> <source-sha> <target-id> <deterministic|live>");
 }
 if (!SOURCE_PATTERN.test(sourceSha)) throw new Error("source SHA must be a 40- or 64-character lowercase hexadecimal commit identifier");
 if (!TARGET_PATTERN.test(targetId) || new Set(["all", "default", "global"]).has(targetId.toLowerCase())) {
@@ -117,6 +117,7 @@ const runAction = (action, scenario, cycle, deadlineAt, timeoutMs) => {
   if (receipt.target_id !== targetId || receipt.isolation_receipt !== isolationReceipt) {
     throw new Error(`${action} adapter receipt did not prove target isolation`);
   }
+  receipt.adapter_receipt = true;
   if (action === "recover") receipt.deadline_at = deadlineAt;
   return receipt;
 };
@@ -124,6 +125,7 @@ const runAction = (action, scenario, cycle, deadlineAt, timeoutMs) => {
 const matrix = {
   schema_version: 1,
   mode,
+  live_adapter: mode === "live" ? fs.realpathSync(adapterPath) : null,
   source_sha: sourceSha,
   target_id: targetId,
   cycles_per_scenario: CYCLES,

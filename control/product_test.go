@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -78,6 +80,137 @@ func TestStoreRejectsUnknownSchemaVersion(t *testing.T) {
 	}
 	if _, err := openSQLiteStore(stateDir, attachments, time.Now); err == nil || !strings.Contains(err.Error(), "unsupported state schema version 99") {
 		t.Fatalf("openSQLiteStore() error = %v, want unsupported schema", err)
+	}
+}
+
+func TestSchemaMigrationRollsBackAndRestartsCleanly(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(stateDir, databaseFileName)
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE commands (state TEXT NOT NULL, acknowledged_at TEXT)`,
+		`INSERT INTO commands(state,acknowledged_at) VALUES('ok','2026-08-13T12:00:00Z')`,
+		`CREATE TRIGGER reject_command_migration BEFORE UPDATE ON commands BEGIN SELECT RAISE(ABORT, 'stop migration'); END`,
+		`PRAGMA user_version = 1`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := openSQLiteStore(stateDir, attachments, time.Now); err == nil || !strings.Contains(err.Error(), "stop migration") {
+		t.Fatalf("failed migration error = %v, want injected failure", err)
+	}
+	db, err = sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := commandColumns(t, db)
+	for _, column := range []string{"error_code", "resulting_revision", "completed_at"} {
+		if columns[column] {
+			t.Fatalf("failed migration left column %q behind", column)
+		}
+	}
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("failed migration version = %d, %v; want 1", version, err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER reject_command_migration`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("restart after failed migration: %v", err)
+	}
+	defer store.close()
+	columns = commandColumns(t, store.db)
+	for _, column := range []string{"error_code", "resulting_revision", "completed_at"} {
+		if !columns[column] {
+			t.Fatalf("successful restart is missing column %q", column)
+		}
+	}
+}
+
+func TestSchemaMigrationRepairsPartiallyAppliedVersionOne(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(stateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE commands (state TEXT NOT NULL, acknowledged_at TEXT, error_code TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO commands(state,acknowledged_at) VALUES('ok','2026-08-13T12:00:00Z')`,
+		`PRAGMA user_version = 1`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("repair partially applied migration: %v", err)
+	}
+	defer store.close()
+	columns := commandColumns(t, store.db)
+	for _, column := range []string{"error_code", "resulting_revision", "completed_at"} {
+		if !columns[column] {
+			t.Fatalf("repaired migration is missing column %q", column)
+		}
+	}
+}
+
+func TestSchemaMigrationRepairsVersionZeroCommandsTable(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(stateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE commands (state TEXT NOT NULL, acknowledged_at TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("repair version-zero commands table: %v", err)
+	}
+	defer store.close()
+	columns := commandColumns(t, store.db)
+	for _, column := range []string{"error_code", "resulting_revision", "completed_at"} {
+		if !columns[column] {
+			t.Fatalf("repaired version-zero schema is missing column %q", column)
+		}
 	}
 }
 
@@ -282,6 +415,193 @@ func TestViewerCapabilityIsScopedSingleUseAndHashOnly(t *testing.T) {
 	}
 }
 
+func TestConcurrentViewerHandoffsKeepBothCapabilitiesRedeemable(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	type handoff struct {
+		client string
+		stream StreamConnection
+		err    error
+	}
+	results := make(chan handoff, 2)
+	for _, client := range []string{"first-client", "second-client"} {
+		go func() {
+			stream, err := h.store.createStream(context.Background(), "default", client, h.viewerURL, defaultStreamTTL)
+			results <- handoff{client: client, stream: stream, err: err}
+		}()
+	}
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent handoffs = %v, %v", first.err, second.err)
+	}
+	if first.stream.Capability == second.stream.Capability {
+		t.Fatal("concurrent handoffs reused a capability")
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), first.stream.Capability, first.client); err != nil {
+		t.Fatalf("first capability after second handoff: %v", err)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), second.stream.Capability, second.client); err != nil {
+		t.Fatalf("second capability: %v", err)
+	}
+}
+
+func TestNewHandoffRefreshesActiveStreamLifetimeWithoutChangingItsID(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	first, err := h.store.createStream(t.Context(), "default", "first-client", h.viewerURL, defaultStreamTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(defaultStreamTTL - time.Second)
+	second, err := h.store.createStream(t.Context(), "default", "second-client", h.viewerURL, defaultStreamTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("active stream ID changed from %q to %q", first.ID, second.ID)
+	}
+	if got := second.ExpiresAt.Sub(now); got != defaultStreamTTL {
+		t.Fatalf("refreshed stream lifetime = %s, want %s", got, defaultStreamTTL)
+	}
+	var capabilityExpiry string
+	if err := h.store.db.QueryRow(`SELECT expires_at FROM viewer_capabilities WHERE token_hash=?`, hashSecret(second.Capability)).Scan(&capabilityExpiry); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt, err := parseTime(capabilityExpiry)
+	if err != nil || expiresAt.Sub(now) != time.Minute {
+		t.Fatalf("new capability lifetime = %s, %v; want 1m", expiresAt.Sub(now), err)
+	}
+}
+
+func TestStreamCreationPreservesLegacyAndCapabilityAwareClients(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	legacy := doJSON(t, h, http.MethodPost, "/v1/sessions/default/stream", "", "", nil)
+	var legacyStream StreamConnection
+	decodeRecorder(t, legacy, &legacyStream)
+	if legacy.Code != http.StatusCreated || legacyStream.ID == "" || legacyStream.Capability != "" {
+		t.Fatalf("legacy stream = %d %#v", legacy.Code, legacyStream)
+	}
+
+	modern := doJSON(t, h, http.MethodPost, "/v1/sessions/default/stream", "", "", strings.NewReader(`{"client_id":"modern-client"}`))
+	var modernStream StreamConnection
+	decodeRecorder(t, modern, &modernStream)
+	if modern.Code != http.StatusCreated || modernStream.ID == "" || modernStream.Capability == "" {
+		t.Fatalf("capability-aware stream = %d %#v", modern.Code, modernStream)
+	}
+	if modern.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("capability response Cache-Control = %q", modern.Header().Get("Cache-Control"))
+	}
+}
+
+func TestViewerCapabilityRedeemsToNekoSessionCredentialWithoutPassword(t *testing.T) {
+	cfg := productTestConfig(t.TempDir())
+	var loginPayload struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.String() != "https://viewer.example.test/api/login" {
+			t.Fatalf("Neko login request = %s %s", r.Method, r.URL.String())
+		}
+		if err := json.NewDecoder(r.Body).Decode(&loginPayload); err != nil {
+			t.Fatal(err)
+		}
+		header := make(http.Header)
+		header.Add("Set-Cookie", "NEKO_SESSION=neko-session-token; Path=/; HttpOnly; SameSite=Lax")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"neko-session"}`)),
+			Request:    r,
+		}, nil
+	})}
+	h, err := newHandlerWithConfig(cfg, client, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.store.close() })
+	stream, err := h.store.createStream(t.Context(), "default", "mac-client", h.viewerURL, defaultStreamTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://ghostlight.test/v1/viewer-capabilities/redeem", strings.NewReader(`{"client_id":"mac-client"}`))
+	request.Header.Set("Authorization", "Bearer "+stream.Capability)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("redeem = %d %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("redemption Cache-Control = %q", response.Header().Get("Cache-Control"))
+	}
+	if loginPayload.Password != cfg.ViewerPassword || !strings.HasPrefix(loginPayload.Username, "ghostlight-") {
+		t.Fatalf("Neko login payload = %#v", loginPayload)
+	}
+	if strings.Contains(response.Body.String(), cfg.ViewerPassword) || strings.Contains(response.Body.String(), "viewer_password") {
+		t.Fatalf("redemption exposed global viewer password: %s", response.Body.String())
+	}
+	var bootstrap struct {
+		ViewerCredential struct {
+			Type  string `json:"type"`
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"viewer_credential"`
+	}
+	decodeRecorder(t, response, &bootstrap)
+	if bootstrap.ViewerCredential.Type != "cookie" || bootstrap.ViewerCredential.Name != "NEKO_SESSION" || bootstrap.ViewerCredential.Value != "neko-session-token" {
+		t.Fatalf("viewer credential = %#v", bootstrap.ViewerCredential)
+	}
+}
+
+func TestViewerCapabilityCanRetryAfterViewerLoginFailure(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	stream, err := h.store.createStream(t.Context(), "default", "mac-client", h.viewerURL, defaultStreamTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), stream.Capability, "mac-client"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.releaseViewerCapability(t.Context(), stream.Capability); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), stream.Capability, "mac-client"); err != nil {
+		t.Fatalf("retry redemption after failed viewer login: %v", err)
+	}
+}
+
+func TestExpiredLeaseTerminalizesQueuedReceiptWithoutTakeover(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	lease, err := h.store.acquireLease(t.Context(), "default", "mac-client", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := h.store.getSession(t.Context(), "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(`{"type":"reload"}`))
+	queued, _, err := h.store.createCommand(t.Context(), "default", lease.Token, "expiry-test", hex.EncodeToString(digest[:]), BrowserCommand{Type: "reload", ExpectedRevision: session.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	receipts, err := h.store.recentCommandReceipts(t.Context(), "default", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, receipt := range receipts {
+		if receipt.ID == queued.ID {
+			if receipt.State != "failed" || receipt.ErrorCode != "lease_expired" || receipt.CompletedAt == nil {
+				t.Fatalf("expired receipt = %#v", receipt)
+			}
+			return
+		}
+	}
+	t.Fatal("expired queued receipt was not returned")
+}
+
 func TestWorkspacePreferencesPersistAndRejectUnsafeURLs(t *testing.T) {
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
 	initial := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/preferences", "", "", nil)
@@ -303,6 +623,18 @@ func TestWorkspacePreferencesPersistAndRejectUnsafeURLs(t *testing.T) {
 	unsafe := doJSON(t, h, http.MethodPut, "/v1/workspaces/default/preferences", "", "", strings.NewReader(`{"search_url":"javascript:{query}","shortcuts":[],"recent_urls":[]}`))
 	if unsafe.Code != http.StatusBadRequest {
 		t.Fatalf("unsafe preferences = %d %s", unsafe.Code, unsafe.Body.String())
+	}
+	for _, recent := range []string{
+		"https://user:password@example.test/private",
+		"https://example.test/callback?access_token=secret",
+		"https://example.test/callback?code=authorization-code",
+		"https://example.test/#token=secret",
+	} {
+		body := fmt.Sprintf(`{"search_url":"https://duckduckgo.com/?q={query}","shortcuts":[],"recent_urls":[%q]}`, recent)
+		response := doJSON(t, h, http.MethodPut, "/v1/workspaces/default/preferences", "", "", strings.NewReader(body))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("credential-bearing recent URL %q = %d %s", recent, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -511,4 +843,27 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("mode %s = %o, want %o", path, got, want)
 	}
+}
+
+func commandColumns(t *testing.T, db *sql.DB) map[string]bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(commands)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
 }

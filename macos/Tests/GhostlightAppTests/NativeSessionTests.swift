@@ -389,6 +389,94 @@ final class NativeSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testCredentialBearingNavigationIsNotPersistedAsRecent() async throws {
+        let preferences = WorkspacePreferences(
+            workspaceID: "default",
+            searchURL: WorkspacePreferences.defaultSearchURL,
+            shortcuts: [],
+            recentURLs: ["https://safe.example.test", "https://user:secret@example.test/private"],
+            updatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let applied = Self.receipt(
+            id: "navigate-secret",
+            type: .navigate,
+            state: .applied,
+            url: "https://example.test/callback?access_token=secret"
+        )
+        let service = NativeSessionServiceStub(receipts: [applied], preferences: preferences)
+        let viewModel = try makeControllingViewModel(service: service)
+
+        await viewModel.loadWorkspacePreferences()
+        XCTAssertEqual(viewModel.recentURLs, ["https://safe.example.test"])
+
+        viewModel.navigate(to: "https://example.test/callback?access_token=secret")
+        await service.waitForCommandCount(1)
+        await Task.yield()
+
+        XCTAssertTrue(service.preferenceUpdates.isEmpty)
+        XCTAssertEqual(viewModel.recentURLs, ["https://safe.example.test"])
+    }
+
+    func testViewerProcessRecoveryBudgetIsBoundedAndResetsAfterSuccess() {
+        var budget = ViewerProcessRecoveryBudget(maximumAttempts: 2, window: 30)
+        let start = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertTrue(budget.consume(at: start))
+        XCTAssertTrue(budget.consume(at: start.addingTimeInterval(1)))
+        XCTAssertFalse(budget.consume(at: start.addingTimeInterval(2)))
+
+        budget.reset()
+        XCTAssertTrue(budget.consume(at: start.addingTimeInterval(3)))
+        XCTAssertTrue(budget.consume(at: start.addingTimeInterval(40)))
+    }
+
+    func testStreamHandoffUsesScopedCapabilityAndFallsBackForRollingOldServer() async throws {
+        let connection = StreamConnection(
+            id: "stream-1",
+            url: try XCTUnwrap(URL(string: "https://old-viewer.example.test")),
+            state: "connecting",
+            expiresAt: Date(timeIntervalSince1970: 2_000),
+            capability: "scoped-capability"
+        )
+        let bootstrap = ViewerBootstrap(
+            streamID: "stream-1",
+            viewerURL: try XCTUnwrap(URL(string: "https://scoped-viewer.example.test")),
+            viewerCredential: ViewerCredential(type: "cookie", name: "neko-session", value: "ephemeral-secret", path: "/", secure: false, httpOnly: true, sameSite: "strict", expiresAt: Date(timeIntervalSince1970: 2_000)),
+            expiresAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        let resolved = try await StreamHandoff.resolve(connection: connection) { capability in
+            XCTAssertEqual(capability, "scoped-capability")
+            return bootstrap
+        }
+        XCTAssertEqual(resolved, bootstrap)
+
+        let rollingFallback = try await StreamHandoff.resolve(connection: connection) { _ in
+            throw SessionClientError.server(statusCode: 404, message: nil)
+        }
+        XCTAssertNil(rollingFallback)
+        let oldShapeFallback = try await StreamHandoff.resolve(connection: connection) { _ in
+            throw DecodingError.keyNotFound(
+                ViewerBootstrap.CodingKeys.viewerCredential,
+                .init(codingPath: [], debugDescription: "old server returned viewer_password")
+            )
+        }
+        XCTAssertNil(oldShapeFallback)
+
+        let legacy = StreamConnection(
+            id: "stream-legacy",
+            url: connection.url,
+            state: "ready",
+            expiresAt: connection.expiresAt
+        )
+        let legacyFallback = try await StreamHandoff.resolve(connection: legacy) { _ in
+            XCTFail("Legacy stream must not attempt capability redemption")
+            return bootstrap
+        }
+        XCTAssertNil(legacyFallback)
+    }
+
+    @MainActor
     func testMonotonicSessionApplicationAndFocusedDraftProtection() throws {
         let viewModel = SessionViewModel(defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)), autoConnect: false)
         var initial = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
@@ -469,14 +557,22 @@ final class NativeSessionTests: XCTestCase {
     }
 
     @MainActor
-    func testQueuedReceiptTransitionsToFailedAndRetryReusesSubmission() async throws {
-        let service = NativeSessionServiceStub(receipts: [Self.queuedReceipt, Self.failedReceipt])
+    func testQueuedReceiptTransitionsToFailedAndRetryUsesFreshSubmissionAtCurrentRevision() async throws {
+        let retryApplied = Self.receipt(
+            id: "command-2",
+            sequence: 2,
+            type: .goBack,
+            state: .applied,
+            expectedRevision: 8
+        )
+        let service = NativeSessionServiceStub(receipts: [Self.queuedReceipt, retryApplied])
         let viewModel = try makeControllingViewModel(service: service)
 
         viewModel.perform(.goBack)
         await service.waitForCommandCount(1)
         await Task.yield()
         var event = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
+        event.revision = 8
         event.commandReceipts = [Self.failedReceipt]
         viewModel.apply(event)
 
@@ -487,9 +583,33 @@ final class NativeSessionTests: XCTestCase {
 
         viewModel.retryFailedCommand()
         await service.waitForCommandCount(2)
+        await Task.yield()
         let submissions = service.commandSubmissions
-        XCTAssertEqual(submissions.map(\.idempotencyKey), [submissions[0].idempotencyKey, submissions[0].idempotencyKey])
-        XCTAssertEqual(submissions.map(\.command), [submissions[0].command, submissions[0].command])
+        XCTAssertNotEqual(submissions[0].idempotencyKey, submissions[1].idempotencyKey)
+        XCTAssertEqual(submissions[1].command.expectedRevision, 8)
+        XCTAssertEqual(submissions.map(\.command.type), [.goBack, .goBack])
+        XCTAssertEqual(viewModel.commandStatus, .idle)
+    }
+
+    @MainActor
+    func testLaterAppliedReceiptSupersedesHistoricalFailure() async throws {
+        let laterApplied = Self.receipt(id: "command-2", sequence: 2, type: .goBack, state: .applied)
+        let service = NativeSessionServiceStub(receipts: [Self.queuedReceipt, laterApplied])
+        let viewModel = try makeControllingViewModel(service: service)
+
+        viewModel.perform(.goBack)
+        await service.waitForCommandCount(1)
+        var event = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
+        event.commandReceipts = [Self.failedReceipt]
+        viewModel.apply(event)
+
+        viewModel.retryFailedCommand()
+        await service.waitForCommandCount(2)
+        await Task.yield()
+
+        event.commandReceipts = [Self.failedReceipt, laterApplied]
+        viewModel.apply(event)
+        XCTAssertEqual(viewModel.commandStatus, .idle)
     }
 
     @MainActor
@@ -632,21 +752,23 @@ final class NativeSessionTests: XCTestCase {
 
     private static func receipt(
         id: String,
+        sequence: Int = 1,
         type: BrowserCommandType,
         state: CommandReceiptState,
         url: String? = nil,
+        expectedRevision: Int = 7,
         errorCode: String? = nil,
         error: String? = nil
     ) -> CommandReceipt {
         CommandReceipt(
             id: id,
-            sequence: 1,
+            sequence: sequence,
             sessionID: "session-1",
             type: type,
             url: url,
             tabID: "tab-1",
             attachmentID: nil,
-            expectedRevision: 7,
+            expectedRevision: expectedRevision,
             leaseEpoch: 2,
             state: state,
             errorCode: errorCode,
