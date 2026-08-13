@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import { Socket } from "node:net";
@@ -29,6 +30,8 @@ const PHASE_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS ??
 const WARMUP_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_WARMUP_SECONDS ?? 10);
 const CDP_DIAGNOSTICS = process.env.GHOSTLIGHT_PERFORMANCE_CDP_DIAGNOSTICS === "true";
 const CDP_COMMAND_TIMEOUT_MS = Number(process.env.GHOSTLIGHT_PERFORMANCE_CDP_TIMEOUT_MS ?? 5000);
+const X11_INPUT_TIMEOUT_MS = Number(process.env.GHOSTLIGHT_PERFORMANCE_X11_INPUT_TIMEOUT_MS ?? 5000);
+const MIN_CPU_REDUCTION_PCT = Number(process.env.GHOSTLIGHT_PERFORMANCE_MIN_CPU_REDUCTION_PCT ?? 5);
 const CDP_MODE = process.env.GHOSTLIGHT_PERFORMANCE_CDP_MODE ?? "pipe";
 const OUTPUT_DIR = process.env.GHOSTLIGHT_PERFORMANCE_OUTPUT_DIR ?? join(ROOT_DIR, "output", "playwright", "performance", `run-${Date.now()}`);
 const DISPLAY_NAME = process.env.GHOSTLIGHT_PERFORMANCE_DISPLAY_NAME ?? "Ghostlight Performance";
@@ -54,6 +57,8 @@ if (!Number.isInteger(CPU_USED) || CPU_USED < 0 || CPU_USED > 16) throw new Erro
 if (!Number.isInteger(BITRATE_KBPS) || BITRATE_KBPS < 128) throw new Error("GHOSTLIGHT_PERFORMANCE_BITRATE_KBPS must be at least 128");
 if (!Number.isInteger(PHASE_SECONDS) || PHASE_SECONDS < 5) throw new Error("GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS must be at least 5");
 if (!Number.isInteger(CDP_COMMAND_TIMEOUT_MS) || CDP_COMMAND_TIMEOUT_MS < 100 || CDP_COMMAND_TIMEOUT_MS > 60000) throw new Error("GHOSTLIGHT_PERFORMANCE_CDP_TIMEOUT_MS must be 100..60000");
+if (!Number.isInteger(X11_INPUT_TIMEOUT_MS) || X11_INPUT_TIMEOUT_MS < 100 || X11_INPUT_TIMEOUT_MS > 60000) throw new Error("GHOSTLIGHT_PERFORMANCE_X11_INPUT_TIMEOUT_MS must be 100..60000");
+if (!Number.isFinite(MIN_CPU_REDUCTION_PCT) || MIN_CPU_REDUCTION_PCT < 0 || MIN_CPU_REDUCTION_PCT > 100) throw new Error("GHOSTLIGHT_PERFORMANCE_MIN_CPU_REDUCTION_PCT must be 0..100");
 if (!new Set(["pipe", "tcp"]).has(CDP_MODE)) throw new Error("GHOSTLIGHT_PERFORMANCE_CDP_MODE must be pipe or tcp");
 
 const command = (program, args, options = {}) => execFileSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options });
@@ -315,6 +320,14 @@ function startRemoteCdpBridge(containerId) {
 function stopRemoteCdpBridge(bridge) {
   if (!bridge) return;
   try { remoteCommand(`sudo -n kill ${shellQuote(bridge.bridgePid)}`); } catch { /* bridge may already have exited */ }
+}
+
+function startOptionalCdpBridge(containerId, starter = startRemoteCdpBridge) {
+  try {
+    return { bridge: starter(containerId), error: null };
+  } catch (error) {
+    return { bridge: null, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function startSshTunnel() {
@@ -846,8 +859,7 @@ function x11InputDriverRemoteScript(containerId) {
   return `docker exec --interactive --user neko --env DISPLAY=:99.0 ${shellQuote(containerId)} sh -lc ${shellQuote(x11InputDriverScript())}`;
 }
 
-function startX11InputDriver(containerId) {
-  const worker = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, x11InputDriverRemoteScript(containerId)], { stdio: ["pipe", "pipe", "pipe"] });
+function manageX11InputDriver(worker, timeoutMs = X11_INPUT_TIMEOUT_MS) {
   const pending = [];
   let stdout = "";
   let stderr = "";
@@ -873,29 +885,53 @@ function startX11InputDriver(containerId) {
       if (!new Set(["ping", "f8", "focus-typing"]).has(action)) return Promise.reject(new Error(`unsupported X11 input action: ${action}`));
       if (worker.exitCode !== null) return Promise.reject(new Error(`X11 input driver already exited with code ${worker.exitCode}: ${stderr || "no stderr"}`));
       return new Promise((resolve, reject) => {
-        const request = { action, resolve, reject };
+        let timer;
+        const request = {
+          action,
+          resolve: () => { clearTimeout(timer); resolve(); },
+          reject: (error) => { clearTimeout(timer); reject(error); },
+        };
         pending.push(request);
+        timer = setTimeout(() => {
+          const index = pending.indexOf(request);
+          if (index >= 0) pending.splice(index, 1);
+          request.reject(new Error(`X11 input driver ${action} timed out after ${timeoutMs} ms`));
+          if (worker.exitCode === null) worker.kill("SIGTERM");
+        }, timeoutMs);
         worker.stdin.write(`${action}\n`, (error) => {
           if (!error) return;
           const index = pending.indexOf(request);
           if (index >= 0) pending.splice(index, 1);
-          reject(error);
+          request.reject(error);
         });
       });
     },
   };
 }
 
+function startX11InputDriver(containerId) {
+  const worker = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, x11InputDriverRemoteScript(containerId)], { stdio: ["pipe", "pipe", "pipe"] });
+  return manageX11InputDriver(worker);
+}
+
+function waitForWorkerClose(worker, timeoutMs) {
+  if (worker.exitCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (exited) => {
+      clearTimeout(timer);
+      worker.removeListener("close", onClose);
+      resolve(exited);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    worker.once("close", onClose);
+  });
+}
+
 async function stopX11InputDriver(driver) {
   if (!driver) return;
   if (driver.worker.exitCode === null) driver.worker.stdin.end();
-  await Promise.race([
-    new Promise((resolve) => {
-      if (driver.worker.exitCode !== null) resolve();
-      else driver.worker.once("close", resolve);
-    }),
-    sleep(3000),
-  ]);
+  await waitForWorkerClose(driver.worker, 3000);
   if (driver.worker.exitCode === null) driver.worker.kill("SIGTERM");
 }
 
@@ -923,14 +959,12 @@ function startRemoteX11Loop(containerId, phase, body) {
 async function stopRemoteX11Loop(containerId, workload) {
   if (!workload) return;
   try { runX11(containerId, `rm -f -- ${shellQuote(workload.marker)}`); } catch { /* cleanup continues below */ }
-  await Promise.race([
-    new Promise((resolve) => {
-      if (workload.worker.exitCode !== null) resolve();
-      else workload.worker.once("close", resolve);
-    }),
-    sleep(3000),
-  ]);
-  if (workload.worker.exitCode === null) workload.worker.kill("SIGTERM");
+  const exited = await waitForWorkerClose(workload.worker, 3000);
+  if (!exited) {
+    workload.worker.kill("SIGTERM");
+    throw new Error(`X11 ${workload.marker} workload did not stop within 3000 ms`);
+  }
+  if (workload.worker.exitCode !== 0) throw new Error(`X11 ${workload.marker} workload exited with code ${workload.worker.exitCode}`);
   if (workload.getStderr()) throw new Error(`X11 ${workload.marker} workload failed: ${workload.getStderr()}`);
 }
 
@@ -1287,13 +1321,28 @@ async function savePhaseScreenshot(page, phase) {
 }
 
 function controlMetrics(parsed) {
-  return parsed.aggregate ?? parsed.diagnostics ?? parsed;
+  if (parsed.aggregate) return parsed.aggregate;
+  if (parsed.diagnostics) return { ...parsed.diagnostics, viewer_cpu_median_pct: parsed.viewer_cpu_median_pct ?? parsed.diagnostics.viewer_cpu_median_pct ?? null };
+  return parsed;
 }
 
-async function readControl() {
+function validateControlReceipt(parsed, sourceSha) {
+  if (!parsed || parsed.status !== "measured" || parsed.gates?.passed !== true) throw new Error("paired control must be a measured receipt with passing gates");
+  if (parsed.source?.sourceSha !== sourceSha || parsed.source?.sourceTree !== "clean") throw new Error(`paired control source must match clean HEAD ${sourceSha}`);
+  if (parsed.image?.reference !== IMAGE) throw new Error(`paired control image must match ${IMAGE}`);
+  if (parsed.configuration?.resolution !== "1920x1080" || parsed.configuration?.target_fps !== 25 || parsed.configuration?.cpu_used !== 4 || parsed.configuration?.use_damage !== false || parsed.configuration?.bitrate_kbps !== BITRATE_KBPS) {
+    throw new Error("paired control must use the frozen 1920x1080@25 VP8 cpu-used=4 use-damage=false configuration");
+  }
+  if (parsed.diagnostics?.udp_transport_selected !== true || parsed.phases?.length !== 4 || parsed.phases.some((phase) => phase.selected_ice_pair?.protocol?.toLowerCase() !== "udp")) {
+    throw new Error("paired control must prove selected candidatePair protocol=udp in all four phases");
+  }
+  return controlMetrics(parsed);
+}
+
+async function readControl(sourceSha) {
   if (!CONTROL_JSON) return null;
   const parsed = JSON.parse(await fs.readFile(CONTROL_JSON, "utf8"));
-  return controlMetrics(parsed);
+  return validateControlReceipt(parsed, sourceSha);
 }
 
 function buildGates(aggregate, control) {
@@ -1302,6 +1351,8 @@ function buildGates(aggregate, control) {
   const controlFreeze = control?.freeze_ratio ?? aggregate.freeze_ratio;
   const controlInputP95 = control?.input_to_present_p95_ms ?? aggregate.input_to_present_p95_ms;
   const inputRatio = controlInputP95 > 0 && aggregate.input_to_present_p95_ms !== null ? aggregate.input_to_present_p95_ms / controlInputP95 : control ? null : 1;
+  const controlCpu = control?.viewer_cpu_median_pct ?? null;
+  const cpuReductionPct = controlCpu > 0 && aggregate.viewer_cpu_median_pct !== null ? ((controlCpu - aggregate.viewer_cpu_median_pct) / controlCpu) * 100 : control ? null : 0;
   return {
     active_media: aggregate.active_media === 1 ? 1 : 0,
     actual_to_target_fps_ratio: aggregate.actual_to_target_fps_ratio,
@@ -1309,12 +1360,15 @@ function buildGates(aggregate, control) {
     freeze_ratio_delta: nonNegativeDelta(aggregate.freeze_ratio, controlFreeze),
     visual_event_success_rate: aggregate.visual_event_success_rate,
     input_to_present_p95_control_ratio: inputRatio,
+    viewer_cpu_reduction_pct: cpuReductionPct,
+    minimum_cpu_reduction_pct: control ? MIN_CPU_REDUCTION_PCT : null,
     passed: aggregate.active_media === 1
       && aggregate.actual_to_target_fps_ratio !== null && aggregate.actual_to_target_fps_ratio >= 0.90
       && (control ? aggregate.dropped_frame_ratio !== null && controlDropped !== null && aggregate.dropped_frame_ratio <= controlDropped : true)
       && (control ? aggregate.freeze_ratio !== null && controlFreeze !== null && aggregate.freeze_ratio <= controlFreeze : true)
       && aggregate.visual_event_success_rate !== null && aggregate.visual_event_success_rate >= 0.99
-      && inputRatio !== null && inputRatio <= 1,
+      && inputRatio !== null && inputRatio <= 1
+      && (control ? cpuReductionPct !== null && cpuReductionPct >= MIN_CPU_REDUCTION_PCT : true),
   };
 }
 
@@ -1367,6 +1421,7 @@ async function main() {
     bitrate_kbps: BITRATE_KBPS,
     warmup_seconds: WARMUP_SECONDS,
     phase_seconds: PHASE_SECONDS,
+    minimum_cpu_reduction_pct: MIN_CPU_REDUCTION_PCT,
   }, null, 2)}\n`, { mode: 0o600 });
 
   let remote;
@@ -1388,7 +1443,6 @@ async function main() {
     await writeRemoteFiles();
     remoteProvisioned = true;
     remote = await startRemote();
-    if (CDP_DIAGNOSTICS) cdpBridge = startRemoteCdpBridge(remote.containerId);
     tunnel = startSshTunnel();
     await waitForSshTunnel(tunnel);
     processStart = await processSnapshot(remote.containerId, "start");
@@ -1414,7 +1468,12 @@ async function main() {
     await installFrameObserver(clientPage);
 
     if (CDP_DIAGNOSTICS) {
-      try {
+      const bridgeStart = startOptionalCdpBridge(remote.containerId);
+      cdpBridge = bridgeStart.bridge;
+      if (bridgeStart.error) {
+        cdpDiagnostics = { enabled: true, status: "unavailable", target: null, error: bridgeStart.error };
+        await fs.writeFile(join(OUTPUT_DIR, "remote-cdp-error.txt"), `${cdpDiagnostics.error}\n`, { mode: 0o600 });
+      } else try {
         if (CDP_MODE === "tcp") await waitForHTTP(`${CDP_URL}/json/version`, 10000, tunnel);
         const remoteTarget = await connectRemoteCdpPage();
         remotePage = remoteTarget.page;
@@ -1472,7 +1531,7 @@ async function main() {
     await fs.writeFile(join(OUTPUT_DIR, `phase-${phase.phase}.json`), `${JSON.stringify(phase, null, 2)}\n`, { mode: 0o600 });
   }
   const aggregate = aggregatePhases(phaseResults);
-  const control = await readControl().catch((error) => { failure ??= error; return null; });
+  const control = await readControl(source.sourceSha).catch((error) => { failure ??= error; return null; });
   const gates = buildGates(aggregate, control);
   const result = {
     schema_version: 1,
@@ -1489,6 +1548,7 @@ async function main() {
       use_damage: USE_DAMAGE,
       phase_seconds: PHASE_SECONDS,
       warmup_seconds: WARMUP_SECONDS,
+      minimum_cpu_reduction_pct: MIN_CPU_REDUCTION_PCT,
       phases: ["static-gmail", "scrolling", "typing", "animation"],
     },
     viewer_cpu_median_pct: aggregate.viewer_cpu_median_pct,
@@ -1557,7 +1617,7 @@ async function main() {
   if (result.status !== "measured") process.exitCode = 1;
 }
 
-function runSelfTests() {
+async function runSelfTests() {
   assert.equal(CDP_DIAGNOSTICS, false);
   assert.match(chromiumConfig(), new RegExp(REMOTE_FIXTURE_URL.replaceAll(".", "\\.")));
   assert.doesNotMatch(chromiumConfig(), /remote-debugging/);
@@ -1570,10 +1630,42 @@ function runSelfTests() {
   assert.equal(tunnelExited(null), false);
   assert.equal(tunnelExited({ exitCode: null }), false);
   assert.equal(tunnelExited({ exitCode: 1 }), true);
-  assert.deepEqual(controlMetrics({ diagnostics: { dropped_frame_ratio: 0.01, freeze_ratio: 0.02, input_to_present_p95_ms: 300 } }), {
+  const controlReceipt = {
+    status: "measured",
+    source: { sourceSha: "test-head", sourceTree: "clean" },
+    image: { reference: IMAGE },
+    configuration: { resolution: "1920x1080", target_fps: 25, cpu_used: 4, use_damage: false, bitrate_kbps: BITRATE_KBPS },
+    gates: { passed: true },
+    viewer_cpu_median_pct: 100,
+    diagnostics: { dropped_frame_ratio: 0.01, freeze_ratio: 0.02, input_to_present_p95_ms: 300, udp_transport_selected: true },
+    phases: Array.from({ length: 4 }, () => ({ selected_ice_pair: { protocol: "udp" } })),
+  };
+  assert.deepEqual(validateControlReceipt(controlReceipt, "test-head"), {
+    viewer_cpu_median_pct: 100,
     dropped_frame_ratio: 0.01,
     freeze_ratio: 0.02,
     input_to_present_p95_ms: 300,
+    udp_transport_selected: true,
+  });
+  assert.throws(() => validateControlReceipt({ ...controlReceipt, status: "blocked" }, "test-head"), /measured receipt/);
+  assert.throws(() => validateControlReceipt(controlReceipt, "other-head"), /match clean HEAD/);
+  assert.throws(() => validateControlReceipt({ ...controlReceipt, diagnostics: { ...controlReceipt.diagnostics, udp_transport_selected: false } }, "test-head"), /protocol=udp/);
+
+  const gateAggregate = { active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0.01, freeze_ratio: 0.02, visual_event_success_rate: 1, input_to_present_p95_ms: 300, viewer_cpu_median_pct: 101 };
+  assert.equal(buildGates(gateAggregate, validateControlReceipt(controlReceipt, "test-head")).passed, false);
+  assert.equal(buildGates({ ...gateAggregate, viewer_cpu_median_pct: 94 }, validateControlReceipt(controlReceipt, "test-head")).passed, true);
+
+  const silentWorker = new EventEmitter();
+  silentWorker.exitCode = null;
+  silentWorker.stdout = new EventEmitter();
+  silentWorker.stderr = new EventEmitter();
+  silentWorker.stdin = { write: (_value, callback) => callback?.(), end: () => {} };
+  silentWorker.kill = () => { silentWorker.exitCode = 143; queueMicrotask(() => silentWorker.emit("close", 143)); };
+  await assert.rejects(manageX11InputDriver(silentWorker, 10).send("ping"), /timed out after 10 ms/);
+
+  assert.deepEqual(startOptionalCdpBridge("viewer", () => { throw new Error("diagnostic bridge unavailable"); }), {
+    bridge: null,
+    error: "diagnostic bridge unavailable",
   });
 
   const samples = [
@@ -1601,12 +1693,10 @@ function runSelfTests() {
 }
 
 if (process.argv.includes("--self-test")) {
-  try {
-    runSelfTests();
-  } catch (error) {
+  runSelfTests().catch((error) => {
     console.error(error instanceof Error ? error.stack || error.message : String(error));
     process.exitCode = 1;
-  }
+  });
 } else {
   main().catch(async (error) => {
     const message = error instanceof Error ? error.stack || error.message : String(error);
