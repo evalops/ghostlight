@@ -12,10 +12,10 @@ output="$(printf '%s\n' \
   | awk -v captured_at="$captured_at" -v app_pid=100 -f "$ROOT_DIR/tools/native-performance-processes.awk")"
 
 [[ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" == 3 ]]
-printf '%s\n' "$output" | rg -q $'\t100\t1\t8.0\t102400\tapp\t100\t'
-printf '%s\n' "$output" | rg -q $'\t200\t100\t4.0\t204800\tapp-owned-webkit-process\t100\t'
-printf '%s\n' "$output" | rg -q $'\t201\t200\t2.0\t102400\tapp-owned-webkit-process\t100\t'
-if printf '%s\n' "$output" | rg -q $'\t300\t'; then
+printf '%s\n' "$output" | grep -Fq $'\t100\t1\t8.0\t102400\tapp\t100\t'
+printf '%s\n' "$output" | grep -Fq $'\t200\t100\t4.0\t204800\tapp-owned-webkit-process\t100\t'
+printf '%s\n' "$output" | grep -Fq $'\t201\t200\t2.0\t102400\tapp-owned-webkit-process\t100\t'
+if printf '%s\n' "$output" | grep -Fq $'\t300\t'; then
   printf 'unowned WebKit process was attributed to GhostlightApp\n' >&2
   exit 1
 fi
