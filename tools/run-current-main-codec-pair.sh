@@ -25,7 +25,10 @@ macos/package-app.sh >/dev/null
 
 FIREWALL_BEFORE="$OUTPUT_ROOT/firewall-before.txt"
 FIREWALL_AFTER="$OUTPUT_ROOT/firewall-after.txt"
+RUN_STATUS_FILE="$OUTPUT_ROOT/run-exit-statuses.tsv"
 ssh -o BatchMode=yes "$REMOTE" 'sudo -n ufw status numbered' >"$FIREWALL_BEFORE"
+: >"$RUN_STATUS_FILE"
+chmod 600 "$RUN_STATUS_FILE"
 RULES=()
 cleanup_pair() {
   for rule in "${RULES[@]}"; do
@@ -69,6 +72,16 @@ run_one() {
   node "$ROOT_DIR/tools/measure-streaming-performance.mjs" >"$output/harness.stdout" 2>"$output/harness.stderr"
 }
 
+run_recorded() {
+  local pair="$1" codec="$2" port="$3" status
+  if run_one "$pair" "$codec" "$port"; then
+    status=0
+  else
+    status=$?
+  fi
+  printf 'pair-%s\t%s\t%s\n' "$pair" "$codec" "$status" >>"$RUN_STATUS_FILE"
+}
+
 for offset in 0 10 20 30 40 50; do
   viewer_port=$((BASE_PORT + offset))
   webrtc_port=$((viewer_port + 1))
@@ -76,12 +89,12 @@ for offset in 0 10 20 30 40 50; do
   add_rule "allow in on eth0 proto udp from $MAC_ADDRESS to any port $webrtc_port comment ghostlight-codec-pair"
 done
 
-run_one 1 vp8 "$BASE_PORT"
-run_one 1 h264 "$((BASE_PORT + 10))"
-run_one 2 h264 "$((BASE_PORT + 20))"
-run_one 2 vp8 "$((BASE_PORT + 30))"
-run_one 3 vp8 "$((BASE_PORT + 40))"
-run_one 3 h264 "$((BASE_PORT + 50))"
+run_recorded 1 vp8 "$BASE_PORT"
+run_recorded 1 h264 "$((BASE_PORT + 10))"
+run_recorded 2 h264 "$((BASE_PORT + 20))"
+run_recorded 2 vp8 "$((BASE_PORT + 30))"
+run_recorded 3 vp8 "$((BASE_PORT + 40))"
+run_recorded 3 h264 "$((BASE_PORT + 50))"
 
 set +e
 node "$ROOT_DIR/tools/evaluate-codec-pair.mjs" "$OUTPUT_ROOT" "$OUTPUT_ROOT/result.json"
