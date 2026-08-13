@@ -1,4 +1,10 @@
-# Ghostlight
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/ghostlight-logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/ghostlight-logo.png">
+    <img alt="Ghostlight" src="docs/assets/ghostlight-logo.png" width="560">
+  </picture>
+</p>
 
 Ghostlight runs a persistent Chromium profile on Linux and streams the browser to a native macOS client over WebRTC.
 
