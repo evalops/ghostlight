@@ -24,6 +24,8 @@ final class SessionClientTests: XCTestCase {
         XCTAssertTrue(configuration?.userScript.contains("TrackedPeerConnection") == true)
         XCTAssertTrue(configuration?.userScript.contains("p'ass") == true)
         XCTAssertTrue(configuration?.userScript.contains("if (peers.length === 0) connect();") == true)
+        XCTAssertTrue(configuration?.userScript.contains("totalFreezesDuration") == true)
+        XCTAssertTrue(configuration?.userScript.contains("decoderImplementation") == true)
         XCTAssertFalse(configuration?.userScript.contains("if (!document.querySelector(\"video\")) connect();") == true)
     }
 

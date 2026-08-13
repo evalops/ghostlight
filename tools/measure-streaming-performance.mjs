@@ -1047,18 +1047,25 @@ function statsSnapshot(reports) {
     jitterBufferDelay: result.jitterBufferDelay + (entry.jitterBufferDelay ?? 0),
     jitterBufferEmittedCount: result.jitterBufferEmittedCount + (entry.jitterBufferEmittedCount ?? 0),
     totalDecodeTime: result.totalDecodeTime + (entry.totalDecodeTime ?? 0),
+    freezeCount: result.freezeCount + (entry.freezeCount ?? 0),
+    totalFreezesDuration: result.totalFreezesDuration + (entry.totalFreezesDuration ?? 0),
+    hasFreezeStatsValue: result.hasFreezeStatsValue || (typeof entry.freezeCount === "number" && typeof entry.totalFreezesDuration === "number"),
+    pauseCount: result.pauseCount + (entry.pauseCount ?? 0),
+    totalPausesDuration: result.totalPausesDuration + (entry.totalPausesDuration ?? 0),
     framesPerSecond: Math.max(result.framesPerSecond, entry.framesPerSecond ?? 0),
     frameWidth: Math.max(result.frameWidth, entry.frameWidth ?? 0),
     frameHeight: Math.max(result.frameHeight, entry.frameHeight ?? 0),
     jitter: Math.max(result.jitter, entry.jitter ?? 0),
     powerEfficientDecoder: result.powerEfficientDecoder || entry.powerEfficientDecoder === true,
     hasPowerEfficientDecoderValue: result.hasPowerEfficientDecoderValue || typeof entry.powerEfficientDecoder === "boolean",
+    decoderImplementations: [...result.decoderImplementations, entry.decoderImplementation].filter(Boolean),
     codecIds: [...result.codecIds, entry.codecId].filter(Boolean),
   }), {
     bytesReceived: 0, framesDecoded: 0, framesDropped: 0, packetsReceived: 0, packetsLost: 0,
     nackCount: 0, pliCount: 0, jitterBufferDelay: 0, jitterBufferEmittedCount: 0, totalDecodeTime: 0,
+    freezeCount: 0, totalFreezesDuration: 0, hasFreezeStatsValue: false, pauseCount: 0, totalPausesDuration: 0,
     framesPerSecond: 0, frameWidth: 0, frameHeight: 0, jitter: 0, powerEfficientDecoder: false,
-    hasPowerEfficientDecoderValue: false, codecIds: [],
+    hasPowerEfficientDecoderValue: false, decoderImplementations: [], codecIds: [],
   });
   const selectedCodec = totals.codecIds.map((id) => codecs.get(id)).find(Boolean) ?? null;
   return {
@@ -1073,6 +1080,8 @@ function statsSnapshot(reports) {
     frame_width: totals.frameWidth || null,
     frame_height: totals.frameHeight || null,
     power_efficient_decoder: totals.hasPowerEfficientDecoderValue ? totals.powerEfficientDecoder : null,
+    freeze_stats_available: totals.hasFreezeStatsValue,
+    decoder_implementation: totals.decoderImplementations[0] ?? null,
     codec: selectedCodec ? {
       id: selectedCodec.id,
       mime_type: selectedCodec.mimeType ?? null,
@@ -1160,8 +1169,19 @@ async function resetFrameState(page) {
   });
 }
 
+async function resetMarkerState(page) {
+  await page.evaluate(() => {
+    const state = window.__ghostlightFrameState;
+    if (!state) return;
+    state.markerSeenAt = 0;
+    state.markerClearSeenAt = 0;
+    state.markerLastVisible = false;
+    state.markerArmed = false;
+  });
+}
+
 async function resetRemoteMarker(clientPage) {
-  await resetFrameState(clientPage);
+  await resetMarkerState(clientPage);
   await clientPage.waitForFunction(() => (window.__ghostlightFrameState?.markerClearSeenAt ?? 0) > 0, null, { timeout: 2500 }).catch(() => {});
 }
 
@@ -1212,16 +1232,13 @@ async function startRemoteWorkload(containerId, inputDriver, phase) {
   return async () => {};
 }
 
-function framePhaseMetrics(frameState, durationSeconds) {
+function framePhaseMetrics(frameState) {
   const samples = frameState.samples ?? [];
   const intervals = samples.slice(1).map((sample, index) => sample.now - samples[index].now).filter((value) => Number.isFinite(value) && value > 0);
-  const freezeThreshold = 1500 / TARGET_FPS;
-  const freezeEvents = intervals.filter((value) => value > freezeThreshold).length;
   return {
     frame_sample_count: samples.length,
     frame_intervals_ms: intervals,
-    freeze_events: freezeEvents,
-    freeze_ratio: ratio(freezeEvents, Math.max(1, intervals.length)),
+    frame_interval_stalls_over_60ms: intervals.filter((value) => value > 60).length,
     frame_width: samples.at(-1)?.width ?? null,
     frame_height: samples.at(-1)?.height ?? null,
   };
@@ -1230,6 +1247,7 @@ function framePhaseMetrics(frameState, durationSeconds) {
 async function runPhase(clientPage, containerId, inputDriver, phase) {
   await navigateRemoteFixture(containerId, phase);
   await clientPage.waitForTimeout(WARMUP_SECONDS * 1000);
+  await resetFrameState(clientPage);
   await resetRemoteMarker(clientPage);
   const startStats = await collectClientStats(clientPage);
   const startTime = Date.now();
@@ -1253,9 +1271,17 @@ async function runPhase(clientPage, containerId, inputDriver, phase) {
   const receivedBytes = Math.max(0, endStats.bytesReceived - startStats.bytesReceived);
   const packetsReceived = Math.max(0, endStats.packetsReceived - startStats.packetsReceived);
   const packetsLost = Math.max(0, endStats.packetsLost - startStats.packetsLost);
+  const decodeSeconds = Math.max(0, endStats.totalDecodeTime - startStats.totalDecodeTime);
+  const jitterBufferDelaySeconds = Math.max(0, endStats.jitterBufferDelay - startStats.jitterBufferDelay);
+  const jitterBufferEmittedCount = Math.max(0, endStats.jitterBufferEmittedCount - startStats.jitterBufferEmittedCount);
   const markerLatencies = markerReceipts.map((receipt) => receipt.input_to_present_ms).filter((value) => Number.isFinite(value));
   const frameMetrics = await clientPage.evaluate(() => window.__ghostlightFrameState ? structuredClone(window.__ghostlightFrameState) : { samples: [] });
-  const frameSummary = framePhaseMetrics(frameMetrics, elapsedSeconds);
+  const frameSummary = framePhaseMetrics(frameMetrics);
+  const freezeStatsAvailable = startStats.freeze_stats_available && endStats.freeze_stats_available;
+  const freezeEvents = freezeStatsAvailable ? Math.max(0, endStats.freezeCount - startStats.freezeCount) : null;
+  const freezeDurationSeconds = freezeStatsAvailable ? Math.max(0, endStats.totalFreezesDuration - startStats.totalFreezesDuration) : null;
+  const pauseEvents = Math.max(0, endStats.pauseCount - startStats.pauseCount);
+  const pauseDurationSeconds = Math.max(0, endStats.totalPausesDuration - startStats.totalPausesDuration);
   return {
     phase,
     phase_start: new Date(startTime).toISOString(),
@@ -1277,12 +1303,13 @@ async function runPhase(clientPage, containerId, inputDriver, phase) {
     pli_count: Math.max(0, endStats.pliCount - startStats.pliCount),
     current_rtt_ms: endStats.current_rtt_ms,
     jitter_ms: endStats.jitter_ms,
-    mean_decode_ms: endStats.mean_decode_ms,
-    mean_processing_delay_ms: endStats.mean_processing_delay_ms,
+    mean_decode_ms: ratio(decodeSeconds * 1000, decodedFrames),
+    mean_processing_delay_ms: ratio(jitterBufferDelaySeconds * 1000, jitterBufferEmittedCount),
     frame_width: endStats.frame_width ?? frameSummary.frame_width,
     frame_height: endStats.frame_height ?? frameSummary.frame_height,
     udp_transport_selected: endStats.udp_transport_selected,
     power_efficient_decoder: endStats.power_efficient_decoder,
+    decoder_implementation: endStats.decoder_implementation,
     codec: endStats.codec,
     selected_ice_pair: endStats.selected_ice_pair,
     visual_event_attempts: markerReceipts.length,
@@ -1291,9 +1318,14 @@ async function runPhase(clientPage, containerId, inputDriver, phase) {
     input_to_present_median_ms: median(markerLatencies),
     input_to_present_p95_ms: percentile(markerLatencies, 0.95),
     input_to_present_receipts: markerReceipts,
-    freeze_events: frameSummary.freeze_events,
-    freeze_ratio: frameSummary.freeze_ratio,
+    freeze_events: freezeEvents,
+    freeze_duration_seconds: freezeDurationSeconds,
+    freeze_ratio: freezeStatsAvailable ? ratio(freezeDurationSeconds, elapsedSeconds) : null,
+    freeze_stats_available: freezeStatsAvailable,
+    pause_events: pauseEvents,
+    pause_duration_seconds: pauseDurationSeconds,
     frame_sample_count: frameSummary.frame_sample_count,
+    frame_interval_stalls_over_60ms: frameSummary.frame_interval_stalls_over_60ms,
     resource_sample_count: 0,
     resource_sample_start: null,
     resource_sample_end: null,
@@ -1316,6 +1348,9 @@ function aggregatePhases(phases) {
   aggregate.actual_to_target_fps_ratio = median(phases.map((phase) => phase.actual_to_target_fps_ratio));
   aggregate.visual_event_success_rate = ratio(phases.reduce((sum, phase) => sum + phase.visual_event_successes, 0), phases.reduce((sum, phase) => sum + phase.visual_event_attempts, 0));
   aggregate.freeze_ratio = mean(phases.map((phase) => phase.freeze_ratio));
+  aggregate.freeze_events = phases.every((phase) => Number.isFinite(phase.freeze_events)) ? phases.reduce((sum, phase) => sum + phase.freeze_events, 0) : null;
+  aggregate.freeze_duration_seconds = phases.every((phase) => Number.isFinite(phase.freeze_duration_seconds)) ? phases.reduce((sum, phase) => sum + phase.freeze_duration_seconds, 0) : null;
+  aggregate.freeze_stats_available = phases.length > 0 && phases.every((phase) => phase.freeze_stats_available === true);
   aggregate.dropped_frame_ratio = mean(phases.map((phase) => phase.dropped_frame_ratio));
   aggregate.viewer_cpu_median_pct = median(phases.map((phase) => phase.viewer_cpu_median_pct));
   aggregate.viewer_cpu_p95_pct = percentile(phases.map((phase) => phase.viewer_cpu_p95_pct), 0.95);
@@ -1331,6 +1366,7 @@ function aggregatePhases(phases) {
   aggregate.pli_count = phases.reduce((sum, phase) => sum + phase.pli_count, 0);
   aggregate.packet_loss_ratio = mean(phases.map((phase) => phase.packet_loss_ratio));
   aggregate.codec = phases.find((phase) => phase.codec)?.codec ?? null;
+  aggregate.decoder_implementation = phases.map((phase) => phase.decoder_implementation).find(Boolean) ?? null;
   aggregate.selected_ice_pairs = phases.map((phase) => phase.selected_ice_pair).filter(Boolean);
   return aggregate;
 }
@@ -1361,6 +1397,8 @@ function validateControlReceipt(parsed, sourceSha) {
   if (parsed.diagnostics?.active_media !== 1
       || parsed.diagnostics?.actual_to_target_fps_ratio == null || parsed.diagnostics.actual_to_target_fps_ratio < 0.90
       || parsed.diagnostics?.dropped_frame_ratio == null || parsed.diagnostics.dropped_frame_ratio > 0.01
+      || parsed.diagnostics?.freeze_stats_available !== true
+      || parsed.diagnostics?.freeze_events !== 0
       || parsed.diagnostics?.freeze_ratio == null || parsed.diagnostics.freeze_ratio > 0
       || parsed.diagnostics?.visual_event_success_rate == null || parsed.diagnostics.visual_event_success_rate < 0.99
       || parsed.diagnostics?.input_to_present_p95_ms == null || parsed.diagnostics.input_to_present_p95_ms > 1000) {
@@ -1394,8 +1432,12 @@ function buildGates(aggregate, control) {
     minimum_cpu_reduction_pct: control ? MIN_CPU_REDUCTION_PCT : null,
     passed: aggregate.active_media === 1
       && aggregate.actual_to_target_fps_ratio !== null && aggregate.actual_to_target_fps_ratio >= 0.90
-      && (control ? aggregate.dropped_frame_ratio !== null && controlDropped !== null && aggregate.dropped_frame_ratio <= controlDropped : true)
-      && (control ? aggregate.freeze_ratio !== null && controlFreeze !== null && aggregate.freeze_ratio <= controlFreeze : true)
+      && aggregate.dropped_frame_ratio !== null && aggregate.dropped_frame_ratio <= 0.01
+      && (control ? controlDropped !== null && aggregate.dropped_frame_ratio <= controlDropped : true)
+      && aggregate.freeze_stats_available === true
+      && aggregate.freeze_events === 0
+      && aggregate.freeze_ratio === 0
+      && (control ? controlFreeze !== null && aggregate.freeze_ratio <= controlFreeze : true)
       && aggregate.visual_event_success_rate !== null && aggregate.visual_event_success_rate >= 0.99
       && inputRatio !== null && inputRatio <= 1
       && (control ? cpuReductionPct !== null && cpuReductionPct >= MIN_CPU_REDUCTION_PCT : true),
@@ -1465,6 +1507,7 @@ async function main() {
   let remotePage;
   let inputDriver;
   let nativeObserver;
+  const nativeStopFile = join(OUTPUT_DIR, "native-observer.running");
   let cdpDiagnostics = { enabled: CDP_DIAGNOSTICS, status: CDP_DIAGNOSTICS ? "not-attempted" : "disabled", target: null, error: null };
   let processStart;
   let processEnd;
@@ -1524,6 +1567,7 @@ async function main() {
     }
 
     if (NATIVE_OBSERVER_COMMAND) {
+      await fs.writeFile(nativeStopFile, `${RUN_ID}\n`, { mode: 0o600 });
       nativeObserver = spawn("/bin/zsh", ["-lc", NATIVE_OBSERVER_COMMAND], {
         cwd: ROOT_DIR,
         env: {
@@ -1533,6 +1577,9 @@ async function main() {
           GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC: CODEC,
           GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA: source.sourceSha,
           GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT_DIR: join(OUTPUT_DIR, "native"),
+          GHOSTLIGHT_NATIVE_PERFORMANCE_PHASE_DIR: OUTPUT_DIR,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_STOP_FILE: nativeStopFile,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_MAX_WAIT_SECONDS: String(4 * (WARMUP_SECONDS + PHASE_SECONDS) + 180),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1554,6 +1601,7 @@ async function main() {
       throw new Error("direct-LAN WebRTC receipt requires selected candidatePair protocol=udp in every phase");
     }
     if (nativeObserver) {
+      await fs.rm(nativeStopFile, { force: true });
       const nativeExited = await waitForWorkerClose(nativeObserver, 90000);
       if (!nativeExited) {
         nativeObserver.kill("SIGTERM");
@@ -1566,6 +1614,7 @@ async function main() {
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
   } finally {
+    await fs.rm(nativeStopFile, { force: true }).catch(() => {});
     if (remotePage) await remotePage.close().catch(() => {});
     if (nativeObserver?.exitCode === null) nativeObserver.kill("SIGTERM");
     if (clientBrowser) await clientBrowser.close().catch(() => {});
@@ -1639,10 +1688,14 @@ async function main() {
       frame_height: aggregate.frame_height,
       udp_transport_selected: aggregate.udp_transport_selected,
       power_efficient_decoder: aggregate.power_efficient_decoder,
+      decoder_implementation: aggregate.decoder_implementation,
       active_media: aggregate.active_media,
       actual_to_target_fps_ratio: aggregate.actual_to_target_fps_ratio,
       dropped_frame_ratio: aggregate.dropped_frame_ratio,
       freeze_ratio: aggregate.freeze_ratio,
+      freeze_events: aggregate.freeze_events,
+      freeze_duration_seconds: aggregate.freeze_duration_seconds,
+      freeze_stats_available: aggregate.freeze_stats_available,
       visual_event_success_rate: aggregate.visual_event_success_rate,
       process_cpu_attribution: {
         start: processStart ?? null,
@@ -1706,7 +1759,7 @@ async function runSelfTests() {
     gates: { passed: true },
     viewer_cpu_median_pct: 100,
     configuration: { resolution: "1920x1080", target_fps: 25, cpu_used: 4, use_damage: false, bitrate_kbps: BITRATE_KBPS, codec: "vp8" },
-    diagnostics: { codec: { mime_type: "video/VP8" }, active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0, freeze_ratio: 0, visual_event_success_rate: 1, input_to_present_p95_ms: 300, udp_transport_selected: true },
+    diagnostics: { codec: { mime_type: "video/VP8" }, active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0, freeze_stats_available: true, freeze_events: 0, freeze_ratio: 0, visual_event_success_rate: 1, input_to_present_p95_ms: 300, udp_transport_selected: true },
     phases: Array.from({ length: 4 }, () => ({ selected_ice_pair: { protocol: "udp" } })),
   };
   assert.deepEqual(validateControlReceipt(controlReceipt, "test-head"), {
@@ -1715,6 +1768,8 @@ async function runSelfTests() {
     active_media: 1,
     actual_to_target_fps_ratio: 1,
     dropped_frame_ratio: 0,
+    freeze_stats_available: true,
+    freeze_events: 0,
     freeze_ratio: 0,
     visual_event_success_rate: 1,
     input_to_present_p95_ms: 300,
@@ -1725,9 +1780,21 @@ async function runSelfTests() {
   assert.throws(() => validateControlReceipt({ ...controlReceipt, diagnostics: { ...controlReceipt.diagnostics, udp_transport_selected: false } }, "test-head"), /protocol=udp/);
   assert.throws(() => validateControlReceipt({ ...controlReceipt, diagnostics: { ...controlReceipt.diagnostics, freeze_ratio: 0.01 } }, "test-head"), /absolute media/);
 
-  const gateAggregate = { active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0, freeze_ratio: 0, visual_event_success_rate: 1, input_to_present_p95_ms: 300, viewer_cpu_median_pct: 101 };
+  const gateAggregate = { active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0, freeze_stats_available: true, freeze_events: 0, freeze_ratio: 0, visual_event_success_rate: 1, input_to_present_p95_ms: 300, viewer_cpu_median_pct: 101 };
   assert.equal(buildGates(gateAggregate, validateControlReceipt(controlReceipt, "test-head")).passed, false);
   assert.equal(buildGates({ ...gateAggregate, viewer_cpu_median_pct: 94 }, validateControlReceipt(controlReceipt, "test-head")).passed, true);
+  assert.equal(buildGates({ ...gateAggregate, freeze_stats_available: false }, null).passed, false);
+  assert.equal(buildGates({ ...gateAggregate, freeze_events: 1, freeze_ratio: 0.01 }, null).passed, false);
+
+  const snapshot = statsSnapshot([
+    { id: "codec", type: "codec", mimeType: "video/H264" },
+    { type: "inbound-rtp", kind: "video", codecId: "codec", framesDecoded: 100, freezeCount: 2, totalFreezesDuration: 0.4, decoderImplementation: "VideoToolbox" },
+  ]);
+  assert.equal(snapshot.freeze_stats_available, true);
+  assert.equal(snapshot.freezeCount, 2);
+  assert.equal(snapshot.totalFreezesDuration, 0.4);
+  assert.equal(snapshot.decoder_implementation, "VideoToolbox");
+  assert.equal(statsSnapshot([{ type: "inbound-rtp", kind: "video", framesDecoded: 100 }]).freeze_stats_available, false);
 
   const silentWorker = new EventEmitter();
   silentWorker.exitCode = null;

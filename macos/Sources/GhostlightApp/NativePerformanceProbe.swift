@@ -100,12 +100,15 @@ struct NativePerformanceConfiguration: Equatable {
               framesDecoded: result.framesDecoded + (entry.framesDecoded || 0),
               framesDropped: result.framesDropped + (entry.framesDropped || 0),
               totalDecodeTime: result.totalDecodeTime + (entry.totalDecodeTime || 0),
+              freezeCount: result.freezeCount + (entry.freezeCount || 0),
+              totalFreezesDuration: result.totalFreezesDuration + (entry.totalFreezesDuration || 0),
               framesPerSecond: Math.max(result.framesPerSecond, entry.framesPerSecond || 0),
               frameWidth: Math.max(result.frameWidth, entry.frameWidth || 0),
               frameHeight: Math.max(result.frameHeight, entry.frameHeight || 0),
               powerEfficientDecoder: result.powerEfficientDecoder || entry.powerEfficientDecoder === true,
               hasPowerEfficientDecoder: result.hasPowerEfficientDecoder || typeof entry.powerEfficientDecoder === "boolean",
-            }), { bytesReceived: 0, framesDecoded: 0, framesDropped: 0, totalDecodeTime: 0, framesPerSecond: 0, frameWidth: 0, frameHeight: 0, powerEfficientDecoder: false, hasPowerEfficientDecoder: false });
+              decoderImplementation: result.decoderImplementation || entry.decoderImplementation || null,
+            }), { bytesReceived: 0, framesDecoded: 0, framesDropped: 0, totalDecodeTime: 0, freezeCount: 0, totalFreezesDuration: 0, framesPerSecond: 0, frameWidth: 0, frameHeight: 0, powerEfficientDecoder: false, hasPowerEfficientDecoder: false, decoderImplementation: null });
             window.webkit.messageHandlers.\#(handler).postMessage({
               captured_at: new Date().toISOString(),
               peer_count: peers.length,
@@ -115,11 +118,14 @@ struct NativePerformanceConfiguration: Equatable {
               frames_decoded: sums.framesDecoded,
               frames_dropped: sums.framesDropped,
               total_decode_time_seconds: sums.totalDecodeTime,
+              freeze_count: sums.freezeCount,
+              total_freezes_duration_seconds: sums.totalFreezesDuration,
               mean_decode_ms: sums.framesDecoded > 0 ? sums.totalDecodeTime * 1000 / sums.framesDecoded : null,
               frames_per_second: sums.framesPerSecond || null,
               frame_width: sums.frameWidth || null,
               frame_height: sums.frameHeight || null,
               power_efficient_decoder: sums.hasPowerEfficientDecoder ? sums.powerEfficientDecoder : null,
+              decoder_implementation: sums.decoderImplementation,
               frame_callbacks: frameCallbacks,
               codec: codec ? { mime_type: codec.mimeType || null, sdp_fmtp_line: codec.sdpFmtpLine || null } : null,
             });
@@ -158,8 +164,8 @@ final class NativePerformanceRecorder: NSObject, WKScriptMessageHandler {
             return
         }
         samples.append(message.body)
-        if samples.count > 120 {
-            samples.removeFirst(samples.count - 120)
+        if samples.count > 360 {
+            samples.removeFirst(samples.count - 360)
         }
         let envelope: [String: Any] = [
             "schema_version": 1,
