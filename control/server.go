@@ -239,6 +239,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleBridge(w, r)
 	case r.URL.Path == "/v1/viewer-capabilities/redeem":
 		h.handleViewerCapabilityRedemption(w, r)
+	case r.URL.Path == "/v1/chrome-pairings/redeem":
+		h.handleChromePairingRedemption(w, r)
+	case r.URL.Path == "/v1/chrome-handoffs":
+		h.handleChromeDeviceHandoffs(w, r)
 	case r.URL.Path == "/v1/workspaces" || strings.HasPrefix(r.URL.Path, "/v1/workspaces/") || strings.HasPrefix(r.URL.Path, "/v1/sessions"):
 		h.handleAPI(w, r)
 	default:

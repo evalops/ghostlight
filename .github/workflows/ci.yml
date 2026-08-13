@@ -172,6 +172,14 @@ jobs:
           node --check service-worker.js
           node --check protocol.js
 
+      - name: Verify Chrome continuity companion
+        working-directory: companion/chrome
+        run: |
+          npm test
+          node --check service-worker.js
+          node --check options.js
+          node --check sync-core.js
+
   swift-tests:
     name: Swift tests
     runs-on: macos-14

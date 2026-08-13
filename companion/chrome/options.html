@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Connect Chrome to Ghostlight</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">GHOSTLIGHT</p>
+    <h1>Connect this Chrome</h1>
+    <p>Generate a pairing code in Ghostlight, then paste it here. This extension can send only the tab you choose by clicking its toolbar button.</p>
+    <form id="pairing-form">
+      <label>Control URL<input id="control-origin" type="url" required placeholder="https://ghostlight.example.com"></label>
+      <label>Device name<input id="device-name" required maxlength="100" placeholder="Jonathan’s Chrome"></label>
+      <label>Pairing code<input id="pairing-code" required autocomplete="off" spellcheck="false"></label>
+      <button type="submit">Connect</button>
+    </form>
+    <p id="status" role="status" aria-live="polite"></p>
+    <section>
+      <h2>Not shared</h2>
+      <p>Passwords, cookies, browsing history, Google account credentials, incognito tabs, page contents, and automatic background activity stay in Chrome.</p>
+    </section>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

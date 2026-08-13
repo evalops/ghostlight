@@ -133,6 +133,50 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertNil(body["updated_at"])
     }
 
+    func testChromePairingAndHandoffUseScopedWorkspaceEndpoints() async throws {
+        var requests: [URLRequest] = []
+        NativeSessionURLProtocol.requestHandler = { request in
+            requests.append(request)
+            switch (request.httpMethod, request.url?.lastPathComponent) {
+            case ("POST", "chrome-pairings"):
+                return (Self.response(for: request, status: 201), Data(Self.chromePairingJSON.utf8))
+            case ("GET", "chrome-handoffs"):
+                return (Self.response(for: request), Data("[\(Self.chromeHandoffJSON)]".utf8))
+            default:
+                return (Self.response(for: request), Data(Self.chromeHandoffJSON.utf8))
+            }
+        }
+        let client = SessionClient(session: makeSession())
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+
+        let pairing = try await client.createChromePairing(
+            at: origin,
+            apiToken: "api-secret",
+            workspaceID: "default",
+            deviceName: "Jonathan's Chrome"
+        )
+        let handoffs = try await client.listChromeHandoffs(
+            at: origin,
+            apiToken: "api-secret",
+            workspaceID: "default"
+        )
+        _ = try await client.updateChromeHandoff(
+            at: origin,
+            apiToken: "api-secret",
+            workspaceID: "default",
+            handoffID: handoffs[0].id,
+            state: "opened"
+        )
+
+        XCTAssertEqual(pairing.deviceName, "Jonathan's Chrome")
+        XCTAssertEqual(handoffs.map(\.url), ["https://example.test/work"])
+        XCTAssertEqual(requests.map(\.httpMethod), ["POST", "GET", "PUT"])
+        XCTAssertEqual(requests[0].url?.path, "/base/v1/workspaces/default/chrome-pairings")
+        XCTAssertEqual(requests[1].url?.path, "/base/v1/workspaces/default/chrome-handoffs")
+        XCTAssertEqual(requests[2].url?.path, "/base/v1/workspaces/default/chrome-handoffs/handoff-1")
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer api-secret" })
+    }
+
     func testCommandWireValuesMatchControlContract() throws {
         let commands = [
             BrowserCommand(type: .goBack, tabID: "tab-1", expectedRevision: 7),
@@ -345,6 +389,28 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(viewModel.shortcuts.map(\.position), [0, 1])
         XCTAssertEqual(service.preferenceUpdates.last?.searchURL, "https://search.example.test/?q={query}")
         XCTAssertEqual(service.preferenceUpdates.last?.shortcuts.map(\.position), [0, 1])
+    }
+
+    @MainActor
+    func testChromeHandoffUsesDeterministicCommandAndResolvesAfterAppliedReceipt() async throws {
+        let applied = Self.receipt(
+            id: "command-handoff",
+            type: .newTab,
+            state: .applied,
+            url: "https://example.test/work"
+        )
+        let service = NativeSessionServiceStub(receipts: [applied])
+        let viewModel = try makeControllingViewModel(service: service)
+        let handoff = try SessionJSON.decoder.decode(ChromeHandoff.self, from: Data(Self.chromeHandoffJSON.utf8))
+
+        viewModel.openChromeHandoff(handoff)
+        await service.waitForCommandCount(1)
+        await service.waitForHandoffUpdateCount(1)
+
+        XCTAssertEqual(service.commandSubmissions[0].idempotencyKey, "chrome-handoff-handoff-1")
+        XCTAssertEqual(service.commandSubmissions[0].command.type, .newTab)
+        XCTAssertEqual(service.commandSubmissions[0].command.url, "https://example.test/work")
+        XCTAssertEqual(service.handoffUpdates, ["handoff-1:opened"])
     }
 
     @MainActor
@@ -737,6 +803,21 @@ final class NativeSessionTests: XCTestCase {
     }
     """#
 
+    private static let chromePairingJSON = #"""
+    {
+      "pairing_code":"pairing-code","workspace_id":"default",
+      "device_name":"Jonathan's Chrome","expires_at":"2026-08-13T12:10:00Z"
+    }
+    """#
+
+    private static let chromeHandoffJSON = #"""
+    {
+      "id":"handoff-1","workspace_id":"default","device_id":"device-1",
+      "device_name":"Jonathan's Chrome","title":"Work","url":"https://example.test/work",
+      "state":"pending","created_at":"2026-08-13T12:00:00Z","updated_at":"2026-08-13T12:00:00Z"
+    }
+    """#
+
     private static let queuedReceipt = receipt(id: "command-1", type: .reload, state: .queued)
     private static let appliedReceipt = receipt(id: "command-1", type: .reload, state: .applied)
     private static let failedReceipt = receipt(
@@ -807,6 +888,7 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
     private var submissions: [Submission] = []
     private var preferences: WorkspacePreferences
     private var updates: [WorkspacePreferences] = []
+    private var resolvedHandoffs: [String] = []
 
     init(receipts: [CommandReceipt], preferences: WorkspacePreferences? = nil) {
         self.receipts = receipts
@@ -827,6 +909,10 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
         lock.withLock { updates }
     }
 
+    var handoffUpdates: [String] {
+        lock.withLock { resolvedHandoffs }
+    }
+
     func waitForCommandCount(_ count: Int) async {
         for _ in 0..<100 where commandSubmissions.count < count {
             try? await Task.sleep(for: .milliseconds(10))
@@ -835,6 +921,12 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
 
     func waitForPreferenceUpdateCount(_ count: Int) async {
         for _ in 0..<100 where preferenceUpdates.count < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func waitForHandoffUpdateCount(_ count: Int) async {
+        for _ in 0..<100 where handoffUpdates.count < count {
             try? await Task.sleep(for: .milliseconds(10))
         }
     }
@@ -858,6 +950,24 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
             return preferences
         }
     }
+    func createChromePairing(at origin: URL, apiToken: String, workspaceID: String, deviceName: String) async throws -> ChromePairing { fatalError() }
+    func listChromeHandoffs(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeHandoff] { [] }
+    func updateChromeHandoff(at origin: URL, apiToken: String, workspaceID: String, handoffID: String, state: String) async throws -> ChromeHandoff {
+        lock.withLock { resolvedHandoffs.append("\(handoffID):\(state)") }
+        return ChromeHandoff(
+            id: handoffID,
+            workspaceID: workspaceID,
+            deviceID: "device-1",
+            deviceName: "Chrome",
+            title: "Work",
+            url: "https://example.test/work",
+            state: state,
+            createdAt: Date(timeIntervalSince1970: 1_000),
+            updatedAt: Date(timeIntervalSince1970: 1_001)
+        )
+    }
+    func listChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeDevice] { [] }
+    func revokeChromeDevice(at origin: URL, apiToken: String, workspaceID: String, deviceID: String) async throws {}
 
     func sendCommand(
         at origin: URL,

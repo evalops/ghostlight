@@ -61,6 +61,7 @@ struct ContentView: View {
     @State private var showingConnection = false
     @State private var showingFileImporter = false
     @State private var showingShortcutEditor = false
+    @State private var showingChromePairing = false
     @State private var showingHome = true
     @State private var homeQuery = ""
 
@@ -83,6 +84,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingShortcutEditor) {
             ShortcutEditorView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showingChromePairing) {
+            ChromePairingView(viewModel: viewModel)
         }
         .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.data]) { result in
             if case let .success(url) = result { viewModel.attach(url) }
@@ -436,6 +440,51 @@ struct ContentView: View {
                     }
                 }
 
+                if !viewModel.chromeHandoffs.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("From Chrome")
+                                .font(.headline)
+                            Spacer()
+                            Text("Opens only when you choose")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(viewModel.chromeHandoffs) { handoff in
+                            HStack(spacing: 12) {
+                                Image(systemName: "laptopcomputer.and.arrow.down")
+                                    .foregroundStyle(Color.accentColor)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text((handoff.title ?? "").isEmpty ? handoff.url : handoff.title ?? handoff.url)
+                                        .lineLimit(1)
+                                    Text("\(handoff.deviceName) · \(handoff.url)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Button("Dismiss") { viewModel.dismissChromeHandoff(handoff) }
+                                    .buttonStyle(.borderless)
+                                Button("Open") {
+                                    viewModel.openChromeHandoff(handoff)
+                                    showingHome = false
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!viewModel.canControl)
+                            }
+                            .padding(12)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+
+                if let error = viewModel.chromeSyncError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
                 HStack(alignment: .top, spacing: 28) {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Open tabs")
@@ -482,6 +531,9 @@ struct ContentView: View {
                         }
                         homeTool("Connection settings", symbol: "slider.horizontal.3") {
                             showingConnection = true
+                        }
+                        homeTool("Connect your Chrome", symbol: "laptopcomputer.and.arrow.down") {
+                            showingChromePairing = true
                         }
                     }
                     .frame(width: 220, alignment: .leading)
@@ -624,6 +676,98 @@ struct ContentView: View {
         case .disconnected:
             EmptyView()
         }
+    }
+}
+
+private struct ChromePairingView: View {
+    @ObservedObject var viewModel: SessionViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var deviceName = Host.current().localizedName.map { "Chrome on \($0)" } ?? "My Chrome"
+    @State private var isCreating = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Text("Connect your Chrome")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            Text("Install the Continue in Ghostlight extension, generate a one-time code here, and paste it into the extension. The code expires after 10 minutes.")
+                .foregroundStyle(.secondary)
+
+            TextField("Device name", text: $deviceName)
+                .textFieldStyle(.roundedBorder)
+
+            if let pairing = viewModel.chromePairing {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Pairing code")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(pairing.pairingCode)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    Text("This code pairs one Chrome and cannot be used again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let error = viewModel.chromeSyncError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            if !viewModel.chromeDevices.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Connected devices")
+                            .font(.headline)
+                        Spacer()
+                        Button("Refresh") { Task { await viewModel.refreshChromeDevices() } }
+                            .buttonStyle(.borderless)
+                    }
+                    ForEach(viewModel.chromeDevices) { device in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(device.name)
+                                Text("Can send selected tabs")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Revoke", role: .destructive) {
+                                Task { await viewModel.revokeChromeDevice(device) }
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+
+            HStack {
+                Button(viewModel.chromePairing == nil ? "Generate code" : "Generate another code") {
+                    isCreating = true
+                    Task {
+                        _ = await viewModel.createChromePairing(deviceName: deviceName)
+                        isCreating = false
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isCreating || deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if isCreating { ProgressView().controlSize(.small) }
+            }
+        }
+        .padding(26)
+        .frame(width: 540)
+        .task { await viewModel.refreshChromeDevices() }
     }
 }
 

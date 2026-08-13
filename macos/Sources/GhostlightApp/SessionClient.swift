@@ -48,6 +48,11 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
 protocol SessionServicing: Sendable {
     func getWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences
     func putWorkspacePreferences(_ preferences: WorkspacePreferences, at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences
+    func createChromePairing(at origin: URL, apiToken: String, workspaceID: String, deviceName: String) async throws -> ChromePairing
+    func listChromeHandoffs(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeHandoff]
+    func updateChromeHandoff(at origin: URL, apiToken: String, workspaceID: String, handoffID: String, state: String) async throws -> ChromeHandoff
+    func listChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeDevice]
+    func revokeChromeDevice(at origin: URL, apiToken: String, workspaceID: String, deviceID: String) async throws
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession
     func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int) async throws -> BrowserSession?
@@ -105,6 +110,77 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             path: ["v1", "workspaces", workspaceID, "preferences"],
             headers: Self.apiBearer(apiToken),
             body: try SessionJSON.encoder.encode(WorkspacePreferencesUpdate(preferences))
+        )
+    }
+
+    public func createChromePairing(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        deviceName: String
+    ) async throws -> ChromePairing {
+        try await send(
+            .post,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "chrome-pairings"],
+            headers: Self.apiBearer(apiToken),
+            body: try SessionJSON.encoder.encode(ChromePairingRequest(deviceName: deviceName))
+        )
+    }
+
+    public func listChromeHandoffs(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String
+    ) async throws -> [ChromeHandoff] {
+        try await send(
+            .get,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "chrome-handoffs"],
+            headers: Self.apiBearer(apiToken)
+        )
+    }
+
+    public func updateChromeHandoff(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        handoffID: String,
+        state: String
+    ) async throws -> ChromeHandoff {
+        try await send(
+            .put,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "chrome-handoffs", handoffID],
+            headers: Self.apiBearer(apiToken),
+            body: try SessionJSON.encoder.encode(ChromeHandoffUpdate(state: state))
+        )
+    }
+
+    public func listChromeDevices(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String
+    ) async throws -> [ChromeDevice] {
+        try await send(
+            .get,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "chrome-devices"],
+            headers: Self.apiBearer(apiToken)
+        )
+    }
+
+    public func revokeChromeDevice(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        deviceID: String
+    ) async throws {
+        let _: EmptyResponse? = try await sendOptional(
+            .delete,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "chrome-devices", deviceID],
+            headers: Self.apiBearer(apiToken)
         )
     }
 
@@ -336,6 +412,8 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
 private enum HTTPMethod: String { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
 private struct CreateSessionRequest: Encodable { let workspaceID: String; enum CodingKeys: String, CodingKey { case workspaceID = "workspace_id" } }
 private struct AcquireLeaseRequest: Encodable { let clientID: String; enum CodingKeys: String, CodingKey { case clientID = "client_id" } }
+private struct ChromePairingRequest: Encodable { let deviceName: String; enum CodingKeys: String, CodingKey { case deviceName = "device_name" } }
+private struct ChromeHandoffUpdate: Encodable { let state: String }
 private struct WorkspacePreferencesUpdate: Encodable {
     let searchURL: String
     let shortcuts: [WorkspaceShortcut]
