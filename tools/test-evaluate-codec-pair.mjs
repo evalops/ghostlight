@@ -59,9 +59,12 @@ try {
       active_media: 1,
       power_efficient_decoder: null,
       mac_cpu_median_pct: codec === "vp8" ? 10 : 8,
+      mac_memory_median_mib: codec === "vp8" ? 300 : 290,
+      decoded_fps: 25,
+      dropped_frame_ratio: 0,
       mean_decode_ms: 2,
       full_phase_coverage: 1,
-      phases: Array.from({ length: 4 }, () => ({ media_sample_count: 20, process_sample_count: 20 })),
+      phases: Array.from({ length: 4 }, () => ({ media_sample_count: 20, process_sample_count: 20, decoded_fps: 25, dropped_frame_ratio: 0 })),
     };
     fs.writeFileSync(path.join(runDirectory, "receipt.json"), JSON.stringify(server));
     fs.writeFileSync(path.join(nativeDirectory, "native-receipt.json"), JSON.stringify(native));
@@ -78,6 +81,7 @@ try {
   assert.equal(result.negotiated_codec_pair, 1);
   assert.equal(result.gates.negotiated_codec_pair, true);
   assert.equal(result.native_h264_power_efficient_decoder, 0);
+  assert.equal(result.gates.absolute_native_candidate_health, true);
   assert.equal(result.status, "accepted");
 
   const brokenPath = path.join(temporary, "pair-1/vp8/receipt.json");
@@ -105,6 +109,19 @@ try {
   );
   assert.notEqual(missingNativeCPU.status, 0);
   assert.equal(JSON.parse(fs.readFileSync(output, "utf8")).gates.native_mac_cpu_ratio, false);
+
+  native.mac_cpu_median_pct = 8;
+  native.dropped_frame_ratio = 0.002;
+  native.phases[0].dropped_frame_ratio = 0.008;
+  fs.writeFileSync(nativePath, JSON.stringify(native));
+  const nativeDropRegression = spawnSync(
+    process.execPath,
+    [path.join(root, "tools/evaluate-codec-pair.mjs"), temporary, output],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(nativeDropRegression.status, 0);
+  const nativeDropResult = JSON.parse(fs.readFileSync(output, "utf8"));
+  assert.equal(nativeDropResult.gates.native_dropped_frame_ratio_delta, false);
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }
