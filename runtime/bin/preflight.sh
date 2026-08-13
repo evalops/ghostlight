@@ -146,6 +146,10 @@ viewer_health_url="$(env_value GHOSTLIGHT_VIEWER_HEALTH_URL)"
 nat_address="$(env_value NEKO_WEBRTC_NAT1TO1)"
 [[ -n "$viewer_url" && -n "$viewer_health_url" && -n "$nat_address" ]] \
   || die "GHOSTLIGHT_VIEWER_URL, GHOSTLIGHT_VIEWER_HEALTH_URL, and NEKO_WEBRTC_NAT1TO1 must be configured"
+api_token="$(env_value GHOSTLIGHT_API_TOKEN)"
+bridge_token="$(env_value GHOSTLIGHT_BRIDGE_TOKEN)"
+[[ -n "$api_token" && -n "$bridge_token" ]] || die "control and bridge tokens must be configured"
+[[ "$api_token" != "$bridge_token" ]] || die "GHOSTLIGHT_API_TOKEN and GHOSTLIGHT_BRIDGE_TOKEN must be different"
 
 viewer_host="$(http_url_host GHOSTLIGHT_VIEWER_URL "$viewer_url")"
 http_url_host GHOSTLIGHT_VIEWER_HEALTH_URL "$viewer_health_url" >/dev/null
@@ -205,10 +209,13 @@ viewer_mapping = {
     "NEKO_WEBRTC_TCPMUX": "NEKO_WEBRTC_TCPMUX",
     "NEKO_WEBRTC_ICELITE": "NEKO_WEBRTC_ICELITE",
     "NEKO_WEBRTC_NAT1TO1": "NEKO_WEBRTC_NAT1TO1",
+    "GHOSTLIGHT_BRIDGE_TOKEN": "GHOSTLIGHT_BRIDGE_TOKEN",
 }
 control_mapping = {
     "GHOSTLIGHT_VIEWER_URL": "GHOSTLIGHT_VIEWER_URL",
     "GHOSTLIGHT_VIEWER_HEALTH_URL": "GHOSTLIGHT_VIEWER_HEALTH_URL",
+    "GHOSTLIGHT_API_TOKEN": "GHOSTLIGHT_API_TOKEN",
+    "GHOSTLIGHT_BRIDGE_TOKEN": "GHOSTLIGHT_BRIDGE_TOKEN",
 }
 for rendered_key, env_key in viewer_mapping.items():
     if str(viewer_environment.get(rendered_key)) != expected[env_key]:

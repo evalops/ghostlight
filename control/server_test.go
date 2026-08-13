@@ -60,6 +60,10 @@ func TestLoadConfigRequiresAndValidatesViewerURL(t *testing.T) {
 	t.Setenv("GHOSTLIGHT_VIEWER_URL", "https://viewer.example.test")
 	t.Setenv("GHOSTLIGHT_VIEWER_HEALTH_URL", "http://viewer:8080")
 	t.Setenv("GHOSTLIGHT_LISTEN_ADDR", " 127.0.0.1:9090 ")
+	t.Setenv(stateDirEnvironment, t.TempDir())
+	t.Setenv(attachmentDirEnvironment, t.TempDir())
+	t.Setenv(apiTokenEnvironment, "api-test-token")
+	t.Setenv(bridgeTokenEnvironment, "bridge-test-token")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig() with valid viewer URL error = %v", err)
@@ -73,6 +77,11 @@ func TestLoadConfigRequiresAndValidatesViewerURL(t *testing.T) {
 	if cfg.ListenAddr != "127.0.0.1:9090" {
 		t.Fatalf("ListenAddr = %q, want custom address", cfg.ListenAddr)
 	}
+	t.Setenv(bridgeTokenEnvironment, "api-test-token")
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "must be different") {
+		t.Fatalf("loadConfig() with equal API and bridge tokens error = %v", err)
+	}
+	t.Setenv(bridgeTokenEnvironment, "bridge-test-token")
 
 	t.Setenv("GHOSTLIGHT_LISTEN_ADDR", "")
 	cfg, err = loadConfig()
@@ -155,12 +164,6 @@ func TestViewerDiscoveryIsStatelessAndIdempotent(t *testing.T) {
 		t.Fatalf("discovery changed between calls: %q != %q", responses[0], responses[1])
 	}
 
-	response := execute(t, handler, http.MethodPost, "/v1/sessions", strings.NewReader(`{}`), "application/json")
-	if response.StatusCode != http.StatusNotFound {
-		response.Body.Close()
-		t.Fatalf("removed session route status = %d, want %d", response.StatusCode, http.StatusNotFound)
-	}
-	assertErrorResponse(t, response, "not_found")
 }
 
 func TestReadinessUsesOfficialViewerHealthEndpoint(t *testing.T) {

@@ -1,0 +1,654 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+const databaseFileName = "ghostlight.db"
+
+var (
+	errNotFound       = errors.New("not found")
+	errConflict       = errors.New("conflict")
+	errUnauthorized   = errors.New("unauthorized")
+	errStaleRevision  = errors.New("stale revision")
+	errLeaseExpired   = errors.New("lease expired")
+	errIdempotencyKey = errors.New("idempotency key reused with different request")
+)
+
+type sqliteStore struct {
+	db            *sql.DB
+	attachmentDir string
+	now           func() time.Time
+}
+
+func openSQLiteStore(stateDir, attachmentDir string, now func() time.Time) (*sqliteStore, error) {
+	if now == nil {
+		now = time.Now
+	}
+	for _, dir := range []string{stateDir, attachmentDir} {
+		if dir == "" {
+			return nil, errors.New("storage directory must not be empty")
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create storage directory: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("secure storage directory: %w", err)
+		}
+	}
+	databasePath := filepath.Join(stateDir, databaseFileName)
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		return nil, fmt.Errorf("open state database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	s := &sqliteStore{db: db, attachmentDir: attachmentDir, now: now}
+	if err := s.initialize(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	for _, path := range []string{databasePath, databasePath + "-wal", databasePath + "-shm"} {
+		if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			db.Close()
+			return nil, fmt.Errorf("secure state database file: %w", err)
+		}
+	}
+	return s, nil
+}
+
+func (s *sqliteStore) initialize(ctx context.Context) error {
+	var currentVersion int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&currentVersion); err != nil {
+		return fmt.Errorf("read state schema version: %w", err)
+	}
+	if currentVersion != 0 && currentVersion != schemaVersion {
+		return fmt.Errorf("unsupported state schema version %d; expected %d", currentVersion, schemaVersion)
+	}
+	statements := []string{
+		`PRAGMA foreign_keys = ON`,
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA busy_timeout = 5000`,
+		`CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL, revision INTEGER NOT NULL, runtime_state TEXT NOT NULL, tabs_json TEXT NOT NULL, active_tab_id TEXT NOT NULL, last_heartbeat TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS lease_epochs (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, epoch INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, client_id TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL, expires_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS streams (id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, url TEXT NOT NULL, state TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS session_idempotency (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id))`,
+		`CREATE TABLE IF NOT EXISTS commands (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, type TEXT NOT NULL, url TEXT NOT NULL, tab_id TEXT NOT NULL, attachment_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, lease_epoch INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(session_id, idempotency_key))`,
+		`CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, filename TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion),
+	}
+	for _, statement := range statements {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("initialize state database: %w", err)
+		}
+	}
+	now := s.now().UTC()
+	stamp := formatTime(now)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO metadata(key,value) VALUES('schema_version',?)`, fmt.Sprint(schemaVersion)); err != nil {
+		return err
+	}
+	var recordedVersion string
+	if err := tx.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='schema_version'`).Scan(&recordedVersion); err != nil {
+		return err
+	}
+	if recordedVersion != fmt.Sprint(schemaVersion) {
+		return fmt.Errorf("unsupported recorded state schema version %s; expected %d", recordedVersion, schemaVersion)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO workspaces(id,name,created_at,updated_at) VALUES('default','Default',?,?)`, stamp, stamp); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO sessions(id,workspace_id,name,revision,runtime_state,tabs_json,active_tab_id,created_at,updated_at) VALUES('default','default','Browser',1,'starting','[]','',?,?)`, stamp, stamp); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO lease_epochs(session_id,epoch) VALUES('default',0)`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *sqliteStore) close() error { return s.db.Close() }
+
+func (s *sqliteStore) listWorkspaces(ctx context.Context) ([]Workspace, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,created_at,updated_at FROM workspaces ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []Workspace
+	for rows.Next() {
+		var w Workspace
+		var created, updated string
+		if err := rows.Scan(&w.ID, &w.Name, &created, &updated); err != nil {
+			return nil, err
+		}
+		w.CreatedAt, _ = parseTime(created)
+		w.UpdatedAt, _ = parseTime(updated)
+		result = append(result, w)
+	}
+	return result, rows.Err()
+}
+
+func (s *sqliteStore) listSessions(ctx context.Context) ([]BrowserSession, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM sessions ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	result := make([]BrowserSession, 0, len(ids))
+	for _, id := range ids {
+		session, err := s.getSession(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, session)
+	}
+	return result, nil
+}
+
+func (s *sqliteStore) getSession(ctx context.Context, id string) (BrowserSession, error) {
+	return s.getSessionQuery(ctx, s.db, id)
+}
+
+type queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *sqliteStore) getSessionQuery(ctx context.Context, q queryer, id string) (BrowserSession, error) {
+	var session BrowserSession
+	var tabs, created, updated string
+	var heartbeat sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT id,workspace_id,name,revision,runtime_state,tabs_json,active_tab_id,last_heartbeat,created_at,updated_at FROM sessions WHERE id=?`, id).Scan(&session.ID, &session.WorkspaceID, &session.Name, &session.Revision, &session.RuntimeState, &tabs, &session.ActiveTabID, &heartbeat, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BrowserSession{}, errNotFound
+	}
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	if err := json.Unmarshal([]byte(tabs), &session.Tabs); err != nil {
+		return BrowserSession{}, err
+	}
+	if session.Tabs == nil {
+		session.Tabs = []BrowserTab{}
+	}
+	session.CreatedAt, _ = parseTime(created)
+	session.UpdatedAt, _ = parseTime(updated)
+	if heartbeat.Valid {
+		value, _ := parseTime(heartbeat.String)
+		session.LastHeartbeat = &value
+	}
+	var lease ControllerLease
+	var expires string
+	err = q.QueryRowContext(ctx, `SELECT id,session_id,client_id,epoch,expires_at FROM leases WHERE session_id=?`, id).Scan(&lease.ID, &lease.SessionID, &lease.ClientID, &lease.Epoch, &expires)
+	if err == nil {
+		lease.ExpiresAt, _ = parseTime(expires)
+		if lease.ExpiresAt.After(s.now()) {
+			lease.RenewAfter = lease.ExpiresAt.Add(-leaseDurationUntilRenew(lease.ExpiresAt, s.now()))
+			session.Controller = &lease
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return BrowserSession{}, err
+	}
+	var stream StreamConnection
+	var streamExpiry, streamCreated string
+	err = q.QueryRowContext(ctx, `SELECT id,session_id,url,state,expires_at,created_at FROM streams WHERE session_id=?`, id).Scan(&stream.ID, &stream.SessionID, &stream.URL, &stream.State, &streamExpiry, &streamCreated)
+	if err == nil {
+		stream.ExpiresAt, _ = parseTime(streamExpiry)
+		stream.CreatedAt, _ = parseTime(streamCreated)
+		if stream.ExpiresAt.After(s.now()) {
+			session.Stream = &stream
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return BrowserSession{}, err
+	}
+	return session, nil
+}
+
+func leaseDurationUntilRenew(expires, now time.Time) time.Duration { return expires.Sub(now) / 2 }
+
+func (s *sqliteStore) createSession(ctx context.Context, workspaceID, name, key, requestHash string) (BrowserSession, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BrowserSession{}, false, err
+	}
+	defer tx.Rollback()
+	var oldHash, sessionID string
+	err = tx.QueryRowContext(ctx, `SELECT request_hash,session_id FROM session_idempotency WHERE key=?`, key).Scan(&oldHash, &sessionID)
+	if err == nil {
+		if oldHash != requestHash {
+			return BrowserSession{}, false, errIdempotencyKey
+		}
+		session, err := s.getSessionQuery(ctx, tx, sessionID)
+		return session, false, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return BrowserSession{}, false, err
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM workspaces WHERE id=?`, workspaceID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return BrowserSession{}, false, errNotFound
+	} else if err != nil {
+		return BrowserSession{}, false, err
+	}
+	// Ghostlight currently owns one durable browser runtime, represented by the bootstrap session.
+	sessionID = "default"
+	if _, err = tx.ExecContext(ctx, `INSERT INTO session_idempotency(key,request_hash,session_id) VALUES(?,?,?)`, key, requestHash, sessionID); err != nil {
+		return BrowserSession{}, false, err
+	}
+	session, err := s.getSessionQuery(ctx, tx, sessionID)
+	if err != nil {
+		return BrowserSession{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BrowserSession{}, false, err
+	}
+	return session, true, nil
+}
+
+func (s *sqliteStore) acquireLease(ctx context.Context, sessionID, clientID string, ttl time.Duration) (ControllerLease, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ControllerLease{}, err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id=?`, sessionID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return ControllerLease{}, errNotFound
+	} else if err != nil {
+		return ControllerLease{}, err
+	}
+	now := s.now().UTC()
+	var currentID, expiry string
+	err = tx.QueryRowContext(ctx, `SELECT id,expires_at FROM leases WHERE session_id=?`, sessionID).Scan(&currentID, &expiry)
+	if err == nil {
+		parsed, _ := parseTime(expiry)
+		if parsed.After(now) {
+			return ControllerLease{}, errConflict
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM leases WHERE session_id=?`, sessionID); err != nil {
+			return ControllerLease{}, err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return ControllerLease{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE lease_epochs SET epoch=epoch+1 WHERE session_id=?`, sessionID); err != nil {
+		return ControllerLease{}, err
+	}
+	var epoch int64
+	if err = tx.QueryRowContext(ctx, `SELECT epoch FROM lease_epochs WHERE session_id=?`, sessionID).Scan(&epoch); err != nil {
+		return ControllerLease{}, err
+	}
+	token, err := randomID(32)
+	if err != nil {
+		return ControllerLease{}, err
+	}
+	id, err := randomID(16)
+	if err != nil {
+		return ControllerLease{}, err
+	}
+	expires := now.Add(ttl)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO leases(id,session_id,client_id,token_hash,epoch,expires_at) VALUES(?,?,?,?,?,?)`, id, sessionID, clientID, hashSecret(token), epoch, formatTime(expires)); err != nil {
+		return ControllerLease{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, formatTime(now), sessionID); err != nil {
+		return ControllerLease{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ControllerLease{}, err
+	}
+	return ControllerLease{ID: id, SessionID: sessionID, ClientID: clientID, Token: token, Epoch: epoch, ExpiresAt: expires, RenewAfter: now.Add(ttl / 2)}, nil
+}
+
+func (s *sqliteStore) validateLeaseTx(ctx context.Context, tx *sql.Tx, sessionID, leaseID, token string) (int64, error) {
+	var tokenHash, expiry string
+	var epoch int64
+	err := tx.QueryRowContext(ctx, `SELECT token_hash,epoch,expires_at FROM leases WHERE id=? AND session_id=?`, leaseID, sessionID).Scan(&tokenHash, &epoch, &expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, errUnauthorized
+	}
+	if err != nil {
+		return 0, err
+	}
+	if subtle.ConstantTimeCompare([]byte(tokenHash), []byte(hashSecret(token))) != 1 {
+		return 0, errUnauthorized
+	}
+	expires, _ := parseTime(expiry)
+	if !expires.After(s.now()) {
+		return 0, errLeaseExpired
+	}
+	return epoch, nil
+}
+
+func (s *sqliteStore) findLeaseByTokenTx(ctx context.Context, tx *sql.Tx, sessionID, token string) (string, int64, error) {
+	var id, tokenHash, expiry string
+	var epoch int64
+	err := tx.QueryRowContext(ctx, `SELECT id,token_hash,epoch,expires_at FROM leases WHERE session_id=?`, sessionID).Scan(&id, &tokenHash, &epoch, &expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, errUnauthorized
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	if subtle.ConstantTimeCompare([]byte(tokenHash), []byte(hashSecret(token))) != 1 {
+		return "", 0, errUnauthorized
+	}
+	expires, _ := parseTime(expiry)
+	if !expires.After(s.now()) {
+		return "", 0, errLeaseExpired
+	}
+	return id, epoch, nil
+}
+
+func (s *sqliteStore) renewLease(ctx context.Context, sessionID, leaseID, token string, ttl time.Duration) (ControllerLease, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ControllerLease{}, err
+	}
+	defer tx.Rollback()
+	epoch, err := s.validateLeaseTx(ctx, tx, sessionID, leaseID, token)
+	if err != nil {
+		return ControllerLease{}, err
+	}
+	now := s.now().UTC()
+	expires := now.Add(ttl)
+	if _, err = tx.ExecContext(ctx, `UPDATE leases SET expires_at=? WHERE id=?`, formatTime(expires), leaseID); err != nil {
+		return ControllerLease{}, err
+	}
+	var client string
+	if err = tx.QueryRowContext(ctx, `SELECT client_id FROM leases WHERE id=?`, leaseID).Scan(&client); err != nil {
+		return ControllerLease{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ControllerLease{}, err
+	}
+	return ControllerLease{ID: leaseID, SessionID: sessionID, ClientID: client, Token: token, Epoch: epoch, ExpiresAt: expires, RenewAfter: now.Add(ttl / 2)}, nil
+}
+
+func (s *sqliteStore) releaseLease(ctx context.Context, sessionID, leaseID, token string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = s.validateLeaseTx(ctx, tx, sessionID, leaseID, token); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM leases WHERE id=?`, leaseID); err != nil {
+		return err
+	}
+	now := formatTime(s.now())
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, now, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *sqliteStore) createStream(ctx context.Context, sessionID, url string, ttl time.Duration) (StreamConnection, error) {
+	now := s.now().UTC()
+	id, err := randomID(16)
+	if err != nil {
+		return StreamConnection{}, err
+	}
+	stream := StreamConnection{ID: id, SessionID: sessionID, URL: url, State: "connecting", ExpiresAt: now.Add(ttl), CreatedAt: now}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StreamConnection{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO streams(id,session_id,url,state,expires_at,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET id=excluded.id,url=excluded.url,state=excluded.state,expires_at=excluded.expires_at,created_at=excluded.created_at`, stream.ID, stream.SessionID, stream.URL, stream.State, formatTime(stream.ExpiresAt), formatTime(stream.CreatedAt))
+	if err != nil {
+		return StreamConnection{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return StreamConnection{}, errNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, formatTime(now), sessionID); err != nil {
+		return StreamConnection{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return StreamConnection{}, err
+	}
+	return stream, nil
+}
+
+func (s *sqliteStore) createCommand(ctx context.Context, sessionID, token, key, requestHash string, input BrowserCommand) (BrowserCommand, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BrowserCommand{}, false, err
+	}
+	defer tx.Rollback()
+	var oldHash string
+	var sequence int64
+	err = tx.QueryRowContext(ctx, `SELECT request_hash,sequence FROM commands WHERE session_id=? AND idempotency_key=?`, sessionID, key).Scan(&oldHash, &sequence)
+	if err == nil {
+		if oldHash != requestHash {
+			return BrowserCommand{}, false, errIdempotencyKey
+		}
+		cmd, err := scanCommand(tx.QueryRowContext(ctx, commandSelect+` WHERE sequence=?`, sequence))
+		return cmd, false, err
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return BrowserCommand{}, false, err
+	}
+	_, epoch, err := s.findLeaseByTokenTx(ctx, tx, sessionID, token)
+	if err != nil {
+		return BrowserCommand{}, false, err
+	}
+	var revision int64
+	if err = tx.QueryRowContext(ctx, `SELECT revision FROM sessions WHERE id=?`, sessionID).Scan(&revision); errors.Is(err, sql.ErrNoRows) {
+		return BrowserCommand{}, false, errNotFound
+	} else if err != nil {
+		return BrowserCommand{}, false, err
+	}
+	if revision != input.ExpectedRevision {
+		return BrowserCommand{}, false, errStaleRevision
+	}
+	if input.AttachmentID != "" {
+		var found int
+		if err = tx.QueryRowContext(ctx, `SELECT 1 FROM attachments WHERE id=? AND session_id=?`, input.AttachmentID, sessionID).Scan(&found); errors.Is(err, sql.ErrNoRows) {
+			return BrowserCommand{}, false, errNotFound
+		} else if err != nil {
+			return BrowserCommand{}, false, err
+		}
+	}
+	id, err := randomID(16)
+	if err != nil {
+		return BrowserCommand{}, false, err
+	}
+	now := s.now().UTC()
+	result, err := tx.ExecContext(ctx, `INSERT INTO commands(id,session_id,idempotency_key,request_hash,type,url,tab_id,attachment_id,expected_revision,lease_epoch,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, sessionID, key, requestHash, input.Type, input.URL, input.TabID, input.AttachmentID, input.ExpectedRevision, epoch, "queued", formatTime(now))
+	if err != nil {
+		return BrowserCommand{}, false, err
+	}
+	sequence, err = result.LastInsertId()
+	if err != nil {
+		return BrowserCommand{}, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, formatTime(now), sessionID); err != nil {
+		return BrowserCommand{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return BrowserCommand{}, false, err
+	}
+	input.ID = id
+	input.Sequence = sequence
+	input.SessionID = sessionID
+	input.LeaseEpoch = epoch
+	input.State = "queued"
+	input.CreatedAt = now
+	return input, true, nil
+}
+
+const commandSelect = `SELECT id,sequence,session_id,type,url,tab_id,attachment_id,expected_revision,lease_epoch,state,created_at FROM commands`
+
+func scanCommand(row *sql.Row) (BrowserCommand, error) {
+	var c BrowserCommand
+	var created string
+	err := row.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BrowserCommand{}, errNotFound
+	}
+	if err != nil {
+		return BrowserCommand{}, err
+	}
+	c.CreatedAt, _ = parseTime(created)
+	return c, nil
+}
+
+func (s *sqliteStore) listCommands(ctx context.Context, sessionID string, after int64, limit int) ([]BrowserCommand, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.sequence,c.session_id,c.type,c.url,c.tab_id,c.attachment_id,c.expected_revision,c.lease_epoch,c.state,c.created_at
+		FROM commands c
+		JOIN leases l ON l.session_id=c.session_id AND l.epoch=c.lease_epoch
+		WHERE c.session_id=? AND c.sequence>? AND l.expires_at>?
+		ORDER BY c.sequence LIMIT ?`, sessionID, after, formatTime(s.now()), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []BrowserCommand{}
+	for rows.Next() {
+		var c BrowserCommand
+		var created string
+		if err := rows.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &created); err != nil {
+			return nil, err
+		}
+		c.CreatedAt, _ = parseTime(created)
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
+func (s *sqliteStore) ackCommand(ctx context.Context, id string) (BrowserSession, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	defer tx.Rollback()
+	var sessionID string
+	if err = tx.QueryRowContext(ctx, `SELECT session_id FROM commands WHERE id=?`, id).Scan(&sessionID); errors.Is(err, sql.ErrNoRows) {
+		return BrowserSession{}, errNotFound
+	} else if err != nil {
+		return BrowserSession{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM commands WHERE id=?`, id); err != nil {
+		return BrowserSession{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, formatTime(s.now()), sessionID); err != nil {
+		return BrowserSession{}, err
+	}
+	session, err := s.getSessionQuery(ctx, tx, sessionID)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return BrowserSession{}, err
+	}
+	return session, nil
+}
+
+func (s *sqliteStore) heartbeat(ctx context.Context, sessionID, runtimeState, activeTabID string, tabs []BrowserTab) (BrowserSession, error) {
+	encoded, err := json.Marshal(tabs)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET tabs_json=?,active_tab_id=?,runtime_state=?,last_heartbeat=?,revision=revision+1,updated_at=? WHERE id=?`, string(encoded), activeTabID, runtimeState, formatTime(now), formatTime(now), sessionID)
+	if err != nil {
+		return BrowserSession{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return BrowserSession{}, errNotFound
+	}
+	return s.getSession(ctx, sessionID)
+}
+
+func (s *sqliteStore) addAttachmentWithLease(ctx context.Context, a Attachment, token string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, _, err := s.findLeaseByTokenTx(ctx, tx, a.SessionID, token); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO attachments(id,session_id,filename,content_type,size,digest,created_at) VALUES(?,?,?,?,?,?,?)`, a.ID, a.SessionID, a.Filename, a.ContentType, a.Size, a.Digest, formatTime(a.CreatedAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (s *sqliteStore) listAttachments(ctx context.Context, sessionID string) ([]Attachment, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,filename,content_type,size,digest,created_at FROM attachments WHERE session_id=? ORDER BY created_at,id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Attachment{}
+	for rows.Next() {
+		var a Attachment
+		var created string
+		if err := rows.Scan(&a.ID, &a.SessionID, &a.Filename, &a.ContentType, &a.Size, &a.Digest, &created); err != nil {
+			return nil, err
+		}
+		a.CreatedAt, _ = parseTime(created)
+		result = append(result, a)
+	}
+	return result, rows.Err()
+}
+func (s *sqliteStore) getAttachment(ctx context.Context, sessionID, id string) (Attachment, error) {
+	var a Attachment
+	var created string
+	err := s.db.QueryRowContext(ctx, `SELECT id,session_id,filename,content_type,size,digest,created_at FROM attachments WHERE id=? AND (?='' OR session_id=?)`, id, sessionID, sessionID).Scan(&a.ID, &a.SessionID, &a.Filename, &a.ContentType, &a.Size, &a.Digest, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Attachment{}, errNotFound
+	}
+	if err != nil {
+		return Attachment{}, err
+	}
+	a.CreatedAt, _ = parseTime(created)
+	return a, nil
+}
+func (s *sqliteStore) attachmentPath(a Attachment) string {
+	return filepath.Join(s.attachmentDir, a.SessionID, a.ID)
+}
+
+func randomID(bytesCount int) (string, error) {
+	value := make([]byte, bytesCount)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+func hashSecret(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+func formatTime(value time.Time) string         { return value.UTC().Format(time.RFC3339Nano) }
+func parseTime(value string) (time.Time, error) { return time.Parse(time.RFC3339Nano, value) }

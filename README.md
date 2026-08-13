@@ -10,7 +10,7 @@ Ghostlight runs a persistent Chromium profile on Linux and streams the browser t
 
 ## Current scope
 
-Ghostlight supports one fixed Chromium profile, one Neko viewer, one macOS client, and a trusted private network. Docker Compose owns service startup, restart, and shutdown. The Go control service returns one configured viewer URL from `GET /v1/viewer`; it keeps no session catalog and sends no browser media.
+Ghostlight supports one fixed Chromium profile, one Neko viewer, one macOS client, and a trusted private network. Docker Compose owns service startup, restart, and shutdown. The Go control service now keeps a durable workspace, browser-session catalog, tab snapshots, controller leases, command queue, stream descriptors, and attachment metadata. A Chromium extension reports tab state and applies bounded navigation and tab commands through an authenticated native-messaging bridge. Neko still carries browser media and input; the current macOS release continues to use legacy viewer discovery while the native session shell is completed separately.
 
 ## Daily-driver milestone
 
@@ -64,9 +64,11 @@ cp runtime/.env.example runtime/.env
 chmod 600 runtime/.env
 openssl rand -hex 32
 openssl rand -hex 32
+openssl rand -hex 32
+openssl rand -hex 32
 ```
 
-Put the two generated values in `NEKO_USER_PASSWORD` and `NEKO_ADMIN_PASSWORD`. For a Mac on the same private network, set these three values to the Linux address reachable from that Mac:
+Put different generated values in `NEKO_USER_PASSWORD`, `NEKO_ADMIN_PASSWORD`, `GHOSTLIGHT_API_TOKEN`, and `GHOSTLIGHT_BRIDGE_TOKEN`. For a Mac on the same private network, set these three values to the Linux address reachable from that Mac:
 
 ```dotenv
 GHOSTLIGHT_BIND_ADDRESS=<linux-host>
@@ -89,7 +91,7 @@ runtime/bin/smoke.sh
 
 Preflight requires mode `600` on `runtime/.env` and mode `700` on the profile. It also rejects leftover install placeholders, a viewer URL host that differs from `NEKO_WEBRTC_NAT1TO1`, an invalid Compose model, a symlink profile path, and a profile that Neko uid `1000` cannot write. The profile write check runs through the digest-pinned Neko image.
 
-The smoke script checks control liveness, Neko `/health`, control readiness, stateless viewer discovery, and `/health` through the discovered viewer URL.
+The smoke script checks control liveness, Neko `/health`, storage-aware control readiness, legacy viewer discovery, authenticated workspace discovery, bridge bootstrap, and `/health` through the discovered viewer URL.
 
 Inspect or stop the stack with:
 
@@ -114,7 +116,7 @@ Enter the Linux control URL, such as `http://<linux-host>:8080`, and select **Co
 
 The status row distinguishes `Loading viewer`, `Viewer loaded`, and viewer navigation failure. `Viewer loaded` means WebKit finished the page navigation; it does not confirm a connected WebRTC media stream. Automatic launch from a saved control URL retries failed viewer navigation twice. **Retry** initiates one user-requested reload. **Disconnect** cancels discovery, clears the saved URL, and disables automatic connection on the next launch.
 
-Chromium cookies, local storage, browsing and download history, website sessions, and restored tabs live in the Linux profile. Downloaded files are outside the profile mount at `/home/neko/Downloads`. The macOS app stores only the control URL in `UserDefaults`.
+Chromium cookies, local storage, browsing and download history, website sessions, and restored tabs live in the Linux profile. Downloads use a dedicated Docker volume. Control state and staged attachments use separate named volumes. The current macOS app stores only the control URL in `UserDefaults`.
 
 ## Network and credentials
 
@@ -124,7 +126,7 @@ Chromium cookies, local storage, browsing and download history, website sessions
 | `8081` | TCP | Neko login, viewer page, and signaling |
 | `52000` | UDP and TCP | Neko WebRTC media and input mux |
 
-The control API has no authentication or TLS. Neko requires the configured user or admin password. Keep the published ports on a trusted private or loopback interface, keep `runtime/.env` free of group and world permissions, and allow both protocols on port `52000` between the Mac and Linux host.
+The workspace and session API requires `Authorization: Bearer <GHOSTLIGHT_API_TOKEN>`. Lease-protected writes also require `X-Ghostlight-Lease-Token`; the Chromium bridge uses its separate bearer token. Legacy health, readiness, and `GET /v1/viewer` remain unauthenticated for compatibility. The runtime provides no TLS or rate limiting. Keep the published ports on a trusted private or loopback interface, keep `runtime/.env` free of group and world permissions, and allow both protocols on port `52000` between the Mac and Linux host.
 
 The Chromium profile and its backups contain credential-bearing browser state. `runtime/.env`, `runtime/data/`, screenshots, logs, and diagnostics must remain free of source control and public artifact uploads when they contain credentials or account data.
 

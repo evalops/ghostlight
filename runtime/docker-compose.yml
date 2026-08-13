@@ -26,6 +26,7 @@ services:
     volumes:
       - "${CHROMIUM_PROFILE_DIR:-./data/chromium}:/home/neko/.config/chromium"
       - "./chromium-policy.json:/etc/chromium/policies/managed/policies.json:ro"
+      - ghostlight-downloads:/home/neko/Downloads
     environment:
       # Neko defaults to container-local loopback; control readiness uses the private Compose network.
       NEKO_SERVER_BIND: "0.0.0.0:8080"
@@ -42,6 +43,8 @@ services:
       NEKO_WEBRTC_TCPMUX: "${NEKO_WEBRTC_TCPMUX:-52000}"
       NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-1}"
       NEKO_WEBRTC_NAT1TO1: "${NEKO_WEBRTC_NAT1TO1:-127.0.0.1}"
+      GHOSTLIGHT_CONTROL_INTERNAL_URL: "http://control:8080"
+      GHOSTLIGHT_BRIDGE_TOKEN: "${GHOSTLIGHT_BRIDGE_TOKEN:?generate GHOSTLIGHT_BRIDGE_TOKEN in runtime/.env}"
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null || exit 1"]
       interval: 10s
@@ -71,6 +74,14 @@ services:
       GHOSTLIGHT_LISTEN_ADDR: "0.0.0.0:8080"
       GHOSTLIGHT_VIEWER_URL: "${GHOSTLIGHT_VIEWER_URL:-http://127.0.0.1:8081}"
       GHOSTLIGHT_VIEWER_HEALTH_URL: "${GHOSTLIGHT_VIEWER_HEALTH_URL:-http://viewer:8080}"
+      GHOSTLIGHT_STATE_DIR: "/var/lib/ghostlight/state"
+      GHOSTLIGHT_ATTACHMENT_DIR: "/var/lib/ghostlight/attachments"
+      GHOSTLIGHT_API_TOKEN: "${GHOSTLIGHT_API_TOKEN:?generate GHOSTLIGHT_API_TOKEN in runtime/.env}"
+      GHOSTLIGHT_BRIDGE_TOKEN: "${GHOSTLIGHT_BRIDGE_TOKEN:?generate GHOSTLIGHT_BRIDGE_TOKEN in runtime/.env}"
+      GHOSTLIGHT_LEASE_TTL_SECONDS: "${GHOSTLIGHT_LEASE_TTL_SECONDS:-30}"
+    volumes:
+      - ghostlight-control-state:/var/lib/ghostlight/state
+      - ghostlight-control-attachments:/var/lib/ghostlight/attachments
     depends_on:
       viewer:
         condition: service_healthy
@@ -81,3 +92,8 @@ services:
       start_period: 10s
       retries: 12
     # Control contract: GET /v1/viewer returns the configured viewer URL.
+
+volumes:
+  ghostlight-control-state:
+  ghostlight-control-attachments:
+  ghostlight-downloads:
