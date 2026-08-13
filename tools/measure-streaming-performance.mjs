@@ -842,9 +842,12 @@ function x11InputDriverScript() {
   ].join("\n");
 }
 
+function x11InputDriverRemoteScript(containerId) {
+  return `docker exec --interactive --user neko --env DISPLAY=:99.0 ${shellQuote(containerId)} sh -lc ${shellQuote(x11InputDriverScript())}`;
+}
+
 function startX11InputDriver(containerId) {
-  const remoteScript = `docker exec --user neko --env DISPLAY=:99.0 ${shellQuote(containerId)} sh -lc ${shellQuote(x11InputDriverScript())}`;
-  const worker = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, remoteScript], { stdio: ["pipe", "pipe", "pipe"] });
+  const worker = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, x11InputDriverRemoteScript(containerId)], { stdio: ["pipe", "pipe", "pipe"] });
   const pending = [];
   let stdout = "";
   let stderr = "";
@@ -1563,6 +1566,7 @@ function runSelfTests() {
   assert.match(x11NavigationScript("typing"), /xdotool windowactivate --sync/);
   assert.match(x11InputDriverScript(), /while IFS= read -r action/);
   assert.match(x11InputDriverScript(), /ok:f8/);
+  assert.match(x11InputDriverRemoteScript("viewer"), /docker exec --interactive/);
   assert.equal(tunnelExited(null), false);
   assert.equal(tunnelExited({ exitCode: null }), false);
   assert.equal(tunnelExited({ exitCode: 1 }), true);
