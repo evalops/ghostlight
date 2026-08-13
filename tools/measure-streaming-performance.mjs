@@ -1213,10 +1213,14 @@ async function savePhaseScreenshot(page, phase) {
   return path;
 }
 
+function controlMetrics(parsed) {
+  return parsed.aggregate ?? parsed.diagnostics ?? parsed;
+}
+
 async function readControl() {
   if (!CONTROL_JSON) return null;
   const parsed = JSON.parse(await fs.readFile(CONTROL_JSON, "utf8"));
-  return parsed.aggregate ?? parsed;
+  return controlMetrics(parsed);
 }
 
 function buildGates(aggregate, control) {
@@ -1486,6 +1490,11 @@ function runSelfTests() {
   assert.equal(tunnelExited(null), false);
   assert.equal(tunnelExited({ exitCode: null }), false);
   assert.equal(tunnelExited({ exitCode: 1 }), true);
+  assert.deepEqual(controlMetrics({ diagnostics: { dropped_frame_ratio: 0.01, freeze_ratio: 0.02, input_to_present_p95_ms: 300 } }), {
+    dropped_frame_ratio: 0.01,
+    freeze_ratio: 0.02,
+    input_to_present_p95_ms: 300,
+  });
 
   const samples = [
     { captured_at: "2026-08-12T00:00:00.000Z", cpu_pct: 10, memory_mib: 100 },
