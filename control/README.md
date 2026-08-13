@@ -35,11 +35,12 @@ Startup applies the same validation to the viewer URL and an explicit health URL
 | `GET /readyz` | `200 {"status":"ok","viewer":"ready"}` | The viewer returns a `2xx` response from `/health` within the two-second client timeout. |
 | `GET /v1/viewer` | `200 {"viewer_url":"<configured-url>"}` | The configured value is available in process memory. |
 | `GET /v1/workspaces` | `200` | Returns the durable workspace catalog. |
-| `GET, POST /v1/sessions` | `200, 201` | Lists or idempotently resumes the durable browser session. |
+| `GET, POST /v1/sessions` | `200` | Lists or idempotently ensures the single durable browser session. |
 | `GET /v1/sessions/{id}` | `200` | Returns authoritative session, tab, lease, and stream state. |
 | `GET /v1/sessions/{id}/events` | `200, 204` | Returns a newer revision or no content. |
 | `POST, PUT, DELETE /v1/sessions/{id}/leases[/{lease}]` | `201, 200, 204` | Acquires, renews, or releases the exclusive controller lease. |
 | `POST /v1/sessions/{id}/commands` | `202` | Queues an idempotent, revision-fenced browser command. |
+| `GET /v1/sessions/{id}/commands/{command}` | `200` | Returns queued or durable terminal command status and result. |
 | `POST /v1/sessions/{id}/stream` | `201` | Creates a short-lived descriptor for the current Neko stream. |
 | `GET, POST /v1/sessions/{id}/attachments` | `200, 201` | Lists metadata or stages a lease-authorized file up to 25 MiB. |
 
@@ -53,7 +54,7 @@ Viewer network failure, timeout, redirect, or a response outside `200` through `
 
 Unknown paths return `404`. A known path with a method other than `GET` returns `405`, an `Allow: GET` header, and a JSON error body. The service does not read request bodies.
 
-`GET /v1/viewer` remains a stateless compatibility route. Product routes require the API bearer token. Lease renewal, release, commands, and attachment upload also require the lease token returned only when a client acquires a lease. Bridge routes use the separate bridge bearer token. Request bodies reject unknown JSON fields; mutating create and command requests require `Idempotency-Key`.
+`GET /v1/viewer` remains a stateless compatibility route. Product routes require the API bearer token. Lease renewal, release, commands, and attachment upload also require the lease token returned only when a client acquires a lease. Bridge routes use the separate bridge bearer token. Request bodies reject unknown JSON fields; session ensure and command requests require `Idempotency-Key`. The bridge records command completion before acknowledging it, and control retains terminal status so a lost response retries the acknowledgment without replaying the browser action.
 
 ## Network boundary
 

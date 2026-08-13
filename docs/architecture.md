@@ -37,7 +37,7 @@ Docker Compose starts one Neko Chromium container and one Go control container. 
 4. Control opens its SQLite catalog and checks storage plus viewer health before reporting readiness.
 5. The extension connects to the native host, authenticates with `GHOSTLIGHT_BRIDGE_TOKEN`, bootstraps the durable session, and reports the authoritative tab snapshot.
 6. An API client authenticates with `GHOSTLIGHT_API_TOKEN`, acquires the exclusive controller lease, and submits revision-fenced commands with the returned lease token.
-7. The bridge polls, applies each bounded Chromium command, acknowledges it, and publishes a new tab snapshot.
+7. The bridge polls and applies each bounded Chromium command. It records completion locally before sending an idempotent acknowledgment; control retains the terminal status and result. It then publishes a new tab snapshot.
 8. The current macOS client sends legacy `GET /v1/viewer`; `WKWebView` loads the Neko page and negotiates WebRTC after Neko authentication.
 
 The macOS `Viewer loaded` state occurs after step 6 when WebKit reports navigation completion. It is not evidence that steps 7 and 8 completed.

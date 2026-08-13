@@ -68,7 +68,7 @@ openssl rand -hex 32
 openssl rand -hex 32
 ```
 
-Put different generated values in `NEKO_USER_PASSWORD`, `NEKO_ADMIN_PASSWORD`, `GHOSTLIGHT_API_TOKEN`, and `GHOSTLIGHT_BRIDGE_TOKEN`. For a Mac on the same private network, set these three values to the Linux address reachable from that Mac:
+Put different generated values in `NEKO_USER_PASSWORD`, `NEKO_ADMIN_PASSWORD`, `GHOSTLIGHT_API_TOKEN`, and `GHOSTLIGHT_BRIDGE_TOKEN`. For a Mac on the same private network, set these four values to the Linux address reachable from that Mac:
 
 ```dotenv
 GHOSTLIGHT_BIND_ADDRESS=<linux-host>

@@ -112,24 +112,19 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		var input struct {
 			WorkspaceID string `json:"workspace_id"`
-			Name        string `json:"name"`
 		}
 		body, err := decodeStrictJSON(r, &input)
-		if err != nil || input.WorkspaceID == "" || input.Name == "" || len(input.Name) > 120 {
-			writeError(w, http.StatusBadRequest, "invalid_request", "workspace_id and name are required")
+		if err != nil || input.WorkspaceID == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "workspace_id is required")
 			return
 		}
 		digest := sha256.Sum256(body)
-		session, created, err := h.store.createSession(r.Context(), input.WorkspaceID, input.Name, key, hex.EncodeToString(digest[:]))
+		session, err := h.store.ensureSession(r.Context(), input.WorkspaceID, key, hex.EncodeToString(digest[:]))
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		status := http.StatusOK
-		if created {
-			status = http.StatusCreated
-		}
-		writeJSON(w, status, session)
+		writeJSON(w, http.StatusOK, session)
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
 	}
@@ -178,6 +173,8 @@ func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, 
 		h.handleLease(w, r, sessionID, tail[1])
 	case len(tail) == 1 && tail[0] == "commands":
 		h.handleCommand(w, r, sessionID)
+	case len(tail) == 2 && tail[0] == "commands":
+		h.handleCommandStatus(w, r, sessionID, tail[1])
 	case len(tail) == 1 && tail[0] == "stream":
 		h.handleStream(w, r, sessionID)
 	case len(tail) == 1 && tail[0] == "attachments":
@@ -187,6 +184,19 @@ func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, 
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (h *handler) handleCommandStatus(w http.ResponseWriter, r *http.Request, sessionID, commandID string) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	command, err := h.store.getCommand(r.Context(), sessionID, commandID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, command)
 }
 
 func (h *handler) handleLeaseAcquire(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -438,16 +448,16 @@ func (h *handler) handleBridgeCommandAck(w http.ResponseWriter, r *http.Request,
 		Error  string          `json:"error"`
 		Result json.RawMessage `json:"result"`
 	}
-	if _, err := decodeStrictJSON(r, &acknowledgment); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "acknowledgment must be valid JSON")
+	if _, err := decodeStrictJSON(r, &acknowledgment); err != nil || (acknowledgment.Status != "ok" && acknowledgment.Status != "failed") || (acknowledgment.Status == "failed" && acknowledgment.Error == "") || len(acknowledgment.Error) > 2000 || (len(acknowledgment.Result) != 0 && !json.Valid(acknowledgment.Result)) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "acknowledgment status and result are invalid")
 		return
 	}
-	session, err := h.store.ackCommand(r.Context(), commandID)
+	command, err := h.store.ackCommand(r.Context(), commandID, acknowledgment.Status, acknowledgment.Error, acknowledgment.Result)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, session)
+	writeJSON(w, http.StatusOK, command)
 }
 
 func (h *handler) handleBridgeAttachment(w http.ResponseWriter, r *http.Request, attachmentID string) {

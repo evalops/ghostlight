@@ -109,9 +109,9 @@ func TestProductRoutesRejectMissingAndWrongBearerTokens(t *testing.T) {
 
 func TestSessionCreateIdempotencyEventsAndStrictJSON(t *testing.T) {
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
-	body := `{"workspace_id":"default","name":"Research"}`
+	body := `{"workspace_id":"default"}`
 	first := doJSON(t, h, http.MethodPost, "/v1/sessions", "create-1", "", strings.NewReader(body))
-	if first.Code != http.StatusCreated {
+	if first.Code != http.StatusOK {
 		t.Fatalf("first create = %d %s", first.Code, first.Body.String())
 	}
 	var created BrowserSession
@@ -126,7 +126,7 @@ func TestSessionCreateIdempotencyEventsAndStrictJSON(t *testing.T) {
 	if unchanged.Code != http.StatusNoContent {
 		t.Fatalf("unchanged events = %d %s", unchanged.Code, unchanged.Body.String())
 	}
-	bad := doJSON(t, h, http.MethodPost, "/v1/sessions", "create-2", "", strings.NewReader(`{"workspace_id":"default","name":"x","unknown":true}`))
+	bad := doJSON(t, h, http.MethodPost, "/v1/sessions", "create-2", "", strings.NewReader(`{"workspace_id":"default","name":"x"}`))
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("unknown JSON field = %d %s", bad.Code, bad.Body.String())
 	}
@@ -292,6 +292,12 @@ func TestCommandsHeartbeatAndBridgeAuthentication(t *testing.T) {
 	if len(session.Tabs) != 1 || session.ActiveTabID != "tab-1" || session.RuntimeState != "ready" || !session.Tabs[0].Active || !session.Tabs[0].Loading || session.Tabs[0].WindowID != 2 || session.Tabs[0].Index != 4 {
 		t.Fatalf("heartbeat session = %#v", session)
 	}
+	repeatedHeartbeat := doJSON(t, h, http.MethodPost, "/v1/bridge/heartbeat", "", h.config.BridgeToken, strings.NewReader(`{"session_id":"default","sequence":5,"agent_version":"0.1.0","tabs":[{"id":"tab-1","title":"Example","url":"https://example.test","favicon_url":"https://example.test/icon.png","active":true,"loading":true,"audible":false,"discarded":false,"window_id":2,"index":4}],"active_tab_id":"tab-1","runtime_state":"ready"}`))
+	var unchanged BrowserSession
+	decodeRecorder(t, repeatedHeartbeat, &unchanged)
+	if unchanged.Revision != session.Revision {
+		t.Fatalf("unchanged heartbeat revision = %d, want %d", unchanged.Revision, session.Revision)
+	}
 	tx, err = h.store.db.BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -323,9 +329,19 @@ func TestCommandsHeartbeatAndBridgeAuthentication(t *testing.T) {
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), queued.ID) {
 		t.Fatalf("bridge commands = %d %s", listed.Code, listed.Body.String())
 	}
-	acked := doJSON(t, h, http.MethodPost, "/v1/bridge/commands/"+queued.ID+"/ack", "", h.config.BridgeToken, strings.NewReader(`{}`))
+	acked := doJSON(t, h, http.MethodPost, "/v1/bridge/commands/"+queued.ID+"/ack", "", h.config.BridgeToken, strings.NewReader(`{"status":"ok","result":{"tab_id":17}}`))
 	if acked.Code != http.StatusOK {
 		t.Fatalf("ack = %d %s", acked.Code, acked.Body.String())
+	}
+	status := doJSON(t, h, http.MethodGet, "/v1/sessions/default/commands/"+queued.ID, "", "", nil)
+	var completed BrowserCommand
+	decodeRecorder(t, status, &completed)
+	if status.Code != http.StatusOK || completed.State != "ok" || string(completed.Result) != `{"tab_id":17}` || completed.AcknowledgedAt == nil {
+		t.Fatalf("command status = %d %#v", status.Code, completed)
+	}
+	repeated := doJSON(t, h, http.MethodPost, "/v1/bridge/commands/"+queued.ID+"/ack", "", h.config.BridgeToken, strings.NewReader(`{"status":"ok","result":{"tab_id":17}}`))
+	if repeated.Code != http.StatusOK {
+		t.Fatalf("repeated ack = %d %s", repeated.Code, repeated.Body.String())
 	}
 }
 

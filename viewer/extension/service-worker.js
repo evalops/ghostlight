@@ -1,5 +1,7 @@
-import { buildHeartbeat, validateCommand, validateNavigationURL } from "./protocol.js";
+import { completeCommand } from "./command-completion.js";
 import { executeCommand } from "./command-executor.js";
+import { buildHeartbeat, validateCommand } from "./protocol.js";
+import { createSnapshotPublisher } from "./snapshot-coalescer.js";
 
 const nativeHost = "org.evalops.ghostlight.browser_agent";
 const heartbeatAlarm = "ghostlight-heartbeat";
@@ -69,12 +71,12 @@ function scheduleReconnect() {
   setTimeout(connect, delay);
 }
 
-async function publishSnapshot() {
+const publishSnapshot = createSnapshotPublisher(async () => {
   if (!sessionID || !nativePort) return;
   const tabs = await chrome.tabs.query({});
   sequence += 1;
   await nativeRequest(buildHeartbeat(sessionID, sequence, tabs));
-}
+});
 
 function scheduleSnapshot() {
   clearTimeout(syncTimer);
@@ -92,20 +94,12 @@ async function pollCommands() {
     const response = await nativeRequest({ operation: "poll", session_id: sessionID, after: 0 });
     for (const rawCommand of response.commands ?? []) {
       const command = validateCommand(rawCommand);
-      try {
-        const result = await executeCommand(command, chrome.tabs, nativeRequest);
-        await nativeRequest({
-          operation: "ack",
-          command_id: command.id,
-          payload: { status: "ok", result },
-        });
-      } catch (error) {
-        await nativeRequest({
-          operation: "ack",
-          command_id: command.id,
-          payload: { status: "failed", error: String(error?.message || error) },
-        });
-      }
+      await completeCommand(
+        command,
+        chrome.storage.local,
+        (value) => executeCommand(value, chrome.tabs, nativeRequest),
+        (commandID, payload) => nativeRequest({ operation: "ack", command_id: commandID, payload }),
+      );
     }
     if ((response.commands ?? []).length > 0) await publishSnapshot();
   } catch {

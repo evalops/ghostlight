@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 const schemaVersion = 1
 
@@ -69,15 +72,18 @@ type Attachment struct {
 }
 
 type BrowserCommand struct {
-	ID               string    `json:"id"`
-	Sequence         int64     `json:"sequence"`
-	SessionID        string    `json:"session_id"`
-	Type             string    `json:"type"`
-	URL              string    `json:"url,omitempty"`
-	TabID            string    `json:"tab_id,omitempty"`
-	AttachmentID     string    `json:"attachment_id,omitempty"`
-	ExpectedRevision int64     `json:"expected_revision"`
-	LeaseEpoch       int64     `json:"lease_epoch"`
-	State            string    `json:"state"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID               string          `json:"id"`
+	Sequence         int64           `json:"sequence"`
+	SessionID        string          `json:"session_id"`
+	Type             string          `json:"type"`
+	URL              string          `json:"url,omitempty"`
+	TabID            string          `json:"tab_id,omitempty"`
+	AttachmentID     string          `json:"attachment_id,omitempty"`
+	ExpectedRevision int64           `json:"expected_revision"`
+	LeaseEpoch       int64           `json:"lease_epoch"`
+	State            string          `json:"state"`
+	Error            string          `json:"error,omitempty"`
+	Result           json.RawMessage `json:"result,omitempty"`
+	AcknowledgedAt   *time.Time      `json:"acknowledged_at,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
 }
