@@ -51,7 +51,8 @@ for path in \
   "$RUNTIME_DIR/bin/preflight.sh" \
   "$RUNTIME_DIR/bin/smoke.sh" \
   "$RUNTIME_DIR/bin/profile-backup.sh" \
-  "$RUNTIME_DIR/tests/test_profile_backup.sh"; do
+  "$RUNTIME_DIR/tests/test_profile_backup.sh" \
+  "$REPO_DIR/tests/acceptance/run-linux-persistence.sh"; do
   assert_file "$path"
 done
 assert_file "$REPO_DIR/macos/package-app.sh"
@@ -97,6 +98,11 @@ assert_contains "$RUNTIME_DIR/.env.example" 'GHOSTLIGHT_BRIDGE_TOKEN=__GENERATE_
 assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_CODEC=h264'
 assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_WEBRTC_ICELITE=1'
 assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_PIPELINE=ximagesrc display-name={display}'
+# These are literal shell assignments in the acceptance fixture.
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'GHOSTLIGHT_API_TOKEN=$API_TOKEN'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'GHOSTLIGHT_BRIDGE_TOKEN=$BRIDGE_TOKEN'
 python3 - "$RUNTIME_DIR/chromium-policy.json" <<'PY'
 import json
 import sys
