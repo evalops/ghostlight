@@ -25,6 +25,7 @@ var (
 	errUnauthorized   = errors.New("unauthorized")
 	errStaleRevision  = errors.New("stale revision")
 	errLeaseExpired   = errors.New("lease expired")
+	errStorageLimit   = errors.New("storage limit reached")
 	errIdempotencyKey = errors.New("idempotency key reused with different request")
 )
 
@@ -627,6 +628,13 @@ func (s *sqliteStore) addAttachmentWithLease(ctx context.Context, a Attachment, 
 	defer tx.Rollback()
 	if _, _, err := s.findLeaseByTokenTx(ctx, tx, a.SessionID, token); err != nil {
 		return err
+	}
+	var count, total int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(size),0) FROM attachments WHERE session_id=?`, a.SessionID).Scan(&count, &total); err != nil {
+		return err
+	}
+	if count >= maxSessionAttachments || total+a.Size > maxSessionAttachmentBytes {
+		return errStorageLimit
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO attachments(id,session_id,filename,content_type,size,digest,created_at) VALUES(?,?,?,?,?,?,?)`, a.ID, a.SessionID, a.Filename, a.ContentType, a.Size, a.Digest, formatTime(a.CreatedAt)); err != nil {
 		return err

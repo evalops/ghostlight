@@ -105,7 +105,7 @@ func TestBridgeClientStagesAttachmentSafely(t *testing.T) {
 	if err := json.Unmarshal(response, &staged); err != nil {
 		t.Fatalf("decode stage response: %v", err)
 	}
-	if staged.Filename != "report.txt" {
+	if staged.Filename != "attachment-1-report.txt" {
 		t.Fatalf("filename = %q", staged.Filename)
 	}
 	path := filepath.Join(downloads, staged.Filename)

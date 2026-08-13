@@ -257,6 +257,21 @@ func TestStreamRevisionAndAttachmentLeaseRevalidation(t *testing.T) {
 	}
 }
 
+func TestAttachmentCountLimitFailsClosed(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	lease := acquireLease(t, h, "default")
+	for index := 0; index < maxSessionAttachments; index++ {
+		id := fmt.Sprintf("existing-%03d", index)
+		if _, err := h.store.db.Exec(`INSERT INTO attachments(id,session_id,filename,content_type,size,digest,created_at) VALUES(?,?,?,?,?,?,?)`, id, "default", "file.txt", "text/plain", 0, "sha256:test", formatTime(time.Now())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attachment := Attachment{ID: "over-limit", SessionID: "default", Filename: "report.pdf", ContentType: "application/pdf", Size: 4, Digest: "sha256:test", CreatedAt: time.Now()}
+	if err := h.store.addAttachmentWithLease(t.Context(), attachment, lease.Token); !errors.Is(err, errStorageLimit) {
+		t.Fatalf("addAttachmentWithLease() error = %v, want storage limit", err)
+	}
+}
+
 func TestCommandsHeartbeatAndBridgeAuthentication(t *testing.T) {
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
 	bootstrap := doJSON(t, h, http.MethodGet, "/v1/bridge/bootstrap", "", h.config.BridgeToken, nil)

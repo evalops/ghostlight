@@ -50,7 +50,7 @@ The macOS `Viewer loaded` state occurs after step 6 when WebKit reports navigati
 | Runtime configuration and Neko passwords | Linux operator | `runtime/.env` | Persists until the operator changes or removes the file. |
 | Viewer URL | Control process | `GHOSTLIGHT_VIEWER_URL` environment value | Recreated with the control container. |
 | Workspace, session, revision, lease epochs, commands, streams, tab snapshots, and attachment metadata | Control service | `ghostlight-control-state` SQLite volume | Persists across control-container recreation. |
-| Attachment bodies | Control service and native host | `ghostlight-control-attachments` volume, staged into the viewer downloads volume | Persists until the named volume or file is removed. |
+| Attachment bodies | Control service and native host | `ghostlight-control-attachments` volume, staged into the viewer downloads volume | Persists until the named volume or file is removed. Each session is capped at 100 files and 1 GiB; staged download names include the attachment ID to avoid collisions. |
 | Chromium browser data | Chromium through Neko | `runtime/data/chromium` bind mount | Persists across container recreation and `docker compose down`. |
 | Neko login and WebRTC connection state | Neko process and embedded client | Process memory | Ends when the viewer or client connection ends. |
 | Container lifecycle state | Docker Compose and Docker Engine | Docker-managed state | Recreated by Compose operations. |

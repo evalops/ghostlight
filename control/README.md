@@ -42,7 +42,7 @@ Startup applies the same validation to the viewer URL and an explicit health URL
 | `POST /v1/sessions/{id}/commands` | `202` | Queues an idempotent, revision-fenced browser command. |
 | `GET /v1/sessions/{id}/commands/{command}` | `200` | Returns queued or durable terminal command status and result. |
 | `POST /v1/sessions/{id}/stream` | `201` | Creates a short-lived descriptor for the current Neko stream. |
-| `GET, POST /v1/sessions/{id}/attachments` | `200, 201` | Lists metadata or stages a lease-authorized file up to 25 MiB. |
+| `GET, POST /v1/sessions/{id}/attachments` | `200, 201` | Lists metadata or stages a lease-authorized file up to 25 MiB. A session is capped at 100 files and 1 GiB. |
 
 Readiness replaces the selected health base URL's path and query with `/health`. For example, `http://viewer:8080/login?next=1` produces the readiness target `http://viewer:8080/health`.
 

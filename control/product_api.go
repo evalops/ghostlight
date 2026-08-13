@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	maxJSONBodyBytes   = 1 << 20
-	maxAttachmentBytes = 25 << 20
-	maxBridgeCommands  = 100
+	maxJSONBodyBytes          = 1 << 20
+	maxAttachmentBytes        = 25 << 20
+	maxSessionAttachments     = 100
+	maxSessionAttachmentBytes = 1 << 30
+	maxBridgeCommands         = 100
 )
 
 func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
@@ -589,6 +591,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was reused with another request")
 	case errors.Is(err, errUnauthorized), errors.Is(err, errLeaseExpired):
 		writeError(w, http.StatusUnauthorized, "lease_invalid", "controller lease is missing, expired, or invalid")
+	case errors.Is(err, errStorageLimit):
+		writeError(w, http.StatusInsufficientStorage, "attachment_limit", "session attachment storage limit was reached")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "request could not be completed")
 	}

@@ -277,10 +277,11 @@ func (c *bridgeClient) stageAttachment(ctx context.Context, attachmentID string)
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("attachment download returned HTTP %d", response.StatusCode)
 	}
-	filename, err := sanitizeFilename(response.Header.Get("X-Ghostlight-Filename"))
+	originalFilename, err := sanitizeFilename(response.Header.Get("X-Ghostlight-Filename"))
 	if err != nil {
 		return nil, fmt.Errorf("attachment filename: %w", err)
 	}
+	filename := attachmentID + "-" + originalFilename
 	expectedDigest := strings.ToLower(response.Header.Get("X-Ghostlight-SHA256"))
 	if len(expectedDigest) != sha256.Size*2 {
 		return nil, errors.New("attachment response omitted a valid SHA-256 digest")
