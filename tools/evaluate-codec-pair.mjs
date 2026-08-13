@@ -56,6 +56,14 @@ const candidateHealthy = h264.every((run) => run.server.status === "measured"
   && run.server.phases.every(healthyPhase));
 const serverMeasured = runs.every((run) => run.server.status === "measured" && run.server.phases?.length === 4 && run.server.error == null);
 const nativeMeasured = runs.every((run) => run.native.status === "measured" && run.native.full_phase_coverage === 1 && run.native.phases?.length === 4);
+const nativeQualityHealthy = (run) => run.native.status === "measured"
+  && run.native.active_media === 1
+  && run.native.dropped_frame_ratio <= 0.01
+  && run.native.decoded_fps >= 22.5
+  && run.native.phases?.length === 4
+  && run.native.phases.every((phase) => phase.dropped_frame_ratio <= 0.01 && phase.decoded_fps >= 22.5);
+const nativeControlHealthy = vp8.every(nativeQualityHealthy);
+const nativeCandidateHealthy = h264.every(nativeQualityHealthy);
 
 const metric = (group, selector) => median(group.map(selector));
 const vp8Cpu = metric(vp8, (run) => run.server.viewer_cpu_median_pct);
@@ -71,13 +79,16 @@ const pairComparisons = [1, 2, 3].map((pair) => {
     dropped_frame_ratio_delta: Number.isFinite(control?.server.diagnostics?.dropped_frame_ratio) && Number.isFinite(candidate?.server.diagnostics?.dropped_frame_ratio) ? candidate.server.diagnostics.dropped_frame_ratio - control.server.diagnostics.dropped_frame_ratio : null,
     freeze_ratio_delta: Number.isFinite(control?.server.diagnostics?.freeze_ratio) && Number.isFinite(candidate?.server.diagnostics?.freeze_ratio) ? candidate.server.diagnostics.freeze_ratio - control.server.diagnostics.freeze_ratio : null,
     input_p95_control_ratio: ratio(candidate?.server.diagnostics?.input_to_present_p95_ms, control?.server.diagnostics?.input_to_present_p95_ms),
+    viewer_memory_ratio: ratio(candidate?.server.diagnostics?.viewer_memory_p95_mib, control?.server.diagnostics?.viewer_memory_p95_mib),
     native_mac_cpu_ratio: ratio(candidate?.native.mac_cpu_median_pct, control?.native.mac_cpu_median_pct),
+    native_mac_memory_ratio: ratio(candidate?.native.mac_memory_median_mib, control?.native.mac_memory_median_mib),
+    native_dropped_frame_ratio_delta: Number.isFinite(control?.native.dropped_frame_ratio) && Number.isFinite(candidate?.native.dropped_frame_ratio) ? candidate.native.dropped_frame_ratio - control.native.dropped_frame_ratio : null,
   };
 });
 const cpuReduction = median(pairComparisons.map((pair) => pair.viewer_cpu_reduction_pct));
 const worstFinite = (values) => values.every(Number.isFinite) ? Math.max(...values) : null;
 const result = {
-  schema_version: 1,
+  schema_version: 2,
   captured_at: new Date().toISOString(),
   source_sha: sourceSHAs.size === 1 ? [...sourceSHAs][0] : null,
   image_reference: imageReferences.size === 1 ? [...imageReferences][0] : null,
@@ -96,8 +107,13 @@ const result = {
   native_h264_power_efficient_decoder: h264.every((run) => run.native.power_efficient_decoder === true) ? 1 : 0,
   native_full_phase_coverage: nativeMeasured ? 1 : 0,
   native_mac_cpu_ratio: worstFinite(pairComparisons.map((pair) => pair.native_mac_cpu_ratio)),
+  native_mac_memory_ratio: worstFinite(pairComparisons.map((pair) => pair.native_mac_memory_ratio)),
+  native_dropped_frame_ratio_delta: worstFinite(pairComparisons.map((pair) => pair.native_dropped_frame_ratio_delta)),
+  viewer_memory_ratio: worstFinite(pairComparisons.map((pair) => pair.viewer_memory_ratio)),
   absolute_control_health: controlHealthy ? 1 : 0,
   absolute_candidate_health: candidateHealthy ? 1 : 0,
+  absolute_native_control_health: nativeControlHealthy ? 1 : 0,
+  absolute_native_candidate_health: nativeCandidateHealthy ? 1 : 0,
   vp8_viewer_cpu_median_pct: vp8Cpu,
   h264_viewer_cpu_median_pct: h264Cpu,
   vp8_mac_cpu_median_pct: vp8MacCpu,
@@ -119,6 +135,10 @@ const result = {
     dropped_frame_ratio: run.server.diagnostics?.dropped_frame_ratio,
     freeze_ratio: run.server.diagnostics?.freeze_ratio,
     native_mac_cpu_median_pct: run.native.mac_cpu_median_pct,
+    native_mac_memory_median_mib: run.native.mac_memory_median_mib,
+    native_decoded_fps: run.native.decoded_fps,
+    native_dropped_frame_ratio: run.native.dropped_frame_ratio,
+    native_max_phase_dropped_frame_ratio: run.native.phases?.length ? Math.max(...run.native.phases.map((phase) => phase.dropped_frame_ratio)) : null,
     native_power_efficient_decoder: run.native.power_efficient_decoder,
     native_decoder_implementation: run.native.decoder_implementation,
     native_full_phase_coverage: run.native.full_phase_coverage,
@@ -131,6 +151,8 @@ const gates = {
   negotiated_codec_pair: result.negotiated_codec_pair === 1,
   absolute_control_health: result.absolute_control_health === 1,
   absolute_candidate_health: result.absolute_candidate_health === 1,
+  absolute_native_control_health: result.absolute_native_control_health === 1,
+  absolute_native_candidate_health: result.absolute_native_candidate_health === 1,
   causal_marker_success_rate: result.causal_marker_success_rate >= 0.99,
   actual_to_target_fps_ratio: result.actual_to_target_fps_ratio >= 0.90,
   dropped_frame_ratio_delta: Number.isFinite(result.dropped_frame_ratio_delta) && result.dropped_frame_ratio_delta <= 0,
@@ -140,6 +162,9 @@ const gates = {
   native_h264_active_media: result.native_h264_active_media === 1,
   native_full_phase_coverage: result.native_full_phase_coverage === 1,
   native_mac_cpu_ratio: Number.isFinite(result.native_mac_cpu_ratio) && result.native_mac_cpu_ratio <= 1,
+  native_mac_memory_ratio: Number.isFinite(result.native_mac_memory_ratio) && result.native_mac_memory_ratio <= 1.05,
+  native_dropped_frame_ratio_delta: Number.isFinite(result.native_dropped_frame_ratio_delta) && result.native_dropped_frame_ratio_delta <= 0,
+  viewer_memory_ratio: Number.isFinite(result.viewer_memory_ratio) && result.viewer_memory_ratio <= 1.05,
 };
 result.gates = { ...gates, passed: Object.values(gates).every(Boolean) };
 result.status = result.gates.passed ? "accepted" : "rejected";
