@@ -12,11 +12,32 @@ struct GhostlightApp: App {
     }
 }
 
+private struct HomeDestination: Identifiable {
+    let name: String
+    let host: String
+    let url: String
+    let symbol: String
+    let color: Color
+
+    var id: String { url }
+
+    static let defaults = [
+        HomeDestination(name: "Gmail", host: "mail.google.com", url: "https://mail.google.com", symbol: "envelope.fill", color: .red),
+        HomeDestination(name: "Google Calendar", host: "calendar.google.com", url: "https://calendar.google.com", symbol: "calendar", color: .blue),
+        HomeDestination(name: "Google Drive", host: "drive.google.com", url: "https://drive.google.com", symbol: "externaldrive.fill", color: .orange),
+        HomeDestination(name: "GitHub", host: "github.com", url: "https://github.com", symbol: "chevron.left.forwardslash.chevron.right", color: .primary),
+        HomeDestination(name: "ChatGPT", host: "chatgpt.com", url: "https://chatgpt.com", symbol: "bubble.left.and.bubble.right.fill", color: .green),
+        HomeDestination(name: "Slack", host: "app.slack.com", url: "https://app.slack.com", symbol: "number", color: .purple),
+    ]
+}
+
 struct ContentView: View {
     @StateObject private var viewModel = SessionViewModel()
     @FocusState private var addressFocused: Bool
     @State private var showingConnection = false
     @State private var showingFileImporter = false
+    @State private var showingHome = true
+    @State private var homeQuery = ""
 
     var body: some View {
         ZStack {
@@ -40,6 +61,9 @@ struct ContentView: View {
         }
         .onChange(of: addressFocused) { _, focused in
             viewModel.setAddressFocused(focused)
+        }
+        .onChange(of: viewModel.session?.id) { _, sessionID in
+            if sessionID != nil { showingHome = true }
         }
     }
 
@@ -167,7 +191,10 @@ struct ContentView: View {
                 }
             }
 
-            Button(action: viewModel.newTab) {
+            Button {
+                viewModel.newTab()
+                showingHome = true
+            } label: {
                 Image(systemName: "plus")
                     .frame(width: 26, height: 24)
             }
@@ -193,6 +220,7 @@ struct ContentView: View {
     private func tabButton(_ tab: BrowserTab) -> some View {
         Button {
             viewModel.activateTab(tab.id)
+            showingHome = false
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: tab.loading ? "circle.dotted" : "globe")
@@ -223,6 +251,7 @@ struct ContentView: View {
 
     private var navigationBar: some View {
         HStack(spacing: 8) {
+            navButton("house", help: "Home") { showingHome = true }
             navButton("chevron.left", help: "Back", action: viewModel.goBack)
             navButton("chevron.right", help: "Forward", action: viewModel.goForward)
             navButton("arrow.clockwise", help: "Reload", action: viewModel.reload)
@@ -234,7 +263,7 @@ struct ContentView: View {
                 TextField("Search or enter address", text: $viewModel.addressDraft)
                     .textFieldStyle(.plain)
                     .focused($addressFocused)
-                    .onSubmit(viewModel.navigate)
+                    .onSubmit(openAddressDraft)
                 if viewModel.activeTab?.loading == true {
                     ProgressView().controlSize(.mini)
                 }
@@ -291,10 +320,167 @@ struct ContentView: View {
                 case let .failed(message):
                     surfaceOverlay(title: "Stream unavailable", detail: message, progress: false)
                 case .mediaReady:
-                    EmptyView()
+                    if showingHome { nativeHome }
                 }
             }
         }
+    }
+
+    private var nativeHome: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Home")
+                            .font(.system(size: 30, weight: .semibold))
+                        Text(viewModel.session?.name ?? "Browser")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Show current page") { showingHome = false }
+                        .buttonStyle(.bordered)
+                }
+
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search the web or enter an address", text: $homeQuery)
+                        .textFieldStyle(.plain)
+                        .font(.title3)
+                        .onSubmit(openHomeQuery)
+                    Text("RETURN")
+                        .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 48)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator.opacity(0.7)))
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Shortcuts")
+                        .font(.headline)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+                        ForEach(HomeDestination.defaults) { destination in
+                            destinationButton(destination)
+                        }
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 28) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Open tabs")
+                            .font(.headline)
+                        ForEach(Array((viewModel.session?.tabs ?? []).prefix(4))) { tab in
+                            Button {
+                                viewModel.activateTab(tab.id)
+                                showingHome = false
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: tab.active ? "circle.fill" : "circle")
+                                        .font(.system(size: 7))
+                                        .foregroundStyle(tab.active ? Color.accentColor : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text((tab.title ?? "").isEmpty ? tab.url : tab.title ?? tab.url)
+                                            .lineLimit(1)
+                                        Text(tab.url)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            Divider()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Tools")
+                            .font(.headline)
+                        homeTool("Upload a file to this session", symbol: "paperclip", enabled: viewModel.canControl) {
+                            showingFileImporter = true
+                        }
+                        homeTool("New browser tab", symbol: "plus.square", enabled: viewModel.canControl) {
+                            viewModel.newTab()
+                            showingHome = true
+                        }
+                        homeTool("Connection settings", symbol: "slider.horizontal.3") {
+                            showingConnection = true
+                        }
+                    }
+                    .frame(width: 220, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 46)
+            .padding(.vertical, 38)
+            .frame(maxWidth: 980)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func destinationButton(_ destination: HomeDestination) -> some View {
+        Button {
+            viewModel.navigate(to: destination.url)
+            showingHome = false
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: destination.symbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(destination.color)
+                    .frame(width: 30, height: 30)
+                    .background(destination.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(destination.name).fontWeight(.medium)
+                    Text(destination.host)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.separator.opacity(0.55)))
+        }
+        .buttonStyle(.plain)
+        .disabled(!viewModel.canControl)
+    }
+
+    private func homeTool(
+        _ title: String,
+        symbol: String,
+        enabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    private func openHomeQuery() {
+        guard SessionViewModel.navigationTarget(for: homeQuery) != nil else { return }
+        viewModel.navigate(to: homeQuery)
+        showingHome = false
+    }
+
+    private func openAddressDraft() {
+        guard SessionViewModel.navigationTarget(for: viewModel.addressDraft) != nil else { return }
+        viewModel.navigate()
+        showingHome = false
     }
 
     private func surfaceOverlay(title: String, detail: String, progress: Bool) -> some View {

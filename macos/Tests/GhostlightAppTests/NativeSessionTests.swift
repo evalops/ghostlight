@@ -215,6 +215,16 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(viewModel.apiToken, "api-secret")
     }
 
+    func testOmniboxBuildsURLsAndSearches() {
+        XCTAssertEqual(SessionViewModel.navigationTarget(for: "openai.com"), "https://openai.com")
+        XCTAssertEqual(SessionViewModel.navigationTarget(for: "http://localhost:3000"), "http://localhost:3000")
+        XCTAssertEqual(
+            SessionViewModel.navigationTarget(for: "remote browser performance"),
+            "https://www.google.com/search?q=remote%20browser%20performance"
+        )
+        XCTAssertNil(SessionViewModel.navigationTarget(for: "   "))
+    }
+
     @MainActor
     func testMonotonicSessionApplicationAndFocusedDraftProtection() throws {
         let viewModel = SessionViewModel(defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)), autoConnect: false)

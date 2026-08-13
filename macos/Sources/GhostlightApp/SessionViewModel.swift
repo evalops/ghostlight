@@ -209,10 +209,25 @@ final class SessionViewModel: ObservableObject {
     func activateTab(_ id: String) { send(.init(type: .activateTab, tabID: id, expectedRevision: session?.revision ?? 0)) }
 
     func navigate() {
-        let value = addressDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-        let target = value.contains("://") ? value : "https://\(value)"
+        navigate(to: addressDraft)
+    }
+
+    func navigate(to value: String) {
+        guard let target = Self.navigationTarget(for: value) else { return }
+        addressDraft = target
         send(.init(type: .navigate, tabID: activeTab?.id, url: target, expectedRevision: session?.revision ?? 0))
+    }
+
+    nonisolated static func navigationTarget(for input: String) -> String? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if value.contains("://") { return value }
+        if !value.contains(where: \.isWhitespace), value.contains(".") || value.contains(":") {
+            return "https://\(value)"
+        }
+        var components = URLComponents(string: "https://www.google.com/search")
+        components?.queryItems = [URLQueryItem(name: "q", value: value)]
+        return components?.url?.absoluteString
     }
 
     func attach(_ fileURL: URL) {
