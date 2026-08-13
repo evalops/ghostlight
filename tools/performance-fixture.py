@@ -54,7 +54,7 @@ def page_body(kind: str) -> str:
         content = """
         <section class="panel input-card">
           <h2>Compose message</h2>
-          <p class="muted">The input receives synthetic text-entry events from the WebRTC client.</p>
+          <p class="muted">The input receives synthetic text-entry events from the X11 benchmark driver.</p>
           <input id="typing-input" aria-label="Message body" autocomplete="off" spellcheck="false">
           <p id="typing-count" class="muted">Characters: 0</p>
         </section>
@@ -89,11 +89,24 @@ def page_body(kind: str) -> str:
   const marker = document.querySelector('#causal-marker');
   const typingInput = document.querySelector('#typing-input');
   let sequence = 0;
-  window.__ghostlightResetMarker = () => {{ marker.classList.remove('active'); marker.textContent = 'WAITING'; }};
+  let markerResetTimer = 0;
+  window.__ghostlightResetMarker = () => {{
+    window.clearTimeout(markerResetTimer);
+    marker.classList.remove('active');
+    marker.textContent = 'WAITING';
+  }};
   window.__ghostlightMarkerState = () => ({{ sequence, active: marker.classList.contains('active') }});
-  const mark = (source) => {{ sequence += 1; marker.dataset.sequence = String(sequence); marker.dataset.source = source; marker.textContent = `INPUT ${{String(sequence).padStart(6, '0')}}`; marker.classList.add('active'); }};
+  const mark = (source) => {{
+    sequence += 1;
+    marker.dataset.sequence = String(sequence);
+    marker.dataset.source = source;
+    marker.textContent = `INPUT ${{String(sequence).padStart(6, '0')}}`;
+    marker.classList.add('active');
+    window.clearTimeout(markerResetTimer);
+    markerResetTimer = window.setTimeout(window.__ghostlightResetMarker, 750);
+  }};
   window.addEventListener('keydown', (event) => {{ if (event.key === 'F8') mark('keydown'); }});
-  window.addEventListener('input', (event) => {{ if (event.target === typingInput) {{ mark('input'); document.querySelector('#typing-count').textContent = `Characters: ${{typingInput.value.length}}`; }} }});
+  window.addEventListener('input', (event) => {{ if (event.target === typingInput) {{ document.querySelector('#typing-count').textContent = `Characters: ${{typingInput.value.length}}`; }} }});
   if (typingInput) typingInput.addEventListener('focus', () => typingInput.setSelectionRange(typingInput.value.length, typingInput.value.length));
 }})();
 </script></body></html>"""
