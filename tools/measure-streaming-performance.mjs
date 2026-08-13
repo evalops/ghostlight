@@ -1365,7 +1365,7 @@ function aggregatePhases(phases) {
   aggregate.nack_count = phases.reduce((sum, phase) => sum + phase.nack_count, 0);
   aggregate.pli_count = phases.reduce((sum, phase) => sum + phase.pli_count, 0);
   aggregate.packet_loss_ratio = mean(phases.map((phase) => phase.packet_loss_ratio));
-  aggregate.codec = phases.find((phase) => phase.codec)?.codec ?? null;
+  aggregate.codec = phases.map((phase) => phase.codec).find(Boolean) ?? null;
   aggregate.decoder_implementation = phases.map((phase) => phase.decoder_implementation).find(Boolean) ?? null;
   aggregate.selected_ice_pairs = phases.map((phase) => phase.selected_ice_pair).filter(Boolean);
   return aggregate;
@@ -1795,6 +1795,19 @@ async function runSelfTests() {
   assert.equal(snapshot.totalFreezesDuration, 0.4);
   assert.equal(snapshot.decoder_implementation, "VideoToolbox");
   assert.equal(statsSnapshot([{ type: "inbound-rtp", kind: "video", framesDecoded: 100 }]).freeze_stats_available, false);
+  const codecAggregate = aggregatePhases([{
+    active_media: 1, actual_fps: 25, actual_to_target_fps_ratio: 1, bitrate_bps: 1, current_rtt_ms: 1, jitter_ms: 1,
+    mean_decode_ms: 1, mean_processing_delay_ms: 1, input_to_present_median_ms: 1, input_to_present_p95_ms: 1,
+    freeze_ratio: 0, freeze_events: 0, freeze_duration_seconds: 0, freeze_stats_available: true, dropped_frame_ratio: 0,
+    visual_event_successes: 1, visual_event_attempts: 1, viewer_cpu_median_pct: 1, viewer_cpu_p95_pct: 1,
+    viewer_memory_p95_mib: 1, input_to_present_receipts: [{ input_to_present_ms: 1 }], frame_width: 1920, frame_height: 1080,
+    udp_transport_selected: true, power_efficient_decoder: null, nack_count: 0, pli_count: 0, packet_loss_ratio: 0,
+    codec: { mime_type: "video/H264" }, decoder_implementation: null, selected_ice_pair: { protocol: "udp" },
+  }]);
+  assert.equal(codecAggregate.codec.mime_type, "video/H264");
+  const pairRunner = fsSync.readFileSync(join(ROOT_DIR, "tools", "run-current-main-codec-pair.sh"), "utf8");
+  assert.match(pairRunner, /^run_recorded 1 vp8 /m);
+  assert.doesNotMatch(pairRunner, /^run_one 1 vp8 /m);
 
   const silentWorker = new EventEmitter();
   silentWorker.exitCode = null;
