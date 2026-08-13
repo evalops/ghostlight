@@ -46,6 +46,8 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
 }
 
 protocol SessionServicing: Sendable {
+    func getWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences
+    func putWorkspacePreferences(_ preferences: WorkspacePreferences, at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession
     func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int) async throws -> BrowserSession?
@@ -80,6 +82,30 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
 
     public func listWorkspaces(at origin: URL, apiToken: String) async throws -> [Workspace] {
         try await send(.get, origin: origin, path: ["v1", "workspaces"], headers: Self.apiBearer(apiToken))
+    }
+
+    public func getWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences {
+        try await send(
+            .get,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "preferences"],
+            headers: Self.apiBearer(apiToken)
+        )
+    }
+
+    public func putWorkspacePreferences(
+        _ preferences: WorkspacePreferences,
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String
+    ) async throws -> WorkspacePreferences {
+        try await send(
+            .put,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "preferences"],
+            headers: Self.apiBearer(apiToken),
+            body: try SessionJSON.encoder.encode(WorkspacePreferencesUpdate(preferences))
+        )
     }
 
     public func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession {
@@ -310,4 +336,21 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
 private enum HTTPMethod: String { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
 private struct CreateSessionRequest: Encodable { let workspaceID: String; enum CodingKeys: String, CodingKey { case workspaceID = "workspace_id" } }
 private struct AcquireLeaseRequest: Encodable { let clientID: String; enum CodingKeys: String, CodingKey { case clientID = "client_id" } }
+private struct WorkspacePreferencesUpdate: Encodable {
+    let searchURL: String
+    let shortcuts: [WorkspaceShortcut]
+    let recentURLs: [String]
+
+    init(_ preferences: WorkspacePreferences) {
+        searchURL = preferences.searchURL
+        shortcuts = preferences.shortcuts
+        recentURLs = preferences.recentURLs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case shortcuts
+        case searchURL = "search_url"
+        case recentURLs = "recent_urls"
+    }
+}
 private struct EmptyResponse: Decodable {}

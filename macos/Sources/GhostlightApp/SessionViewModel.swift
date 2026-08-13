@@ -45,6 +45,8 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var session: BrowserSession?
     @Published private(set) var stream: StreamConnection?
     @Published private(set) var viewerBootstrap: ViewerBootstrap?
+    @Published private(set) var workspacePreferences: WorkspacePreferences?
+    @Published private(set) var preferencesError: String?
     @Published private(set) var commandError: String?
     @Published private(set) var commandStatus: CommandStatus = .idle
     @Published private(set) var addressFocusRequest = 0
@@ -69,6 +71,7 @@ final class SessionViewModel: ObservableObject {
     private var submissionsByReceiptID: [String: CommandSubmission] = [:]
     private var receiptsByID: [String: CommandReceipt] = [:]
     private var failedSubmission: CommandSubmission?
+    private var preferenceWriteTail: Task<WorkspacePreferences?, Never>?
 
     init(
         client: any SessionServicing = SessionClient(),
@@ -110,6 +113,7 @@ final class SessionViewModel: ObservableObject {
         lifecycleTask?.cancel()
         leaseTask?.cancel()
         eventsTask?.cancel()
+        preferenceWriteTail?.cancel()
     }
 
     var activeTab: BrowserTab? {
@@ -125,6 +129,10 @@ final class SessionViewModel: ObservableObject {
 
     var streamURL: URL? { viewerBootstrap?.viewerURL ?? stream?.url }
 
+    var shortcuts: [WorkspaceShortcut] { workspacePreferences?.shortcuts ?? [] }
+
+    var recentURLs: [String] { workspacePreferences?.recentURLs ?? [] }
+
     func connect() {
         cancelLifecycle()
         let runID = UUID()
@@ -132,6 +140,8 @@ final class SessionViewModel: ObservableObject {
         controlState = .connecting
         surfaceState = .idle
         viewerBootstrap = nil
+        workspacePreferences = nil
+        preferencesError = nil
         commandError = nil
         clearCommandTracking()
 
@@ -157,6 +167,8 @@ final class SessionViewModel: ObservableObject {
                 defaults.set(origin.absoluteString, forKey: Self.originKey)
                 defaults.set(browser.id, forKey: Self.sessionIDKey)
                 apply(browser)
+                await loadWorkspacePreferences(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
+                guard owns(runID) else { return }
                 startEvents(at: origin, sessionID: browser.id, runID: runID)
 
                 do {
@@ -200,6 +212,8 @@ final class SessionViewModel: ObservableObject {
         session = nil
         stream = nil
         viewerBootstrap = nil
+        workspacePreferences = nil
+        preferencesError = nil
         lease = nil
         addressDraft = ""
         controlState = .disconnected
@@ -285,21 +299,62 @@ final class SessionViewModel: ObservableObject {
     }
 
     func navigate(to value: String) {
-        guard let target = Self.navigationTarget(for: value) else { return }
+        guard let target = Self.navigationTarget(
+            for: value,
+            searchURL: workspacePreferences?.searchURL ?? WorkspacePreferences.defaultSearchURL
+        ) else { return }
         addressDraft = target
         send(.init(type: .navigate, tabID: activeTab?.id, url: target, expectedRevision: session?.revision ?? 0))
     }
 
-    nonisolated static func navigationTarget(for input: String) -> String? {
+    nonisolated static func navigationTarget(
+        for input: String,
+        searchURL: String = WorkspacePreferences.defaultSearchURL
+    ) -> String? {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
         if value.contains("://") { return value }
         if !value.contains(where: \.isWhitespace), value.contains(".") || value.contains(":") {
             return "https://\(value)"
         }
-        var components = URLComponents(string: "https://www.google.com/search")
-        components?.queryItems = [URLQueryItem(name: "q", value: value)]
-        return components?.url?.absoluteString
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        guard WorkspacePreferences.isValidSearchURLTemplate(searchURL),
+              let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        let target = searchURL.replacingOccurrences(of: "{query}", with: encoded)
+        guard let components = URLComponents(string: target),
+              components.scheme == "http" || components.scheme == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil else { return nil }
+        return components.url?.absoluteString
+    }
+
+    func loadWorkspacePreferences() async {
+        guard let session,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
+        await loadWorkspacePreferences(at: origin, apiToken: apiToken, workspaceID: session.workspaceID)
+    }
+
+    func replaceShortcuts(_ shortcuts: [WorkspaceShortcut]) async -> Bool {
+        guard let searchURL = workspacePreferences?.searchURL else { return false }
+        return await replaceHomePreferences(searchURL: searchURL, shortcuts: shortcuts)
+    }
+
+    func replaceHomePreferences(searchURL: String, shortcuts: [WorkspaceShortcut]) async -> Bool {
+        guard var preferences = workspacePreferences else { return false }
+        let searchURL = searchURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard WorkspacePreferences.isValidSearchURLTemplate(searchURL) else { return false }
+        preferences.searchURL = searchURL
+        preferences.shortcuts = shortcuts.enumerated().map { position, shortcut in
+            WorkspaceShortcut(
+                id: shortcut.id,
+                name: shortcut.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                url: shortcut.url.trimmingCharacters(in: .whitespacesAndNewlines),
+                position: position
+            )
+        }
+        return await persistWorkspacePreferences(preferences)
     }
 
     func attach(_ fileURL: URL) {
@@ -400,6 +455,8 @@ final class SessionViewModel: ObservableObject {
     }
 
     private func accept(_ receipt: CommandReceipt, submission: CommandSubmission?) {
+        let previousState = receiptsByID[receipt.id]?.state
+        let resolvedSubmission = submission ?? submissionsByReceiptID[receipt.id]
         if let submission {
             submissionsByKey.removeValue(forKey: submission.idempotencyKey)
             submissionsByReceiptID[receipt.id] = submission
@@ -415,6 +472,11 @@ final class SessionViewModel: ObservableObject {
         case .applied:
             submissionsByReceiptID.removeValue(forKey: receipt.id)
             if failedSubmission?.idempotencyKey == submission?.idempotencyKey { failedSubmission = nil }
+            if previousState != .applied,
+               resolvedSubmission?.command.type == .navigate,
+               let url = receipt.url ?? resolvedSubmission?.command.url {
+                recordRecentURL(url)
+            }
         case .failed:
             failedSubmission = submission ?? submissionsByReceiptID[receipt.id]
         }
@@ -448,6 +510,69 @@ final class SessionViewModel: ObservableObject {
         receiptsByID.removeAll()
         failedSubmission = nil
         commandStatus = .idle
+    }
+
+    private func loadWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async {
+        do {
+            let preferences = try await client.getWorkspacePreferences(
+                at: origin,
+                apiToken: apiToken,
+                workspaceID: workspaceID
+            )
+            guard session?.workspaceID == workspaceID else { return }
+            workspacePreferences = preferences
+            preferencesError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard session?.workspaceID == workspaceID else { return }
+            preferencesError = error.localizedDescription
+        }
+    }
+
+    private func persistWorkspacePreferences(_ preferences: WorkspacePreferences) async -> Bool {
+        guard let session,
+              session.workspaceID == preferences.workspaceID,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return false }
+        let apiToken = apiToken
+        let workspaceID = session.workspaceID
+        let previousWrite = preferenceWriteTail
+        workspacePreferences = preferences
+        preferencesError = nil
+
+        let write = Task<WorkspacePreferences?, Never> { [client] in
+            _ = await previousWrite?.value
+            guard !Task.isCancelled else { return nil }
+            return try? await client.putWorkspacePreferences(
+                preferences,
+                at: origin,
+                apiToken: apiToken,
+                workspaceID: workspaceID
+            )
+        }
+        preferenceWriteTail = write
+        guard let saved = await write.value else {
+            if workspacePreferences == preferences {
+                preferencesError = "Workspace preferences could not be saved."
+            }
+            return false
+        }
+        if workspacePreferences == preferences {
+            workspacePreferences = saved
+        }
+        return true
+    }
+
+    private func recordRecentURL(_ url: String) {
+        guard var preferences = workspacePreferences else { return }
+        preferences.recentURLs.removeAll { $0 == url }
+        preferences.recentURLs.insert(url, at: 0)
+        preferences.recentURLs = Array(
+            preferences.recentURLs.prefix(WorkspacePreferences.maximumRecentURLCount)
+        )
+        Task { [weak self] in
+            _ = await self?.persistWorkspacePreferences(preferences)
+        }
     }
 
     private var commandContext: (origin: URL, apiToken: String, sessionID: String, token: String)? {
@@ -533,6 +658,8 @@ final class SessionViewModel: ObservableObject {
         lifecycleTask = nil
         leaseTask = nil
         eventsTask = nil
+        preferenceWriteTail?.cancel()
+        preferenceWriteTail = nil
         lease = nil
     }
 

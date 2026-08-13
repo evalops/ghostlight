@@ -37,6 +37,65 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
     public let name: String
 }
 
+public struct WorkspaceShortcut: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public var name: String
+    public var url: String
+    public var position: Int
+
+    public init(id: String, name: String, url: String, position: Int) {
+        self.id = id
+        self.name = name
+        self.url = url
+        self.position = position
+    }
+}
+
+public struct WorkspacePreferences: Codable, Equatable, Sendable {
+    public static let defaultSearchURL = "https://www.google.com/search?q={query}"
+    public static let maximumRecentURLCount = 20
+
+    public let workspaceID: String
+    public var searchURL: String
+    public var shortcuts: [WorkspaceShortcut]
+    public var recentURLs: [String]
+    public var updatedAt: Date
+
+    public init(
+        workspaceID: String,
+        searchURL: String,
+        shortcuts: [WorkspaceShortcut],
+        recentURLs: [String],
+        updatedAt: Date
+    ) {
+        self.workspaceID = workspaceID
+        self.searchURL = searchURL
+        self.shortcuts = shortcuts
+        self.recentURLs = recentURLs
+        self.updatedAt = updatedAt
+    }
+
+    public static func isValidSearchURLTemplate(_ value: String) -> Bool {
+        guard value.count <= 500,
+              value.components(separatedBy: "{query}").count == 2 else { return false }
+        let target = value.replacingOccurrences(of: "{query}", with: "test")
+        guard let components = URLComponents(string: target),
+              components.scheme == "http" || components.scheme == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil else { return false }
+        return true
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case shortcuts
+        case workspaceID = "workspace_id"
+        case searchURL = "search_url"
+        case recentURLs = "recent_urls"
+        case updatedAt = "updated_at"
+    }
+}
+
 public struct BrowserTab: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String?

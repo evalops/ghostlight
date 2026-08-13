@@ -98,6 +98,41 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(workspaces.map(\.id), ["default"])
     }
 
+    func testWorkspacePreferencesLoadAndPersistThroughWorkspaceEndpoint() async throws {
+        var requests: [URLRequest] = []
+        NativeSessionURLProtocol.requestHandler = { request in
+            requests.append(request)
+            return (Self.response(for: request), Data(Self.preferencesJSON.utf8))
+        }
+        let client = SessionClient(session: makeSession())
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+
+        let loaded = try await client.getWorkspacePreferences(
+            at: origin,
+            apiToken: "api-secret",
+            workspaceID: "default"
+        )
+        _ = try await client.putWorkspacePreferences(
+            loaded,
+            at: origin,
+            apiToken: "api-secret",
+            workspaceID: "default"
+        )
+
+        XCTAssertEqual(loaded.shortcuts.map(\.name), ["Docs", "Mail"])
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET", "PUT"])
+        XCTAssertEqual(requests[0].url?.path, "/base/v1/workspaces/default/preferences")
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")
+        let body = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try XCTUnwrap(Self.bodyData(from: requests[1]))) as? [String: Any]
+        )
+        XCTAssertEqual(body["search_url"] as? String, "https://duckduckgo.com/?q={query}")
+        XCTAssertEqual((body["shortcuts"] as? [[String: Any]])?.map { $0["position"] as? Int }, [0, 1])
+        XCTAssertEqual(body["recent_urls"] as? [String], ["https://example.test"])
+        XCTAssertNil(body["workspace_id"])
+        XCTAssertNil(body["updated_at"])
+    }
+
     func testCommandWireValuesMatchControlContract() throws {
         let commands = [
             BrowserCommand(type: .goBack, tabID: "tab-1", expectedRevision: 7),
@@ -263,6 +298,94 @@ final class NativeSessionTests: XCTestCase {
             "https://www.google.com/search?q=remote%20browser%20performance"
         )
         XCTAssertNil(SessionViewModel.navigationTarget(for: "   "))
+    }
+
+    func testOmniboxUsesWorkspaceSearchTemplate() {
+        XCTAssertEqual(
+            SessionViewModel.navigationTarget(
+                for: "swift url encoding",
+                searchURL: "https://duckduckgo.com/?q={query}&source=ghostlight"
+            ),
+            "https://duckduckgo.com/?q=swift%20url%20encoding&source=ghostlight"
+        )
+    }
+
+    func testSearchTemplateRequiresOneCredentialFreeHTTPSPlaceholder() {
+        XCTAssertTrue(
+            WorkspacePreferences.isValidSearchURLTemplate("https://search.example.test/?q={query}")
+        )
+        XCTAssertFalse(
+            WorkspacePreferences.isValidSearchURLTemplate("https://search.example.test/?q=missing")
+        )
+        XCTAssertFalse(
+            WorkspacePreferences.isValidSearchURLTemplate("https://search.example.test/?q={query}&copy={query}")
+        )
+        XCTAssertFalse(
+            WorkspacePreferences.isValidSearchURLTemplate("https://user:secret@search.example.test/?q={query}")
+        )
+    }
+
+    @MainActor
+    func testShortcutReplacementNormalizesOrderingAndPersists() async throws {
+        let service = NativeSessionServiceStub(receipts: [])
+        let viewModel = try makeControllingViewModel(service: service)
+        await viewModel.loadWorkspacePreferences()
+
+        let saved = await viewModel.replaceHomePreferences(
+            searchURL: "https://search.example.test/?q={query}",
+            shortcuts: [
+                WorkspaceShortcut(id: "mail", name: "Team Mail", url: "https://mail.example.test", position: 9),
+                WorkspaceShortcut(id: "docs", name: "Runbooks", url: "https://docs.example.test", position: 2),
+            ]
+        )
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(viewModel.workspacePreferences?.searchURL, "https://search.example.test/?q={query}")
+        XCTAssertEqual(viewModel.shortcuts.map(\.name), ["Team Mail", "Runbooks"])
+        XCTAssertEqual(viewModel.shortcuts.map(\.position), [0, 1])
+        XCTAssertEqual(service.preferenceUpdates.last?.searchURL, "https://search.example.test/?q={query}")
+        XCTAssertEqual(service.preferenceUpdates.last?.shortcuts.map(\.position), [0, 1])
+    }
+
+    @MainActor
+    func testAppliedNavigationAddsDeduplicatedServerBackedRecentAndCapsAtTwenty() async throws {
+        let existing = (0..<20).map { "https://\($0).example.test" }
+        let preferences = WorkspacePreferences(
+            workspaceID: "default",
+            searchURL: "https://www.google.com/search?q={query}",
+            shortcuts: [],
+            recentURLs: existing,
+            updatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let queued = Self.receipt(
+            id: "navigate-1",
+            type: .navigate,
+            state: .queued,
+            url: "https://5.example.test"
+        )
+        let service = NativeSessionServiceStub(receipts: [queued], preferences: preferences)
+        let viewModel = try makeControllingViewModel(service: service)
+        await viewModel.loadWorkspacePreferences()
+
+        viewModel.navigate(to: "https://5.example.test")
+        await service.waitForCommandCount(1)
+        XCTAssertTrue(service.preferenceUpdates.isEmpty)
+
+        var event = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
+        event.commandReceipts = [
+            Self.receipt(
+                id: "navigate-1",
+                type: .navigate,
+                state: .applied,
+                url: "https://5.example.test"
+            )
+        ]
+        viewModel.apply(event)
+        await service.waitForPreferenceUpdateCount(1)
+
+        XCTAssertEqual(service.preferenceUpdates.last?.recentURLs.first, "https://5.example.test")
+        XCTAssertEqual(service.preferenceUpdates.last?.recentURLs.count, 20)
+        XCTAssertEqual(service.preferenceUpdates.last?.recentURLs.filter { $0 == "https://5.example.test" }.count, 1)
     }
 
     @MainActor
@@ -483,6 +606,17 @@ final class NativeSessionTests: XCTestCase {
     }
     """#
 
+    private static let preferencesJSON = #"""
+    {
+      "workspace_id":"default","search_url":"https://duckduckgo.com/?q={query}",
+      "shortcuts":[
+        {"id":"docs","name":"Docs","url":"https://developer.apple.com","position":0},
+        {"id":"mail","name":"Mail","url":"https://mail.example.test","position":1}
+      ],
+      "recent_urls":["https://example.test"],"updated_at":"2026-08-13T12:00:00Z"
+    }
+    """#
+
     private static let queuedReceipt = receipt(id: "command-1", type: .reload, state: .queued)
     private static let appliedReceipt = receipt(id: "command-1", type: .reload, state: .applied)
     private static let failedReceipt = receipt(
@@ -500,6 +634,7 @@ final class NativeSessionTests: XCTestCase {
         id: String,
         type: BrowserCommandType,
         state: CommandReceiptState,
+        url: String? = nil,
         errorCode: String? = nil,
         error: String? = nil
     ) -> CommandReceipt {
@@ -508,7 +643,7 @@ final class NativeSessionTests: XCTestCase {
             sequence: 1,
             sessionID: "session-1",
             type: type,
-            url: nil,
+            url: url,
             tabID: "tab-1",
             attachmentID: nil,
             expectedRevision: 7,
@@ -548,17 +683,36 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
     private let lock = NSLock()
     private var receipts: [CommandReceipt]
     private var submissions: [Submission] = []
+    private var preferences: WorkspacePreferences
+    private var updates: [WorkspacePreferences] = []
 
-    init(receipts: [CommandReceipt]) {
+    init(receipts: [CommandReceipt], preferences: WorkspacePreferences? = nil) {
         self.receipts = receipts
+        self.preferences = preferences ?? WorkspacePreferences(
+            workspaceID: "default",
+            searchURL: "https://www.google.com/search?q={query}",
+            shortcuts: [],
+            recentURLs: [],
+            updatedAt: Date(timeIntervalSince1970: 1_000)
+        )
     }
 
     var commandSubmissions: [Submission] {
         lock.withLock { submissions }
     }
 
+    var preferenceUpdates: [WorkspacePreferences] {
+        lock.withLock { updates }
+    }
+
     func waitForCommandCount(_ count: Int) async {
         for _ in 0..<100 where commandSubmissions.count < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func waitForPreferenceUpdateCount(_ count: Int) async {
+        for _ in 0..<100 where preferenceUpdates.count < count {
             try? await Task.sleep(for: .milliseconds(10))
         }
     }
@@ -572,6 +726,16 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
     func uploadAttachment(at origin: URL, apiToken: String, sessionID: String, token: String, fileURL: URL) async throws -> Attachment { fatalError() }
     func createStream(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> StreamConnection { fatalError() }
     func redeemViewerCapability(at origin: URL, capability: String, clientID: String) async throws -> ViewerBootstrap { fatalError() }
+    func getWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences {
+        lock.withLock { preferences }
+    }
+    func putWorkspacePreferences(_ preferences: WorkspacePreferences, at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences {
+        lock.withLock {
+            self.preferences = preferences
+            updates.append(preferences)
+            return preferences
+        }
+    }
 
     func sendCommand(
         at origin: URL,
