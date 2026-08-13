@@ -44,6 +44,7 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var surfaceState: SurfaceState = .idle
     @Published private(set) var session: BrowserSession?
     @Published private(set) var stream: StreamConnection?
+    @Published private(set) var viewerBootstrap: ViewerBootstrap?
     @Published private(set) var commandError: String?
     @Published private(set) var commandStatus: CommandStatus = .idle
     @Published private(set) var addressFocusRequest = 0
@@ -122,7 +123,7 @@ final class SessionViewModel: ObservableObject {
         return now() < lease.expiresAt
     }
 
-    var streamURL: URL? { stream?.url }
+    var streamURL: URL? { viewerBootstrap?.viewerURL ?? stream?.url }
 
     func connect() {
         cancelLifecycle()
@@ -130,6 +131,7 @@ final class SessionViewModel: ObservableObject {
         lifecycleID = runID
         controlState = .connecting
         surfaceState = .idle
+        viewerBootstrap = nil
         commandError = nil
         clearCommandTracking()
 
@@ -158,10 +160,14 @@ final class SessionViewModel: ObservableObject {
                 startEvents(at: origin, sessionID: browser.id, runID: runID)
 
                 do {
-                    let connection = try await client.createStream(at: origin, apiToken: apiToken, sessionID: browser.id)
+                    let connection = try await client.createStream(at: origin, apiToken: apiToken, sessionID: browser.id, clientID: clientID)
                     guard owns(runID) else { return }
+                    guard let capability = connection.capability else { throw SessionClientError.invalidResponse }
+                    let bootstrap = try await client.redeemViewerCapability(at: origin, capability: capability, clientID: clientID)
+                    guard owns(runID), bootstrap.streamID == connection.id else { return }
                     stream = connection
-                    surfaceState = .loadingPage(connection.url)
+                    viewerBootstrap = bootstrap
+                    surfaceState = .loadingPage(bootstrap.viewerURL)
                 } catch {
                     guard owns(runID) else { return }
                     surfaceState = .failed(error.localizedDescription)
@@ -193,6 +199,7 @@ final class SessionViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.sessionIDKey)
         session = nil
         stream = nil
+        viewerBootstrap = nil
         lease = nil
         addressDraft = ""
         controlState = .disconnected
@@ -315,12 +322,12 @@ final class SessionViewModel: ObservableObject {
     }
 
     func viewerNavigationStarted() {
-        guard let url = stream?.url else { return }
+        guard let url = streamURL else { return }
         surfaceState = .loadingPage(url)
     }
 
     func viewerNavigationFinished(at url: URL?) {
-        guard let entry = stream?.url else { return }
+        guard let entry = streamURL else { return }
         guard url.map({ ViewerWebView.Coordinator.isSameOrigin($0, as: entry) }) ?? true else {
             surfaceState = .failed("The stream navigated to an unexpected origin.")
             return
@@ -329,7 +336,7 @@ final class SessionViewModel: ObservableObject {
     }
 
     func viewerMediaReady() {
-        guard let url = stream?.url else { return }
+        guard let url = streamURL else { return }
         surfaceState = .mediaReady(url)
     }
 

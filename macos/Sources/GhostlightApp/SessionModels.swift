@@ -56,9 +56,32 @@ public struct StreamConnection: Codable, Equatable, Sendable, Identifiable {
     public let url: URL
     public let state: String
     public let expiresAt: Date
+    public let capability: String?
+
+    public init(id: String, url: URL, state: String, expiresAt: Date, capability: String? = nil) {
+        self.id = id
+        self.url = url
+        self.state = state
+        self.expiresAt = expiresAt
+        self.capability = capability
+    }
 
     enum CodingKeys: String, CodingKey {
-        case id, url, state
+        case id, url, state, capability
+        case expiresAt = "expires_at"
+    }
+}
+
+public struct ViewerBootstrap: Codable, Equatable, Sendable {
+    public let streamID: String
+    public let viewerURL: URL
+    public let viewerPassword: String
+    public let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case streamID = "stream_id"
+        case viewerURL = "viewer_url"
+        case viewerPassword = "viewer_password"
         case expiresAt = "expires_at"
     }
 }

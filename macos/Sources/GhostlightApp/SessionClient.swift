@@ -54,7 +54,8 @@ protocol SessionServicing: Sendable {
     func releaseLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws
     func sendCommand(at origin: URL, apiToken: String, sessionID: String, token: String, idempotencyKey: String, command: BrowserCommand) async throws -> CommandReceipt
     func uploadAttachment(at origin: URL, apiToken: String, sessionID: String, token: String, fileURL: URL) async throws -> Attachment
-    func createStream(at origin: URL, apiToken: String, sessionID: String) async throws -> StreamConnection
+    func createStream(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> StreamConnection
+    func redeemViewerCapability(at origin: URL, capability: String, clientID: String) async throws -> ViewerBootstrap
 }
 
 public final class SessionClient: SessionServicing, @unchecked Sendable {
@@ -63,8 +64,18 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
 
     private let session: URLSession
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    public init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCredentialStorage = nil
+            configuration.httpCookieStorage = nil
+            configuration.httpShouldSetCookies = false
+            configuration.urlCache = nil
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            self.session = URLSession(configuration: configuration)
+        }
     }
 
     public func listWorkspaces(at origin: URL, apiToken: String) async throws -> [Workspace] {
@@ -190,8 +201,24 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
         )
     }
 
-    public func createStream(at origin: URL, apiToken: String, sessionID: String) async throws -> StreamConnection {
-        try await send(.post, origin: origin, path: ["v1", "sessions", sessionID, "stream"], headers: Self.apiBearer(apiToken))
+    public func createStream(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> StreamConnection {
+        try await send(
+            .post,
+            origin: origin,
+            path: ["v1", "sessions", sessionID, "stream"],
+            headers: Self.apiBearer(apiToken),
+            body: try SessionJSON.encoder.encode(AcquireLeaseRequest(clientID: clientID))
+        )
+    }
+
+    public func redeemViewerCapability(at origin: URL, capability: String, clientID: String) async throws -> ViewerBootstrap {
+        try await send(
+            .post,
+            origin: origin,
+            path: ["v1", "viewer-capabilities", "redeem"],
+            headers: Self.apiBearer(capability),
+            body: try SessionJSON.encoder.encode(AcquireLeaseRequest(clientID: clientID))
+        )
     }
 
     private func send<T: Decodable>(

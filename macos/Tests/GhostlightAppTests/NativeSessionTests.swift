@@ -570,7 +570,8 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
     func renewLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws -> ControllerLease { fatalError() }
     func releaseLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws {}
     func uploadAttachment(at origin: URL, apiToken: String, sessionID: String, token: String, fileURL: URL) async throws -> Attachment { fatalError() }
-    func createStream(at origin: URL, apiToken: String, sessionID: String) async throws -> StreamConnection { fatalError() }
+    func createStream(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> StreamConnection { fatalError() }
+    func redeemViewerCapability(at origin: URL, capability: String, clientID: String) async throws -> ViewerBootstrap { fatalError() }
 
     func sendCommand(
         at origin: URL,

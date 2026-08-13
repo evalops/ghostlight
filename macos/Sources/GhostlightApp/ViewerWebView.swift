@@ -3,6 +3,8 @@ import WebKit
 
 struct ViewerWebView: NSViewRepresentable {
     let url: URL
+    let username: String
+    let password: String?
     let reloadToken: Int
     let onNavigationStarted: () -> Void
     let onNavigationFinished: (URL?) -> Void
@@ -20,6 +22,16 @@ struct ViewerWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        if let password {
+            configuration.userContentController.addUserScript(
+                WKUserScript(
+                    source: Self.viewerLoginScript(username: username, password: password),
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: true
+                )
+            )
+        }
         context.coordinator.configureMediaReadiness(configuration)
         context.coordinator.configureNativePerformance(configuration)
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -29,6 +41,29 @@ struct ViewerWebView: NSViewRepresentable {
         webView.allowsBackForwardNavigationGestures = true
         webView.load(URLRequest(url: url))
         return webView
+    }
+
+    private static func viewerLoginScript(username: String, password: String) -> String {
+        let payload = try? JSONSerialization.data(withJSONObject: ["username": username, "password": password])
+        let json = payload.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return #"""
+        (() => {
+          if (sessionStorage.getItem("ghostlight.viewer.authenticated") === "1") return;
+          document.documentElement.style.visibility = "hidden";
+          fetch("/api/login", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify(\#(json))
+          }).then((response) => {
+            if (!response.ok) throw new Error(`viewer login failed (${response.status})`);
+            sessionStorage.setItem("ghostlight.viewer.authenticated", "1");
+            location.replace("/?embed=1");
+          }).catch(() => {
+            document.documentElement.style.visibility = "visible";
+          });
+        })();
+        """#
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {

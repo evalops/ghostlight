@@ -78,6 +78,7 @@ services:
       GHOSTLIGHT_ATTACHMENT_DIR: "/var/lib/ghostlight/attachments"
       GHOSTLIGHT_API_TOKEN: "${GHOSTLIGHT_API_TOKEN:?generate GHOSTLIGHT_API_TOKEN in runtime/.env}"
       GHOSTLIGHT_BRIDGE_TOKEN: "${GHOSTLIGHT_BRIDGE_TOKEN:?generate GHOSTLIGHT_BRIDGE_TOKEN in runtime/.env}"
+      GHOSTLIGHT_VIEWER_PASSWORD: "${NEKO_USER_PASSWORD:?generate NEKO_USER_PASSWORD in runtime/.env}"
       GHOSTLIGHT_LEASE_TTL_SECONDS: "${GHOSTLIGHT_LEASE_TTL_SECONDS:-30}"
     volumes:
       - ghostlight-control-state:/var/lib/ghostlight/state

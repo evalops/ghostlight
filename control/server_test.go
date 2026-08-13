@@ -64,6 +64,7 @@ func TestLoadConfigRequiresAndValidatesViewerURL(t *testing.T) {
 	t.Setenv(attachmentDirEnvironment, t.TempDir())
 	t.Setenv(apiTokenEnvironment, "api-test-token")
 	t.Setenv(bridgeTokenEnvironment, "bridge-test-token")
+	t.Setenv(viewerPasswordEnvironment, "viewer-test-secret")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig() with valid viewer URL error = %v", err)

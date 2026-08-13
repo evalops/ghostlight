@@ -221,6 +221,10 @@ func TestExpiredLeaseCommandsAreFencedFromBridgeDelivery(t *testing.T) {
 			t.Fatalf("stale command %s was delivered after lease takeover", queued.ID)
 		}
 	}
+	receipt, err := h.store.getCommand(t.Context(), "default", queued.ID)
+	if err != nil || receipt.State != "failed" || receipt.ErrorCode != "controller_lease_expired" || receipt.CompletedAt == nil || receipt.ResultingRevision == nil {
+		t.Fatalf("stale command receipt = %#v, %v", receipt, err)
+	}
 }
 
 func TestStreamRevisionAndAttachmentLeaseRevalidation(t *testing.T) {
@@ -233,7 +237,7 @@ func TestStreamRevisionAndAttachmentLeaseRevalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := h.store.createStream(t.Context(), "default", h.viewerURL, defaultStreamTTL)
+	stream, err := h.store.createStream(t.Context(), "default", "test-client", h.viewerURL, defaultStreamTTL)
 	if err != nil || stream.ID == "" {
 		t.Fatalf("createStream() = %#v, %v", stream, err)
 	}
@@ -254,6 +258,51 @@ func TestStreamRevisionAndAttachmentLeaseRevalidation(t *testing.T) {
 	}
 	if _, err := h.store.getAttachment(t.Context(), "default", attachment.ID); !errors.Is(err, errNotFound) {
 		t.Fatalf("expired attachment lookup error = %v, want not found", err)
+	}
+}
+
+func TestViewerCapabilityIsScopedSingleUseAndHashOnly(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	stream, err := h.store.createStream(t.Context(), "default", "mac-client", h.viewerURL, defaultStreamTTL)
+	if err != nil || stream.Capability == "" {
+		t.Fatalf("createStream() = %#v, %v", stream, err)
+	}
+	var plaintextCount int
+	if err := h.store.db.QueryRowContext(t.Context(), `SELECT count(*) FROM viewer_capabilities WHERE token_hash=?`, stream.Capability).Scan(&plaintextCount); err != nil || plaintextCount != 0 {
+		t.Fatalf("plaintext capability persisted: count=%d err=%v", plaintextCount, err)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), stream.Capability, "wrong-client"); !errors.Is(err, errUnauthorized) {
+		t.Fatalf("wrong client redemption error = %v", err)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), stream.Capability, "mac-client"); err != nil {
+		t.Fatalf("first redemption error = %v", err)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), stream.Capability, "mac-client"); !errors.Is(err, errCapabilityUsed) {
+		t.Fatalf("replay error = %v", err)
+	}
+}
+
+func TestWorkspacePreferencesPersistAndRejectUnsafeURLs(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	initial := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/preferences", "", "", nil)
+	var preferences WorkspacePreferences
+	decodeRecorder(t, initial, &preferences)
+	if initial.Code != http.StatusOK || len(preferences.Shortcuts) == 0 || preferences.SearchURL == "" {
+		t.Fatalf("initial preferences = %d %#v", initial.Code, preferences)
+	}
+	body := `{"search_url":"https://duckduckgo.com/?q={query}","shortcuts":[{"id":"docs","name":"Docs","url":"https://developer.apple.com","position":0}],"recent_urls":["https://example.test"]}`
+	updated := doJSON(t, h, http.MethodPut, "/v1/workspaces/default/preferences", "", "", strings.NewReader(body))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("put preferences = %d %s", updated.Code, updated.Body.String())
+	}
+	stored := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/preferences", "", "", nil)
+	decodeRecorder(t, stored, &preferences)
+	if preferences.SearchURL != "https://duckduckgo.com/?q={query}" || len(preferences.Shortcuts) != 1 || preferences.Shortcuts[0].ID != "docs" {
+		t.Fatalf("stored preferences = %#v", preferences)
+	}
+	unsafe := doJSON(t, h, http.MethodPut, "/v1/workspaces/default/preferences", "", "", strings.NewReader(`{"search_url":"javascript:{query}","shortcuts":[],"recent_urls":[]}`))
+	if unsafe.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe preferences = %d %s", unsafe.Code, unsafe.Body.String())
 	}
 }
 
@@ -351,12 +400,18 @@ func TestCommandsHeartbeatAndBridgeAuthentication(t *testing.T) {
 	status := doJSON(t, h, http.MethodGet, "/v1/sessions/default/commands/"+queued.ID, "", "", nil)
 	var completed BrowserCommand
 	decodeRecorder(t, status, &completed)
-	if status.Code != http.StatusOK || completed.State != "ok" || string(completed.Result) != `{"tab_id":17}` || completed.AcknowledgedAt == nil {
+	if status.Code != http.StatusOK || completed.State != "applied" || string(completed.Result) != `{"tab_id":17}` || completed.AcknowledgedAt == nil || completed.CompletedAt == nil || completed.ResultingRevision == nil {
 		t.Fatalf("command status = %d %#v", status.Code, completed)
 	}
+	terminalRevision := *completed.ResultingRevision
 	repeated := doJSON(t, h, http.MethodPost, "/v1/bridge/commands/"+queued.ID+"/ack", "", h.config.BridgeToken, strings.NewReader(`{"status":"ok","result":{"tab_id":17}}`))
 	if repeated.Code != http.StatusOK {
 		t.Fatalf("repeated ack = %d %s", repeated.Code, repeated.Body.String())
+	}
+	var repeatedReceipt BrowserCommand
+	decodeRecorder(t, repeated, &repeatedReceipt)
+	if repeatedReceipt.ResultingRevision == nil || *repeatedReceipt.ResultingRevision != terminalRevision {
+		t.Fatalf("repeated ack changed terminal revision: %#v", repeatedReceipt)
 	}
 }
 
@@ -386,6 +441,7 @@ func productTestConfig(root string) Config {
 		AttachmentDir:   filepath.Join(root, "attachments"),
 		APIToken:        "api-test-secret",
 		BridgeToken:     "bridge-test-secret",
+		ViewerPassword:  "viewer-test-secret",
 		LeaseTTL:        30 * time.Second,
 	}
 }

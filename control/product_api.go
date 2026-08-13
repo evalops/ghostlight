@@ -40,6 +40,8 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 2 && parts[1] == "workspaces":
 		h.handleWorkspaces(w, r)
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "preferences":
+		h.handleWorkspacePreferences(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "sessions":
 		h.handleSessions(w, r)
 	case len(parts) >= 3 && parts[1] == "sessions":
@@ -47,6 +49,59 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (h *handler) handleWorkspacePreferences(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	switch r.Method {
+	case http.MethodGet:
+		preferences, err := h.store.getWorkspacePreferences(r.Context(), workspaceID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, preferences)
+	case http.MethodPut:
+		var input WorkspacePreferences
+		if _, err := decodeStrictJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "workspace preferences are invalid")
+			return
+		}
+		input.WorkspaceID = workspaceID
+		if !validWorkspacePreferences(input) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "workspace preferences are invalid")
+			return
+		}
+		preferences, err := h.store.putWorkspacePreferences(r.Context(), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, preferences)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
+	}
+}
+
+func validWorkspacePreferences(value WorkspacePreferences) bool {
+	if len(value.Shortcuts) > 24 || len(value.RecentURLs) > 20 || len(value.SearchURL) > 500 || !strings.Contains(value.SearchURL, "{query}") {
+		return false
+	}
+	if !validNavigationURL(strings.ReplaceAll(value.SearchURL, "{query}", "test")) {
+		return false
+	}
+	seen := map[string]bool{}
+	for position, shortcut := range value.Shortcuts {
+		if shortcut.ID == "" || len(shortcut.ID) > 100 || shortcut.Name == "" || len(shortcut.Name) > 100 || shortcut.Position != position || !validNavigationURL(shortcut.URL) || seen[shortcut.ID] {
+			return false
+		}
+		seen[shortcut.ID] = true
+	}
+	for _, recent := range value.RecentURLs {
+		if !validNavigationURL(recent) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *handler) handleBridge(w http.ResponseWriter, r *http.Request) {
@@ -288,16 +343,49 @@ func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
+	var input struct {
+		ClientID string `json:"client_id"`
+	}
+	if _, err := decodeStrictJSON(r, &input); err != nil || strings.TrimSpace(input.ClientID) == "" || len(input.ClientID) > 200 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+		return
+	}
 	if _, err := h.store.getSession(r.Context(), sessionID); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	stream, err := h.store.createStream(r.Context(), sessionID, h.viewerURL, defaultStreamTTL)
+	stream, err := h.store.createStream(r.Context(), sessionID, input.ClientID, h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, stream)
+}
+
+func (h *handler) handleViewerCapabilityRedemption(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	capability := bearerToken(r)
+	var input struct {
+		ClientID string `json:"client_id"`
+	}
+	if capability == "" || len(capability) > 200 || func() bool { _, err := decodeStrictJSON(r, &input); return err != nil }() || strings.TrimSpace(input.ClientID) == "" {
+		writeError(w, http.StatusUnauthorized, "viewer_capability_invalid", "viewer capability is missing or invalid")
+		return
+	}
+	stream, err := h.store.redeemViewerCapability(r.Context(), capability, input.ClientID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stream_id":       stream.ID,
+		"viewer_url":      stream.URL,
+		"viewer_password": h.config.ViewerPassword,
+		"expires_at":      stream.ExpiresAt,
+	})
 }
 
 func (h *handler) handleAttachments(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -446,15 +534,27 @@ func (h *handler) handleBridgeCommandAck(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	var acknowledgment struct {
-		Status string          `json:"status"`
-		Error  string          `json:"error"`
-		Result json.RawMessage `json:"result"`
+		Status    string          `json:"status"`
+		ErrorCode string          `json:"error_code"`
+		Error     string          `json:"error"`
+		Result    json.RawMessage `json:"result"`
 	}
 	if _, err := decodeStrictJSON(r, &acknowledgment); err != nil || (acknowledgment.Status != "ok" && acknowledgment.Status != "failed") || (acknowledgment.Status == "failed" && acknowledgment.Error == "") || len(acknowledgment.Error) > 2000 || (len(acknowledgment.Result) != 0 && !json.Valid(acknowledgment.Result)) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "acknowledgment status and result are invalid")
 		return
 	}
-	command, err := h.store.ackCommand(r.Context(), commandID, acknowledgment.Status, acknowledgment.Error, acknowledgment.Result)
+	state := "applied"
+	if acknowledgment.Status == "failed" {
+		state = "failed"
+		if acknowledgment.ErrorCode == "" {
+			acknowledgment.ErrorCode = "browser_command_failed"
+		}
+	}
+	if len(acknowledgment.ErrorCode) > 100 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "error_code is too long")
+		return
+	}
+	command, err := h.store.ackCommand(r.Context(), commandID, state, acknowledgment.ErrorCode, acknowledgment.Error, acknowledgment.Result)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -591,6 +691,10 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was reused with another request")
 	case errors.Is(err, errUnauthorized), errors.Is(err, errLeaseExpired):
 		writeError(w, http.StatusUnauthorized, "lease_invalid", "controller lease is missing, expired, or invalid")
+	case errors.Is(err, errCapabilityExpired):
+		writeError(w, http.StatusUnauthorized, "viewer_capability_expired", "viewer capability expired")
+	case errors.Is(err, errCapabilityUsed):
+		writeError(w, http.StatusConflict, "viewer_capability_used", "viewer capability was already redeemed")
 	case errors.Is(err, errStorageLimit):
 		writeError(w, http.StatusInsufficientStorage, "attachment_limit", "session attachment storage limit was reached")
 	default:

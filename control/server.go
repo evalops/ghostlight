@@ -30,6 +30,7 @@ const (
 	attachmentDirEnvironment   = "GHOSTLIGHT_ATTACHMENT_DIR"
 	apiTokenEnvironment        = "GHOSTLIGHT_API_TOKEN"
 	bridgeTokenEnvironment     = "GHOSTLIGHT_BRIDGE_TOKEN"
+	viewerPasswordEnvironment  = "GHOSTLIGHT_VIEWER_PASSWORD"
 	leaseTTLEnvironment        = "GHOSTLIGHT_LEASE_TTL_SECONDS"
 	defaultLeaseTTL            = 30 * time.Second
 	defaultStreamTTL           = 2 * time.Minute
@@ -43,6 +44,7 @@ type Config struct {
 	AttachmentDir   string
 	APIToken        string
 	BridgeToken     string
+	ViewerPassword  string
 	LeaseTTL        time.Duration
 }
 
@@ -111,6 +113,10 @@ func loadConfig() (Config, error) {
 	if subtle.ConstantTimeCompare([]byte(apiToken), []byte(bridgeToken)) == 1 {
 		return Config{}, errors.New("GHOSTLIGHT_API_TOKEN and GHOSTLIGHT_BRIDGE_TOKEN must be different")
 	}
+	viewerPassword := strings.TrimSpace(os.Getenv(viewerPasswordEnvironment))
+	if viewerPassword == "" {
+		return Config{}, fmt.Errorf("%s: must be set", viewerPasswordEnvironment)
+	}
 	leaseTTL := defaultLeaseTTL
 	if raw := strings.TrimSpace(os.Getenv(leaseTTLEnvironment)); raw != "" {
 		seconds, err := strconv.Atoi(raw)
@@ -119,7 +125,7 @@ func loadConfig() (Config, error) {
 		}
 		leaseTTL = time.Duration(seconds) * time.Second
 	}
-	return Config{ListenAddr: listenAddr, ViewerURL: viewerURL, ViewerHealthURL: viewerHealthURL, StateDir: stateDir, AttachmentDir: attachmentDir, APIToken: apiToken, BridgeToken: bridgeToken, LeaseTTL: leaseTTL}, nil
+	return Config{ListenAddr: listenAddr, ViewerURL: viewerURL, ViewerHealthURL: viewerHealthURL, StateDir: stateDir, AttachmentDir: attachmentDir, APIToken: apiToken, BridgeToken: bridgeToken, ViewerPassword: viewerPassword, LeaseTTL: leaseTTL}, nil
 }
 
 func validateViewerURL(raw string) error {
@@ -185,6 +191,9 @@ func newHandlerWithConfig(config Config, client *http.Client, now func() time.Ti
 	if subtle.ConstantTimeCompare([]byte(config.APIToken), []byte(config.BridgeToken)) == 1 {
 		return nil, errors.New("API token and bridge token must be different")
 	}
+	if strings.TrimSpace(config.ViewerPassword) == "" {
+		return nil, errors.New("viewer password must not be empty")
+	}
 	if config.LeaseTTL <= 0 {
 		config.LeaseTTL = defaultLeaseTTL
 	}
@@ -228,7 +237,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleViewerDiscovery(w, r)
 	case strings.HasPrefix(r.URL.Path, "/v1/bridge/"):
 		h.handleBridge(w, r)
-	case r.URL.Path == "/v1/workspaces" || strings.HasPrefix(r.URL.Path, "/v1/sessions"):
+	case r.URL.Path == "/v1/viewer-capabilities/redeem":
+		h.handleViewerCapabilityRedemption(w, r)
+	case r.URL.Path == "/v1/workspaces" || strings.HasPrefix(r.URL.Path, "/v1/workspaces/") || strings.HasPrefix(r.URL.Path, "/v1/sessions"):
 		h.handleAPI(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")

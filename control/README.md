@@ -23,6 +23,7 @@ make build
 | `GHOSTLIGHT_ATTACHMENT_DIR` | yes | none | Private directory containing staged attachment bodies. |
 | `GHOSTLIGHT_API_TOKEN` | yes | none | Bearer token for workspace and session routes. |
 | `GHOSTLIGHT_BRIDGE_TOKEN` | yes | none | Separate bearer token for the Chromium bridge routes. |
+| `GHOSTLIGHT_VIEWER_PASSWORD` | yes | none | Neko member password released only after an atomic, scoped viewer-capability redemption. Compose sources it from `NEKO_USER_PASSWORD`. |
 | `GHOSTLIGHT_LEASE_TTL_SECONDS` | no | `30` | Controller lease lifetime from 1 through 3600 seconds. |
 
 Startup applies the same validation to the viewer URL and an explicit health URL. It rejects a missing viewer URL, a relative URL, a URL without a host, a scheme other than HTTP or HTTPS, embedded credentials, and a fragment. The configured discovery URL is returned by `GET /v1/viewer`.

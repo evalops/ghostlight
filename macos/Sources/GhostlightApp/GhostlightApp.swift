@@ -352,6 +352,8 @@ struct ContentView: View {
             ZStack {
                 ViewerWebView(
                     url: streamURL,
+                    username: "ghostlight-\(viewModel.clientID.prefix(12))",
+                    password: viewModel.viewerBootstrap?.viewerPassword,
                     reloadToken: streamURL.hashValue,
                     onNavigationStarted: viewModel.viewerNavigationStarted,
                     onNavigationFinished: viewModel.viewerNavigationFinished,
