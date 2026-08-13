@@ -28,7 +28,8 @@ const h264 = runs.filter((run) => run.codec === "h264");
 const sourceSHAs = new Set(runs.flatMap((run) => [run.server.source?.sourceSha, run.native.source_sha]));
 const imageReferences = new Set(runs.map((run) => run.server.image?.reference));
 const codecMatches = runs.every((run) => run.server.configuration?.codec === run.codec
-  && run.server.diagnostics?.codec?.mime_type?.toLowerCase() === `video/${run.codec}`
+  && run.server.phases?.length === 4
+  && run.server.phases.every((phase) => phase.codec?.mime_type?.toLowerCase() === `video/${run.codec}`)
   && run.native.expected_codec === run.codec
   && run.native.codec?.mime_type?.toLowerCase() === `video/${run.codec}`);
 const selectedUDP = runs.every((run) => run.server.phases?.length === 4

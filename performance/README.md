@@ -20,29 +20,13 @@ shasum -a 256 output/playwright/performance/*.json \
   output/playwright/performance/*.jsonl
 ```
 
-The baseline decision is superseded: the runtime default is now H.264 (constrained baseline, 3072 kbps, zero-latency x264 via `NEKO_CAPTURE_VIDEO_CODEC` and `NEKO_CAPTURE_VIDEO_PIPELINE` in `runtime/.env`), negotiated as `profile-level-id=42e01f`. The native macOS receipt still reports navigation state only and does not claim decoded WebRTC frames, CPU, or memory, so the power-efficiency question this change bets on remains unproven on the Mac client.
+The runtime default is H.264 constrained baseline at 3072 kbps. The
+[current-main codec receipt](../docs/performance/2026-08-13-h264-vp8-current-main/README.md)
+contains three alternating VP8/H.264 pairs on direct UDP. H.264 reduced median
+viewer CPU by 48.22% and native Mac CPU by 27.18%. The experiment is rejected
+because two VP8 controls recorded freezes and both browsers
+omitted the optional `powerEfficientDecoder` statistic.
 
-The outstanding receipt is paired: one H.264 run against the stock stack and one VP8 control run, each through `tools/collect-performance.sh`, plus a native WKWebView decode capture. `tests/acceptance/performance.mjs` supports `GHOSTLIGHT_PERFORMANCE_CODEC=default|h264`, which only reorders the Playwright client's `setCodecPreferences`; the runtime picks the actual codec. Capture the pair from a clean tree:
-
-```sh
-# H.264 run: stock stack (runtime default is H.264), explicit client preference.
-GHOSTLIGHT_PERFORMANCE_VIEWER_URL=http://<linux-host>:8081 \
-GHOSTLIGHT_PERFORMANCE_VIEWER_CONTAINER=<viewer-container-id> \
-GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD=<synthetic-or-test-password> \
-GHOSTLIGHT_PERFORMANCE_CODEC=h264 \
-GHOSTLIGHT_PERFORMANCE_OUTPUT_DIR=output/playwright/performance/h264 \
-tools/collect-performance.sh
-```
-
-```sh
-# VP8 control run: set NEKO_CAPTURE_VIDEO_CODEC=vp8 and an empty
-# NEKO_CAPTURE_VIDEO_PIPELINE in runtime/.env, recreate the stack, then:
-GHOSTLIGHT_PERFORMANCE_VIEWER_URL=http://<linux-host>:8081 \
-GHOSTLIGHT_PERFORMANCE_VIEWER_CONTAINER=<viewer-container-id> \
-GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD=<synthetic-or-test-password> \
-GHOSTLIGHT_PERFORMANCE_CODEC=default \
-GHOSTLIGHT_PERFORMANCE_OUTPUT_DIR=output/playwright/performance/vp8 \
-tools/collect-performance.sh
-```
-
-Confirm `codec.mimeType` and `codec.sdpFmtpLine` in each `webrtc.json` match the intended codec before comparing decoded frames, bitrate, and the `container-stats.jsonl` CPU and memory samples. For the native half, connect the Mac client to the H.264 stack and record whether decode uses the power-efficient VideoToolbox path, the per-frame decode time, and the client CPU; no script in this repository captures that yet.
+`tools/run-current-main-codec-pair.sh` runs the six-run receipt from a clean
+checkout whose HEAD equals `github/main`. It drives the synthetic fixture
+through X11 and records macOS Playwright plus Ghostlight.app WKWebView evidence.

@@ -206,9 +206,13 @@ tools/collect-performance.sh
 
 The Playwright client authenticates to Neko and samples inbound WebRTC for ten seconds. It records decoded frames, dropped frames, received bytes, bitrate, negotiated codec, H.264 receiver capability, a dispatch-to-next-presented-frame phase, one-second container statistics, Neko pipeline logs, a transcript, and SHA-256 receipts under `output/playwright/performance/`. It fails when no decoded inbound video frames appear. The harness does not prove that the input caused the next frame, so this phase is not an input-latency measurement.
 
-`GHOSTLIGHT_PERFORMANCE_CODEC=h264` reorders the Playwright client's codec preference toward H.264; `default` (the unset value) leaves the negotiation to the runtime. The runtime default is now H.264, so a default-preference run against the stock stack already records an H.264 receipt. For a paired comparison, capture one run against the H.264 default and one against a VP8-reverted stack (`NEKO_CAPTURE_VIDEO_CODEC=vp8` plus an empty `NEKO_CAPTURE_VIDEO_PIPELINE`). The native WKWebView decode receipt — power-efficient decoder use, decode time, and CPU on the Mac client — is still outstanding. The phase excludes physical keyboard polling and display scanout.
-
-The committed [VP8 measurement](docs/performance/2026-08-12-vp8-baseline/README.md) captured 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, a 72.43 ms dispatch-to-next-presented-frame phase, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB on `2026-08-12`. The next frame was not proven to have been caused by the input, so 72.43 ms is not input latency. Its transcript records a working-tree source label instead of an exact commit SHA. The browser advertised H.264 receive support, and the runtime has since switched its default to H.264; the paired VP8/H.264 rerun and the native WKWebView decode receipt remain outstanding.
+The [current-main H.264 and VP8 receipt](docs/performance/2026-08-13-h264-vp8-current-main/README.md)
+contains three alternating codec pairs. All 24 phases selected direct UDP. X11
+supplied causal markers. WKWebView supplied native decode evidence. H.264
+reduced median viewer CPU from 126.79% to 65.65% and native Mac CPU from 10.30%
+to 7.50%. The result is rejected: two VP8 controls recorded freezes, and
+Chromium plus WKWebView omitted the optional `powerEfficientDecoder` statistic.
+The receipt makes no hardware decode claim.
 
 ## Container updates
 
