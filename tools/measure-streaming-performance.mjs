@@ -828,6 +828,74 @@ function runX11(containerId, script, options = {}) {
   return remoteCommand(`docker exec --user neko --env DISPLAY=:99.0 ${shellQuote(containerId)} sh -lc ${shellQuote(script)}`, options);
 }
 
+function x11InputDriverScript() {
+  return [
+    "command -v xdotool >/dev/null 2>&1 || { echo 'xdotool is required for the X11 benchmark driver' >&2; exit 127; }",
+    "while IFS= read -r action; do",
+    "  case \"$action\" in",
+    "    ping) printf 'ok:ping\\n' ;;",
+    "    f8) xdotool key --clearmodifiers F8 && printf 'ok:f8\\n' || { printf 'error:f8\\n'; exit 1; } ;;",
+    "    focus-typing) xdotool key --clearmodifiers Tab && xdotool key --clearmodifiers Tab && printf 'ok:focus-typing\\n' || { printf 'error:focus-typing\\n'; exit 1; } ;;",
+    "    *) printf 'error:%s\\n' \"$action\" ;;",
+    "  esac",
+    "done",
+  ].join("\n");
+}
+
+function startX11InputDriver(containerId) {
+  const remoteScript = `docker exec --user neko --env DISPLAY=:99.0 ${shellQuote(containerId)} sh -lc ${shellQuote(x11InputDriverScript())}`;
+  const worker = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, remoteScript], { stdio: ["pipe", "pipe", "pipe"] });
+  const pending = [];
+  let stdout = "";
+  let stderr = "";
+  worker.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  worker.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+    while (stdout.includes("\n")) {
+      const newline = stdout.indexOf("\n");
+      const response = stdout.slice(0, newline);
+      stdout = stdout.slice(newline + 1);
+      const request = pending.shift();
+      if (!request) continue;
+      if (response === `ok:${request.action}`) request.resolve();
+      else request.reject(new Error(`X11 input driver ${request.action} failed: ${response}`));
+    }
+  });
+  worker.once("close", (code) => {
+    while (pending.length) pending.shift().reject(new Error(`X11 input driver exited with code ${code}: ${stderr || "no stderr"}`));
+  });
+  return {
+    worker,
+    send(action) {
+      if (!new Set(["ping", "f8", "focus-typing"]).has(action)) return Promise.reject(new Error(`unsupported X11 input action: ${action}`));
+      if (worker.exitCode !== null) return Promise.reject(new Error(`X11 input driver already exited with code ${worker.exitCode}: ${stderr || "no stderr"}`));
+      return new Promise((resolve, reject) => {
+        const request = { action, resolve, reject };
+        pending.push(request);
+        worker.stdin.write(`${action}\n`, (error) => {
+          if (!error) return;
+          const index = pending.indexOf(request);
+          if (index >= 0) pending.splice(index, 1);
+          reject(error);
+        });
+      });
+    },
+  };
+}
+
+async function stopX11InputDriver(driver) {
+  if (!driver) return;
+  if (driver.worker.exitCode === null) driver.worker.stdin.end();
+  await Promise.race([
+    new Promise((resolve) => {
+      if (driver.worker.exitCode !== null) resolve();
+      else driver.worker.once("close", resolve);
+    }),
+    sleep(3000),
+  ]);
+  if (driver.worker.exitCode === null) driver.worker.kill("SIGTERM");
+}
+
 async function navigateRemoteFixture(containerId, phase) {
   runX11(containerId, x11NavigationScript(phase));
   await sleep(500);
@@ -1039,7 +1107,7 @@ async function resetRemoteMarker(clientPage) {
   await clientPage.waitForFunction(() => (window.__ghostlightFrameState?.markerClearSeenAt ?? 0) > 0, null, { timeout: 2500 }).catch(() => {});
 }
 
-async function measureCausalMarker(clientPage, containerId) {
+async function measureCausalMarker(clientPage, inputDriver) {
   await resetRemoteMarker(clientPage);
   const ready = await clientPage.evaluate(() => {
     const state = window.__ghostlightFrameState;
@@ -1049,17 +1117,19 @@ async function measureCausalMarker(clientPage, containerId) {
     state.inputDispatchAt = performance.now();
     return true;
   });
-  if (!ready) return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool" };
+  if (!ready) return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool-persistent-ssh" };
   try {
-    runX11(containerId, "xdotool key --clearmodifiers F8");
-    await clientPage.waitForFunction(() => (window.__ghostlightFrameState?.markerSeenAt ?? 0) > 0, null, { timeout: 2500 });
+    await Promise.all([
+      inputDriver.send("f8"),
+      clientPage.waitForFunction(() => (window.__ghostlightFrameState?.markerSeenAt ?? 0) > 0, null, { timeout: 2500 }),
+    ]);
     const latency = await clientPage.evaluate(() => {
       const state = window.__ghostlightFrameState;
       return state.markerSeenAt - state.inputDispatchAt;
     });
-    return { success: Number.isFinite(latency) && latency >= 0, input_to_present_ms: Number.isFinite(latency) ? latency : null, input_driver: "x11-xdotool" };
+    return { success: Number.isFinite(latency) && latency >= 0, input_to_present_ms: Number.isFinite(latency) ? latency : null, input_driver: "x11-xdotool-persistent-ssh" };
   } catch (error) {
-    return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool", error: error instanceof Error ? error.message : String(error) };
+    return { success: false, input_to_present_ms: null, input_driver: "x11-xdotool-persistent-ssh", error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1068,7 +1138,7 @@ async function collectClientStats(page) {
   return { ...statsSnapshot(result.reports), h264_supported: result.h264Supported, reports: result.reports };
 }
 
-async function startRemoteWorkload(containerId, phase) {
+async function startRemoteWorkload(containerId, inputDriver, phase) {
   if (phase === "scrolling") {
     const workload = startRemoteX11Loop(containerId, phase, "xdotool click --repeat 24 --delay 24 5; xdotool click --repeat 24 --delay 24 4");
     return async () => stopRemoteX11Loop(containerId, workload);
@@ -1077,7 +1147,7 @@ async function startRemoteWorkload(containerId, phase) {
     return async () => {};
   }
   if (phase === "typing") {
-    runX11(containerId, "xdotool key --clearmodifiers Tab; xdotool key --clearmodifiers Tab");
+    await inputDriver.send("focus-typing");
     const workload = startRemoteX11Loop(containerId, phase, "xdotool type --clearmodifiers --delay 2 -- ' synthetic review text'; sleep 1.2");
     return async () => stopRemoteX11Loop(containerId, workload);
   }
@@ -1099,20 +1169,20 @@ function framePhaseMetrics(frameState, durationSeconds) {
   };
 }
 
-async function runPhase(clientPage, containerId, phase) {
+async function runPhase(clientPage, containerId, inputDriver, phase) {
   await navigateRemoteFixture(containerId, phase);
   await clientPage.waitForTimeout(WARMUP_SECONDS * 1000);
   await resetRemoteMarker(clientPage);
   const startStats = await collectClientStats(clientPage);
   const startTime = Date.now();
-  const stopWorkload = await startRemoteWorkload(containerId, phase);
+  const stopWorkload = await startRemoteWorkload(containerId, inputDriver, phase);
   const markerReceipts = [];
   try {
     const deadline = startTime + PHASE_SECONDS * 1000;
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
       await sleep(Math.min(3000, Math.max(250, remaining)));
-      if (Date.now() <= deadline + 100) markerReceipts.push({ captured_at: new Date().toISOString(), ...(await measureCausalMarker(clientPage, containerId)) });
+      if (Date.now() <= deadline + 100) markerReceipts.push({ captured_at: new Date().toISOString(), ...(await measureCausalMarker(clientPage, inputDriver)) });
     }
   } finally {
     await stopWorkload();
@@ -1304,6 +1374,7 @@ async function main() {
   let processStats;
   let clientBrowser;
   let remotePage;
+  let inputDriver;
   let cdpDiagnostics = { enabled: CDP_DIAGNOSTICS, status: CDP_DIAGNOSTICS ? "not-attempted" : "disabled", target: null, error: null };
   let processStart;
   let processEnd;
@@ -1319,6 +1390,8 @@ async function main() {
     await waitForSshTunnel(tunnel);
     processStart = await processSnapshot(remote.containerId, "start");
     await waitForHTTP(`${VIEWER_URL}/health`, 120000, tunnel);
+    inputDriver = startX11InputDriver(remote.containerId);
+    await inputDriver.send("ping");
     stats = startRemoteStats(remote.containerId);
     processStats = startRemoteProcessStats(remote.containerId);
 
@@ -1354,7 +1427,7 @@ async function main() {
     if (!initialClientStats.inbound_count) throw new Error("no inbound video RTP stream was negotiated");
 
     for (const phase of ["static-gmail", "scrolling", "typing", "animation"]) {
-      const result = await runPhase(clientPage, remote.containerId, phase);
+      const result = await runPhase(clientPage, remote.containerId, inputDriver, phase);
       phaseResults.push(result);
       await fs.writeFile(join(OUTPUT_DIR, `phase-${phase}.json`), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
       screenshots.push(await savePhaseScreenshot(clientPage, phase));
@@ -1367,6 +1440,7 @@ async function main() {
   } finally {
     if (remotePage) await remotePage.close().catch(() => {});
     if (clientBrowser) await clientBrowser.close().catch(() => {});
+    await stopX11InputDriver(inputDriver).catch(() => {});
     if (remote?.containerId) processEnd = await processSnapshot(remote.containerId, "end").catch((error) => ({ label: "end", captured_at: new Date().toISOString(), processes: [], process_cpu_sum_pct: null, error: error instanceof Error ? error.message : String(error) }));
     await stopRemoteStats(stats).catch(() => {});
     await stopRemoteProcessStats(processStats).catch(() => {});
@@ -1464,7 +1538,7 @@ async function main() {
       viewer_log: join(OUTPUT_DIR, "viewer.log"),
     },
     limitations: [
-      "Input-to-present is measured only when the remote fixture's causal marker changes after an X11 xdotool F8 dispatch; the timestamp is set immediately before sending the scoped SSH command, so it includes X11-driver command transit and is compared only within paired runs.",
+      "Input-to-present is measured only when the remote fixture's causal marker changes after an X11 xdotool F8 dispatch; the timestamp is set immediately before writing to one persistent scoped SSH input channel, so it includes LAN command transit but not per-marker SSH process startup.",
       "The synthetic fixture is launched and driven through Chromium's real X11 input path with xdotool. CDP is disabled by default and optional diagnostics never gate a measurement.",
       "Viewer CPU is attributed to the exact pinned container through timestamped Docker stats sliced to each phase window; host-wide CPU is not substituted.",
       "Process CPU samples are captured at approximately 1 Hz from /proc utime+stime deltas. Chromium, Neko, X-related, and other categories are reported; vp8enc remains in-process within Neko/GStreamer and is not separately attributable.",
@@ -1487,6 +1561,8 @@ function runSelfTests() {
   assert.doesNotMatch(composeConfig(), /performance-cdp-pipe|9223/);
   assert.match(x11NavigationScript("typing"), /xdotool key --clearmodifiers ctrl\+l/);
   assert.match(x11NavigationScript("typing"), /xdotool windowactivate --sync/);
+  assert.match(x11InputDriverScript(), /while IFS= read -r action/);
+  assert.match(x11InputDriverScript(), /ok:f8/);
   assert.equal(tunnelExited(null), false);
   assert.equal(tunnelExited({ exitCode: null }), false);
   assert.equal(tunnelExited({ exitCode: 1 }), true);
