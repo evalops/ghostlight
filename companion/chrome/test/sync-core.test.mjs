@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { endpoint, hostPermission, normalizeControlOrigin, safeHandoff } from "../sync-core.js";
+import { bookmarkItems, endpoint, hostPermission, normalizeControlOrigin, readingListItems, safeHandoff, safeHandoffs } from "../sync-core.js";
 
 test("normalizes a scoped control origin", () => {
   assert.equal(normalizeControlOrigin(" https://ghostlight.test/base/ "), "https://ghostlight.test/base");
@@ -17,4 +17,29 @@ test("accepts only an explicitly selected safe web tab", () => {
   assert.throws(() => safeHandoff({ url: "chrome://settings" }), /Only HTTP or HTTPS/);
   assert.throws(() => safeHandoff({ url: "https://example.test/#secret" }), /fragments/);
   assert.throws(() => safeHandoff({ url: "https://example.test/callback?access_token=secret" }), /credential/);
+});
+
+test("preserves window order and fails an entire unsafe batch", () => {
+  assert.deepEqual(safeHandoffs([
+    { title: "One", url: "https://one.test/" },
+    { title: "Two", url: "https://two.test/" }
+  ]).map((item) => item.title), ["One", "Two"]);
+  assert.throws(() => safeHandoffs([
+    { url: "https://safe.test/" },
+    { url: "https://unsafe.test/?token=secret" }
+  ]), /credential/);
+});
+
+test("preserves bookmark hierarchy and Reading List state", () => {
+  assert.deepEqual(bookmarkItems([{ id: "0", title: "root", children: [
+    { id: "1", parentId: "0", title: "Docs", url: "https://docs.test/" }
+  ] }]), [
+    { external_id: "0", parent_external_id: "", title: "root", position: 0 },
+    { external_id: "1", parent_external_id: "0", title: "Docs", url: "https://docs.test/", position: 0 }
+  ]);
+  assert.deepEqual(readingListItems([{ title: "Later", url: "https://later.test/", hasBeenRead: true }]), [
+    { external_id: "https://later.test/", title: "Later", url: "https://later.test/", position: 0, read: true }
+  ]);
+  assert.equal(bookmarkItems([{ id: "unsafe", url: "chrome://settings" }]).length, 0);
+  assert.equal(readingListItems([{ url: "https://later.test/?token=secret" }]).length, 0);
 });

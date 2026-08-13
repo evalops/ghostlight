@@ -5,16 +5,19 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
 
 const (
 	chromePairingTTL      = 10 * time.Minute
-	chromeDeviceScope     = "handoff:write"
+	chromeDeviceScope     = "handoff:write library:replace"
 	maxPendingHandoffs    = 100
+	maxHandoffBatch       = 25
 	maxChromeDeviceName   = 100
 	maxChromeHandoffTitle = 300
+	maxChromeLibraryItems = 5000
 )
 
 func (s *sqliteStore) createChromePairing(ctx context.Context, workspaceID, deviceName string) (ChromePairing, error) {
@@ -78,9 +81,16 @@ func (s *sqliteStore) redeemChromePairing(ctx context.Context, code, deviceID, d
 	_, err = tx.ExecContext(ctx, `INSERT INTO chrome_devices(id,workspace_id,name,scope,token_hash,created_at,last_seen_at) VALUES(?,?,?,?,?,?,?)`, deviceID, workspaceID, deviceName, chromeDeviceScope, hashSecret(token), formatTime(now), formatTime(now))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
-			return ChromeDeviceCredential{}, errConflict
+			result, updateErr := tx.ExecContext(ctx, `UPDATE chrome_devices SET name=?,scope=?,token_hash=?,created_at=?,last_seen_at=?,revoked_at=NULL WHERE id=? AND workspace_id=? AND revoked_at IS NOT NULL`, deviceName, chromeDeviceScope, hashSecret(token), formatTime(now), formatTime(now), deviceID, workspaceID)
+			if updateErr != nil {
+				return ChromeDeviceCredential{}, updateErr
+			}
+			if rows, _ := result.RowsAffected(); rows != 1 {
+				return ChromeDeviceCredential{}, errConflict
+			}
+		} else {
+			return ChromeDeviceCredential{}, err
 		}
-		return ChromeDeviceCredential{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return ChromeDeviceCredential{}, err
@@ -136,63 +146,107 @@ func (s *sqliteStore) listChromeDevices(ctx context.Context, workspaceID string)
 }
 
 func (s *sqliteStore) revokeChromeDevice(ctx context.Context, workspaceID, deviceID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	now := formatTime(s.now().UTC())
-	result, err := s.db.ExecContext(ctx, `UPDATE chrome_devices SET revoked_at=? WHERE id=? AND workspace_id=? AND revoked_at IS NULL`, now, deviceID, workspaceID)
+	result, err := tx.ExecContext(ctx, `UPDATE chrome_devices SET revoked_at=? WHERE id=? AND workspace_id=? AND revoked_at IS NULL`, now, deviceID, workspaceID)
 	if err != nil {
 		return err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
 		return errNotFound
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chrome_library_items WHERE device_id=?`, deviceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chrome_library_snapshots WHERE device_id=?`, deviceID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *sqliteStore) createChromeHandoff(ctx context.Context, device ChromeDevice, idempotencyKey, requestHash, title, targetURL string) (ChromeHandoff, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	values, err := s.createChromeHandoffs(ctx, device, idempotencyKey, requestHash, "", []ChromeHandoff{{Title: title, URL: targetURL}})
 	if err != nil {
 		return ChromeHandoff{}, err
 	}
-	defer tx.Rollback()
-	var existingID, existingHash string
-	err = tx.QueryRowContext(ctx, `SELECT id,request_hash FROM chrome_handoffs WHERE device_id=? AND idempotency_key=?`, device.ID, idempotencyKey).Scan(&existingID, &existingHash)
-	if err == nil {
-		if subtle.ConstantTimeCompare([]byte(existingHash), []byte(requestHash)) != 1 {
-			return ChromeHandoff{}, errIdempotencyKey
-		}
-		return s.chromeHandoffByIDTx(ctx, tx, existingID)
+	return values[0], nil
+}
+
+func (s *sqliteStore) createChromeHandoffs(ctx context.Context, device ChromeDevice, idempotencyKey, requestHash, groupID string, inputs []ChromeHandoff) ([]ChromeHandoff, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return ChromeHandoff{}, err
+	defer tx.Rollback()
+	values := make([]ChromeHandoff, len(inputs))
+	existingCount := 0
+	for position := range inputs {
+		itemKey := idempotencyKey
+		if len(inputs) > 1 {
+			itemKey = idempotencyKey + ":" + fmt.Sprint(position)
+		}
+		var existingID, existingHash string
+		err = tx.QueryRowContext(ctx, `SELECT id,request_hash FROM chrome_handoffs WHERE device_id=? AND idempotency_key=?`, device.ID, itemKey).Scan(&existingID, &existingHash)
+		if err == nil {
+			if subtle.ConstantTimeCompare([]byte(existingHash), []byte(requestHash)) != 1 {
+				return nil, errIdempotencyKey
+			}
+			existing, err := s.chromeHandoffByIDTx(ctx, tx, existingID)
+			if err != nil {
+				return nil, err
+			}
+			values[position] = existing
+			existingCount++
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
 	}
 	var pending int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM chrome_handoffs WHERE workspace_id=? AND state='pending'`, device.WorkspaceID).Scan(&pending); err != nil {
-		return ChromeHandoff{}, err
+		return nil, err
 	}
-	if pending >= maxPendingHandoffs {
-		return ChromeHandoff{}, errStorageLimit
-	}
-	id, err := randomID(16)
-	if err != nil {
-		return ChromeHandoff{}, err
+	if pending+(len(inputs)-existingCount) > maxPendingHandoffs {
+		return nil, errStorageLimit
 	}
 	now := s.now().UTC()
-	_, err = tx.ExecContext(ctx, `INSERT INTO chrome_handoffs(id,workspace_id,device_id,idempotency_key,request_hash,title,url,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)`, id, device.WorkspaceID, device.ID, idempotencyKey, requestHash, title, targetURL, formatTime(now), formatTime(now))
-	if err != nil {
-		return ChromeHandoff{}, err
+	for position := range inputs {
+		if values[position].ID != "" {
+			continue
+		}
+		input := inputs[position]
+		id, err := randomID(16)
+		if err != nil {
+			return nil, err
+		}
+		itemKey := idempotencyKey
+		if len(inputs) > 1 {
+			itemKey = idempotencyKey + ":" + fmt.Sprint(position)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO chrome_handoffs(id,workspace_id,device_id,idempotency_key,request_hash,title,url,group_id,position,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)`, id, device.WorkspaceID, device.ID, itemKey, requestHash, input.Title, input.URL, groupID, position, formatTime(now), formatTime(now))
+		if err != nil {
+			return nil, err
+		}
+		values[position] = ChromeHandoff{ID: id, WorkspaceID: device.WorkspaceID, DeviceID: device.ID, DeviceName: device.Name, Title: input.Title, URL: input.URL, GroupID: groupID, Position: position, State: "pending", CreatedAt: now, UpdatedAt: now}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE chrome_devices SET last_seen_at=? WHERE id=? AND revoked_at IS NULL`, formatTime(now), device.ID); err != nil {
-		return ChromeHandoff{}, err
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return ChromeHandoff{}, err
+		return nil, err
 	}
-	return ChromeHandoff{ID: id, WorkspaceID: device.WorkspaceID, DeviceID: device.ID, DeviceName: device.Name, Title: title, URL: targetURL, State: "pending", CreatedAt: now, UpdatedAt: now}, nil
+	return values, nil
 }
 
 func (s *sqliteStore) chromeHandoffByIDTx(ctx context.Context, tx *sql.Tx, id string) (ChromeHandoff, error) {
 	var value ChromeHandoff
 	var created, updated string
-	err := tx.QueryRowContext(ctx, `SELECT h.id,h.workspace_id,h.device_id,d.name,h.title,h.url,h.state,h.created_at,h.updated_at FROM chrome_handoffs h JOIN chrome_devices d ON d.id=h.device_id WHERE h.id=?`, id).Scan(&value.ID, &value.WorkspaceID, &value.DeviceID, &value.DeviceName, &value.Title, &value.URL, &value.State, &created, &updated)
+	err := tx.QueryRowContext(ctx, `SELECT h.id,h.workspace_id,h.device_id,d.name,h.title,h.url,h.group_id,h.position,h.state,h.created_at,h.updated_at FROM chrome_handoffs h JOIN chrome_devices d ON d.id=h.device_id WHERE h.id=?`, id).Scan(&value.ID, &value.WorkspaceID, &value.DeviceID, &value.DeviceName, &value.Title, &value.URL, &value.GroupID, &value.Position, &value.State, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChromeHandoff{}, errNotFound
 	}
@@ -205,7 +259,7 @@ func (s *sqliteStore) chromeHandoffByIDTx(ctx context.Context, tx *sql.Tx, id st
 }
 
 func (s *sqliteStore) listChromeHandoffs(ctx context.Context, workspaceID string) ([]ChromeHandoff, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT h.id,h.workspace_id,h.device_id,d.name,h.title,h.url,h.state,h.created_at,h.updated_at FROM chrome_handoffs h JOIN chrome_devices d ON d.id=h.device_id WHERE h.workspace_id=? AND h.state='pending' ORDER BY h.created_at DESC,h.id DESC`, workspaceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT h.id,h.workspace_id,h.device_id,d.name,h.title,h.url,h.group_id,h.position,h.state,h.created_at,h.updated_at FROM chrome_handoffs h JOIN chrome_devices d ON d.id=h.device_id WHERE h.workspace_id=? AND h.state='pending' ORDER BY h.created_at DESC,h.group_id,h.position,h.id`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +268,7 @@ func (s *sqliteStore) listChromeHandoffs(ctx context.Context, workspaceID string
 	for rows.Next() {
 		var value ChromeHandoff
 		var created, updated string
-		if err := rows.Scan(&value.ID, &value.WorkspaceID, &value.DeviceID, &value.DeviceName, &value.Title, &value.URL, &value.State, &created, &updated); err != nil {
+		if err := rows.Scan(&value.ID, &value.WorkspaceID, &value.DeviceID, &value.DeviceName, &value.Title, &value.URL, &value.GroupID, &value.Position, &value.State, &created, &updated); err != nil {
 			return nil, err
 		}
 		value.CreatedAt, _ = parseTime(created)
@@ -235,7 +289,7 @@ func (s *sqliteStore) updateChromeHandoff(ctx context.Context, workspaceID, id, 
 	}
 	var value ChromeHandoff
 	var created, updated string
-	err = s.db.QueryRowContext(ctx, `SELECT h.id,h.workspace_id,h.device_id,d.name,h.title,h.url,h.state,h.created_at,h.updated_at FROM chrome_handoffs h JOIN chrome_devices d ON d.id=h.device_id WHERE h.id=?`, id).Scan(&value.ID, &value.WorkspaceID, &value.DeviceID, &value.DeviceName, &value.Title, &value.URL, &value.State, &created, &updated)
+	err = s.db.QueryRowContext(ctx, `SELECT h.id,h.workspace_id,h.device_id,d.name,h.title,h.url,h.group_id,h.position,h.state,h.created_at,h.updated_at FROM chrome_handoffs h JOIN chrome_devices d ON d.id=h.device_id WHERE h.id=?`, id).Scan(&value.ID, &value.WorkspaceID, &value.DeviceID, &value.DeviceName, &value.Title, &value.URL, &value.GroupID, &value.Position, &value.State, &created, &updated)
 	if err != nil {
 		return ChromeHandoff{}, err
 	}

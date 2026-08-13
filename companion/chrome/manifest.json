@@ -1,17 +1,19 @@
 {
   "manifest_version": 3,
   "name": "Continue in Ghostlight",
-  "description": "Send the current Chrome tab to your Ghostlight inbox when you click the extension.",
-  "version": "0.1.0",
+  "description": "Continue selected Chrome tabs in Ghostlight and optionally mirror bookmarks or Reading List.",
+  "version": "0.2.0",
   "minimum_chrome_version": "120",
-  "permissions": ["activeTab", "storage"],
+  "permissions": ["activeTab", "alarms", "storage"],
+  "optional_permissions": ["tabs", "bookmarks", "readingList"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
   },
   "action": {
-    "default_title": "Continue in Ghostlight"
+    "default_title": "Continue in Ghostlight",
+    "default_popup": "popup.html"
   },
   "options_ui": {
     "page": "options.html",

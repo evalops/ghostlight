@@ -30,6 +30,56 @@ export function safeHandoff(tab) {
   return { title: (tab.title ?? "").trim().slice(0, 300), url: url.toString() };
 }
 
+export function safeHandoffs(tabs, limit = 25) {
+  const handoffs = tabs.map(safeHandoff);
+  if (handoffs.length === 0) throw new Error("Choose at least one normal web page.");
+  if (handoffs.length > limit) throw new Error(`Ghostlight accepts up to ${limit} tabs at once.`);
+  return handoffs;
+}
+
+export function bookmarkItems(nodes) {
+  const values = [];
+  const visit = (node, position = 0) => {
+    const item = {
+      external_id: String(node.id),
+      parent_external_id: node.parentId ? String(node.parentId) : "",
+      title: (node.title ?? "").trim().slice(0, 300),
+      position
+    };
+    if (node.url) {
+      const url = safeLibraryURL(node.url);
+      if (!url) return;
+      item.url = url;
+    }
+    values.push(item);
+    for (const [index, child] of (node.children ?? []).entries()) visit(child, index);
+  };
+  for (const [index, node] of nodes.entries()) visit(node, index);
+  return values;
+}
+
+export function readingListItems(entries) {
+  return entries.flatMap((entry, position) => {
+    const url = safeLibraryURL(entry.url);
+    if (!url) return [];
+    return [{
+      external_id: url,
+      title: (entry.title ?? "").trim().slice(0, 300),
+      url,
+      position,
+      read: Boolean(entry.hasBeenRead)
+    }];
+  });
+}
+
+function safeLibraryURL(value) {
+  try {
+    return safeHandoff({ url: value }).url;
+  } catch {
+    return null;
+  }
+}
+
 export function endpoint(controlOrigin, path) {
   return `${normalizeControlOrigin(controlOrigin)}/${path.replace(/^\/+/, "")}`;
 }

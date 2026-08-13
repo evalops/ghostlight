@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 type Workspace struct {
 	ID        string    `json:"id"`
@@ -125,9 +125,30 @@ type ChromeHandoff struct {
 	DeviceName  string    `json:"device_name"`
 	Title       string    `json:"title,omitempty"`
 	URL         string    `json:"url"`
+	GroupID     string    `json:"group_id,omitempty"`
+	Position    int       `json:"position,omitempty"`
 	State       string    `json:"state"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type ChromeLibraryItem struct {
+	Kind             string `json:"kind"`
+	ExternalID       string `json:"external_id"`
+	ParentExternalID string `json:"parent_external_id,omitempty"`
+	Title            string `json:"title,omitempty"`
+	URL              string `json:"url,omitempty"`
+	Position         int    `json:"position"`
+	Read             bool   `json:"read"`
+	DeviceID         string `json:"device_id,omitempty"`
+	DeviceName       string `json:"device_name,omitempty"`
+}
+
+type ChromeLibrarySnapshotReceipt struct {
+	Kind       string    `json:"kind"`
+	Revision   int64     `json:"revision"`
+	ItemCount  int       `json:"item_count"`
+	ReceivedAt time.Time `json:"received_at"`
 }
 
 type Attachment struct {

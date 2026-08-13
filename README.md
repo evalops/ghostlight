@@ -8,7 +8,7 @@
 
 Ghostlight runs a persistent Chromium profile on Linux and streams the browser to a native macOS client over WebRTC.
 
-The optional [Chrome continuity companion](docs/chrome-sync.md) sends a user-selected local Chrome tab to Ghostlight without copying credentials, cookies, history, or the Chrome profile.
+The optional [Chrome continuity companion](docs/chrome-sync.md) sends a chosen tab or window to Ghostlight and can mirror bookmarks or Reading List with separate runtime consent. Credentials, cookies, history, and the Chrome profile stay local.
 
 ## Current scope
 

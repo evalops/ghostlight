@@ -479,6 +479,21 @@ struct ContentView: View {
                     }
                 }
 
+                if !viewModel.chromeBookmarks.isEmpty || !viewModel.chromeReadingList.isEmpty {
+                    HStack(alignment: .top, spacing: 28) {
+                        chromeLibraryColumn(
+                            title: "Chrome bookmarks",
+                            symbol: "bookmark",
+                            items: Array(viewModel.chromeBookmarks.prefix(6))
+                        )
+                        chromeLibraryColumn(
+                            title: "Reading List",
+                            symbol: "text.book.closed",
+                            items: Array(viewModel.chromeReadingList.filter { !$0.read }.prefix(6))
+                        )
+                    }
+                }
+
                 if let error = viewModel.chromeSyncError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -545,6 +560,38 @@ struct ContentView: View {
             .frame(maxWidth: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func chromeLibraryColumn(title: String, symbol: String, items: [ChromeLibraryItem]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: symbol)
+                .font(.headline)
+            if items.isEmpty {
+                Text("You’re caught up.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(items) { item in
+                Button {
+                    viewModel.openChromeLibraryItem(item)
+                    showingHome = false
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text((item.title ?? "").isEmpty ? item.url ?? "Untitled" : item.title ?? "Untitled")
+                            .lineLimit(1)
+                        Text("\(item.deviceName) · \(item.url ?? "")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!viewModel.canControl)
+                Divider()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func destinationButton(_ shortcut: WorkspaceShortcut) -> some View {

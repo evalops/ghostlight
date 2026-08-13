@@ -83,6 +83,54 @@ func TestStoreRejectsUnknownSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestSchemaThreeMigratesChromeWindowAndLibraryState(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(stateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE chrome_handoffs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, device_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(device_id,idempotency_key))`,
+		`PRAGMA user_version = 3`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("migrate schema three: %v", err)
+	}
+	defer store.close()
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := tableColumns(context.Background(), tx, "chrome_handoffs")
+	_ = tx.Rollback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !columns["group_id"] || !columns["position"] {
+		t.Fatalf("migrated handoff columns = %#v", columns)
+	}
+	for _, table := range []string{"chrome_library_snapshots", "chrome_library_items"} {
+		var name string
+		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			t.Fatalf("migrated table %s: %v", table, err)
+		}
+	}
+}
+
 func TestSchemaMigrationRollsBackAndRestartsCleanly(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")
@@ -853,6 +901,14 @@ func TestChromeHandoffPairingConsentSafetyAndRevocation(t *testing.T) {
 	if afterRevoke.Code != http.StatusUnauthorized {
 		t.Fatalf("after revoke = %d %s", afterRevoke.Code, afterRevoke.Body.String())
 	}
+	repaired := pairChromeDevice(t, h, "Jonathan's Chrome", credential.Device.ID)
+	if repaired.Device.ID != credential.Device.ID || repaired.DeviceToken == credential.DeviceToken {
+		t.Fatalf("repaired credential = %#v", repaired)
+	}
+	reconnected := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoffs", repaired.DeviceToken, "handoff-4", strings.NewReader(safeBody))
+	if reconnected.Code != http.StatusCreated {
+		t.Fatalf("reconnected device = %d %s", reconnected.Code, reconnected.Body.String())
+	}
 
 	database, err := os.ReadFile(filepath.Join(h.config.StateDir, databaseFileName))
 	if err != nil {
@@ -875,6 +931,108 @@ func TestChromePairingExpiresClosed(t *testing.T) {
 	if redeemed.Code != http.StatusUnauthorized || !strings.Contains(redeemed.Body.String(), "pairing_expired") {
 		t.Fatalf("expired pairing = %d %s", redeemed.Code, redeemed.Body.String())
 	}
+}
+
+func TestChromeWindowBatchAndLibrarySnapshotsAreAtomicAndMonotonic(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	credential := pairChromeDevice(t, h, "Window Chrome", "window-device-1234")
+
+	batch := `{"group_id":"window-group-1234","tabs":[{"title":"One","url":"https://one.example.test"},{"title":"Two","url":"https://two.example.test/path"}]}`
+	created := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoff-batches", credential.DeviceToken, "window-batch-1", strings.NewReader(batch))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("batch = %d %s", created.Code, created.Body.String())
+	}
+	var handoffs []ChromeHandoff
+	decodeRecorder(t, created, &handoffs)
+	if len(handoffs) != 2 || handoffs[0].GroupID != "window-group-1234" || handoffs[1].Position != 1 {
+		t.Fatalf("handoffs = %#v", handoffs)
+	}
+
+	unsafeBatch := `{"group_id":"window-group-5678","tabs":[{"title":"Good","url":"https://good.example.test"},{"title":"Bad","url":"https://bad.example.test/?token=secret"}]}`
+	unsafe := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoff-batches", credential.DeviceToken, "window-batch-2", strings.NewReader(unsafeBatch))
+	if unsafe.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe batch = %d %s", unsafe.Code, unsafe.Body.String())
+	}
+	listed := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/chrome-handoffs", "", "", nil)
+	decodeRecorder(t, listed, &handoffs)
+	if len(handoffs) != 2 {
+		t.Fatalf("unsafe batch inserted partial handoffs: %#v", handoffs)
+	}
+	for index := 0; index < maxPendingHandoffs-len(handoffs); index++ {
+		id := fmt.Sprintf("capacity-%03d", index)
+		key := fmt.Sprintf("capacity-key-%03d", index)
+		if _, err := h.store.db.Exec(`INSERT INTO chrome_handoffs(id,workspace_id,device_id,idempotency_key,request_hash,title,url,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)`, id, "default", credential.Device.ID, key, key, "Capacity", "https://capacity.example.test", formatTime(now), formatTime(now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retriedBatch := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoff-batches", credential.DeviceToken, "window-batch-1", strings.NewReader(batch))
+	if retriedBatch.Code != http.StatusCreated {
+		t.Fatalf("batch retry at capacity = %d %s", retriedBatch.Code, retriedBatch.Body.String())
+	}
+
+	bookmarkSnapshot := `{"kind":"bookmark","revision":1,"items":[{"external_id":"folder-1","title":"Work","position":0},{"external_id":"bookmark-1","parent_external_id":"folder-1","title":"Docs","url":"https://docs.example.test","position":0}]}`
+	receiptResponse := doChromeRequest(h, http.MethodPut, "/v1/chrome-library-snapshots", credential.DeviceToken, "", strings.NewReader(bookmarkSnapshot))
+	if receiptResponse.Code != http.StatusOK {
+		t.Fatalf("bookmark snapshot = %d %s", receiptResponse.Code, receiptResponse.Body.String())
+	}
+	var receipt ChromeLibrarySnapshotReceipt
+	decodeRecorder(t, receiptResponse, &receipt)
+	if receipt.Revision != 1 || receipt.ItemCount != 2 {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+
+	retry := doChromeRequest(h, http.MethodPut, "/v1/chrome-library-snapshots", credential.DeviceToken, "", strings.NewReader(bookmarkSnapshot))
+	if retry.Code != http.StatusOK {
+		t.Fatalf("snapshot retry = %d %s", retry.Code, retry.Body.String())
+	}
+	changedSameRevision := doChromeRequest(h, http.MethodPut, "/v1/chrome-library-snapshots", credential.DeviceToken, "", strings.NewReader(`{"kind":"bookmark","revision":1,"items":[]}`))
+	if changedSameRevision.Code != http.StatusConflict || !strings.Contains(changedSameRevision.Body.String(), "snapshot_conflict") {
+		t.Fatalf("changed revision = %d %s", changedSameRevision.Code, changedSameRevision.Body.String())
+	}
+	replacement := doChromeRequest(h, http.MethodPut, "/v1/chrome-library-snapshots", credential.DeviceToken, "", strings.NewReader(`{"kind":"bookmark","revision":2,"items":[{"external_id":"bookmark-2","title":"New","url":"https://new.example.test","position":0}]}`))
+	if replacement.Code != http.StatusOK {
+		t.Fatalf("replacement = %d %s", replacement.Code, replacement.Body.String())
+	}
+	stale := doChromeRequest(h, http.MethodPut, "/v1/chrome-library-snapshots", credential.DeviceToken, "", strings.NewReader(bookmarkSnapshot))
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "stale_revision") {
+		t.Fatalf("stale revision = %d %s", stale.Code, stale.Body.String())
+	}
+
+	library := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/chrome-library?kind=bookmark", "", "", nil)
+	var items []ChromeLibraryItem
+	decodeRecorder(t, library, &items)
+	if len(items) != 1 || items[0].ExternalID != "bookmark-2" || items[0].DeviceName != "Window Chrome" {
+		t.Fatalf("library = %#v", items)
+	}
+	readingUnsafe := doChromeRequest(h, http.MethodPut, "/v1/chrome-library-snapshots", credential.DeviceToken, "", strings.NewReader(`{"kind":"reading_list","revision":1,"items":[{"external_id":"https://example.test/?code=secret","url":"https://example.test/?code=secret","position":0}]}`))
+	if readingUnsafe.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe reading list = %d %s", readingUnsafe.Code, readingUnsafe.Body.String())
+	}
+	revoked := doJSON(t, h, http.MethodDelete, "/v1/workspaces/default/chrome-devices/"+credential.Device.ID, "", "", nil)
+	if revoked.Code != http.StatusNoContent {
+		t.Fatalf("revoke = %d %s", revoked.Code, revoked.Body.String())
+	}
+	library = doJSON(t, h, http.MethodGet, "/v1/workspaces/default/chrome-library?kind=bookmark", "", "", nil)
+	decodeRecorder(t, library, &items)
+	if len(items) != 0 {
+		t.Fatalf("revoked device retained visible library: %#v", items)
+	}
+}
+
+func pairChromeDevice(t *testing.T, h *handler, name, deviceID string) ChromeDeviceCredential {
+	t.Helper()
+	pairingResponse := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/chrome-pairings", "", "", strings.NewReader(fmt.Sprintf(`{"device_name":%q}`, name)))
+	var pairing ChromePairing
+	decodeRecorder(t, pairingResponse, &pairing)
+	body := fmt.Sprintf(`{"pairing_code":%q,"device_id":%q,"device_name":%q}`, pairing.PairingCode, deviceID, name)
+	redeemed := doChromeRequest(h, http.MethodPost, "/v1/chrome-pairings/redeem", "", "", strings.NewReader(body))
+	if redeemed.Code != http.StatusCreated {
+		t.Fatalf("redeem = %d %s", redeemed.Code, redeemed.Body.String())
+	}
+	var credential ChromeDeviceCredential
+	decodeRecorder(t, redeemed, &credential)
+	return credential
 }
 
 func productTestConfig(root string) Config {

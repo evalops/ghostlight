@@ -114,7 +114,9 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS workspace_preferences (workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE, search_url TEXT NOT NULL, shortcuts_json TEXT NOT NULL, recent_urls_json TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS chrome_pairings (token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, device_name TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS chrome_devices (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, scope TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT)`,
-		`CREATE TABLE IF NOT EXISTS chrome_handoffs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(device_id,idempotency_key))`,
+		`CREATE TABLE IF NOT EXISTS chrome_handoffs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(device_id,idempotency_key))`,
+		`CREATE TABLE IF NOT EXISTS chrome_library_snapshots (device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, kind TEXT NOT NULL, revision INTEGER NOT NULL, request_hash TEXT NOT NULL, item_count INTEGER NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY(device_id,kind))`,
+		`CREATE TABLE IF NOT EXISTS chrome_library_items (device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, kind TEXT NOT NULL, external_id TEXT NOT NULL, parent_external_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, position INTEGER NOT NULL, is_read INTEGER NOT NULL, PRIMARY KEY(device_id,kind,external_id))`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -143,6 +145,20 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE commands SET state=CASE state WHEN 'ok' THEN 'applied' WHEN 'error' THEN 'failed' ELSE state END, completed_at=acknowledged_at`); err != nil {
 			return fmt.Errorf("migrate state database: %w", err)
+		}
+		chromeColumns, err := tableColumns(ctx, tx, "chrome_handoffs")
+		if err != nil {
+			return fmt.Errorf("inspect Chrome handoff migration: %w", err)
+		}
+		for _, migration := range []struct{ column, statement string }{
+			{"group_id", `ALTER TABLE chrome_handoffs ADD COLUMN group_id TEXT NOT NULL DEFAULT ''`},
+			{"position", `ALTER TABLE chrome_handoffs ADD COLUMN position INTEGER NOT NULL DEFAULT 0`},
+		} {
+			if !chromeColumns[migration.column] {
+				if _, err := tx.ExecContext(ctx, migration.statement); err != nil {
+					return fmt.Errorf("migrate Chrome handoffs: %w", err)
+				}
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {

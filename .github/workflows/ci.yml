@@ -178,6 +178,7 @@ jobs:
           npm test
           node --check service-worker.js
           node --check options.js
+          node --check popup.js
           node --check sync-core.js
 
   swift-tests:
