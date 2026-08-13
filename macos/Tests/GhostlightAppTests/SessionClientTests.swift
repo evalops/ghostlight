@@ -23,6 +23,8 @@ final class SessionClientTests: XCTestCase {
         XCTAssertEqual(configuration?.displayName, "Native observer")
         XCTAssertTrue(configuration?.userScript.contains("TrackedPeerConnection") == true)
         XCTAssertTrue(configuration?.userScript.contains("p'ass") == true)
+        XCTAssertTrue(configuration?.userScript.contains("if (peers.length === 0) connect();") == true)
+        XCTAssertFalse(configuration?.userScript.contains("if (!document.querySelector(\"video\")) connect();") == true)
     }
 
     override func tearDown() {
