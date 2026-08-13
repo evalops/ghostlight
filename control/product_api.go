@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -27,6 +28,17 @@ const (
 	maxBridgeCommands         = 100
 )
 
+var credentialBearingURLQueryKeys = map[string]bool{
+	"accesscode": true, "accesstoken": true, "apikey": true, "auth": true,
+	"authorization": true, "code": true, "cookie": true, "credential": true,
+	"idtoken": true, "jwt": true, "key": true, "password": true, "passwd": true,
+	"refreshtoken": true, "secret": true,
+	"session": true, "sessionid": true, "sessiontoken": true, "sig": true,
+	"signature": true, "token": true, "xamzcredential": true,
+	"xamzsecuritytoken": true, "xamzsignature": true, "xgoogcredential": true,
+	"xgoogsecuritytoken": true, "xgoogsignature": true,
+}
+
 func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if h.store == nil {
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
@@ -40,6 +52,8 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 2 && parts[1] == "workspaces":
 		h.handleWorkspaces(w, r)
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "preferences":
+		h.handleWorkspacePreferences(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "sessions":
 		h.handleSessions(w, r)
 	case len(parts) >= 3 && parts[1] == "sessions":
@@ -47,6 +61,59 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (h *handler) handleWorkspacePreferences(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	switch r.Method {
+	case http.MethodGet:
+		preferences, err := h.store.getWorkspacePreferences(r.Context(), workspaceID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, preferences)
+	case http.MethodPut:
+		var input WorkspacePreferences
+		if _, err := decodeStrictJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "workspace preferences are invalid")
+			return
+		}
+		input.WorkspaceID = workspaceID
+		if !validWorkspacePreferences(input) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "workspace preferences are invalid")
+			return
+		}
+		preferences, err := h.store.putWorkspacePreferences(r.Context(), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, preferences)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
+	}
+}
+
+func validWorkspacePreferences(value WorkspacePreferences) bool {
+	if len(value.Shortcuts) > 24 || len(value.RecentURLs) > 20 || len(value.SearchURL) > 500 || !strings.Contains(value.SearchURL, "{query}") {
+		return false
+	}
+	if !validNavigationURL(strings.ReplaceAll(value.SearchURL, "{query}", "test")) {
+		return false
+	}
+	seen := map[string]bool{}
+	for position, shortcut := range value.Shortcuts {
+		if shortcut.ID == "" || len(shortcut.ID) > 100 || shortcut.Name == "" || len(shortcut.Name) > 100 || shortcut.Position != position || !validNavigationURL(shortcut.URL) || seen[shortcut.ID] {
+			return false
+		}
+		seen[shortcut.ID] = true
+	}
+	for _, recent := range value.RecentURLs {
+		if !validRecentURL(recent) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *handler) handleBridge(w http.ResponseWriter, r *http.Request) {
@@ -288,16 +355,138 @@ func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
+	var input struct {
+		ClientID string `json:"client_id"`
+	}
+	if _, err := decodeStrictJSON(r, &input); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "stream request is invalid")
+		return
+	}
+	input.ClientID = strings.TrimSpace(input.ClientID)
+	if len(input.ClientID) > 200 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "client_id is too long")
+		return
+	}
 	if _, err := h.store.getSession(r.Context(), sessionID); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	stream, err := h.store.createStream(r.Context(), sessionID, h.viewerURL, defaultStreamTTL)
+	stream, err := h.store.createStream(r.Context(), sessionID, input.ClientID, h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	if stream.Capability != "" {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	writeJSON(w, http.StatusCreated, stream)
+}
+
+func (h *handler) handleViewerCapabilityRedemption(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	capability := bearerToken(r)
+	var input struct {
+		ClientID string `json:"client_id"`
+	}
+	if capability == "" || len(capability) > 200 || func() bool { _, err := decodeStrictJSON(r, &input); return err != nil }() || strings.TrimSpace(input.ClientID) == "" {
+		writeError(w, http.StatusUnauthorized, "viewer_capability_invalid", "viewer capability is missing or invalid")
+		return
+	}
+	stream, err := h.store.redeemViewerCapability(r.Context(), capability, input.ClientID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	credential, err := h.createViewerCredential(r.Context(), stream)
+	if err != nil {
+		_ = h.store.releaseViewerCapability(r.Context(), capability)
+		writeError(w, http.StatusBadGateway, "viewer_login_failed", "viewer session could not be created")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, ViewerBootstrap{StreamID: stream.ID, ViewerURL: stream.URL, ViewerCredential: credential, ExpiresAt: stream.ExpiresAt})
+}
+
+func (h *handler) createViewerCredential(ctx context.Context, stream StreamConnection) (ViewerCredential, error) {
+	loginURL, err := endpointURL(h.viewerHealthURL, "/api/login")
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	payload, err := json.Marshal(map[string]string{
+		"username": "ghostlight-" + stream.ID,
+		"password": h.config.ViewerPassword,
+	})
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, bytes.NewReader(payload))
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := h.viewerClient.Do(request)
+	if err != nil {
+		return ViewerCredential{}, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxJSONBodyBytes+1))
+	if err != nil || len(body) > maxJSONBodyBytes || response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return ViewerCredential{}, errors.New("Neko login failed")
+	}
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "" || cookie.Value == "" {
+			continue
+		}
+		expiresAt := cookie.Expires
+		if expiresAt.IsZero() || expiresAt.After(stream.ExpiresAt) {
+			expiresAt = stream.ExpiresAt
+		}
+		path := cookie.Path
+		if path == "" {
+			path = "/"
+		}
+		return ViewerCredential{
+			Type:      "cookie",
+			Name:      cookie.Name,
+			Value:     cookie.Value,
+			Path:      path,
+			Secure:    cookie.Secure,
+			HTTPOnly:  cookie.HttpOnly,
+			SameSite:  sameSiteName(cookie.SameSite),
+			ExpiresAt: expiresAt,
+		}, nil
+	}
+	return ViewerCredential{}, errors.New("Neko login returned no WebKit-compatible session cookie")
+}
+
+func endpointURL(base, path string) (string, error) {
+	parsed, err := url.Parse(base)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+		return "", errors.New("viewer endpoint is invalid")
+	}
+	parsed.Path = path
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func sameSiteName(value http.SameSite) string {
+	switch value {
+	case http.SameSiteLaxMode:
+		return "lax"
+	case http.SameSiteStrictMode:
+		return "strict"
+	case http.SameSiteNoneMode:
+		return "none"
+	default:
+		return ""
+	}
 }
 
 func (h *handler) handleAttachments(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -446,15 +635,27 @@ func (h *handler) handleBridgeCommandAck(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	var acknowledgment struct {
-		Status string          `json:"status"`
-		Error  string          `json:"error"`
-		Result json.RawMessage `json:"result"`
+		Status    string          `json:"status"`
+		ErrorCode string          `json:"error_code"`
+		Error     string          `json:"error"`
+		Result    json.RawMessage `json:"result"`
 	}
 	if _, err := decodeStrictJSON(r, &acknowledgment); err != nil || (acknowledgment.Status != "ok" && acknowledgment.Status != "failed") || (acknowledgment.Status == "failed" && acknowledgment.Error == "") || len(acknowledgment.Error) > 2000 || (len(acknowledgment.Result) != 0 && !json.Valid(acknowledgment.Result)) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "acknowledgment status and result are invalid")
 		return
 	}
-	command, err := h.store.ackCommand(r.Context(), commandID, acknowledgment.Status, acknowledgment.Error, acknowledgment.Result)
+	state := "applied"
+	if acknowledgment.Status == "failed" {
+		state = "failed"
+		if acknowledgment.ErrorCode == "" {
+			acknowledgment.ErrorCode = "browser_command_failed"
+		}
+	}
+	if len(acknowledgment.ErrorCode) > 100 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "error_code is too long")
+		return
+	}
+	command, err := h.store.ackCommand(r.Context(), commandID, state, acknowledgment.ErrorCode, acknowledgment.Error, acknowledgment.Result)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -554,6 +755,31 @@ func validNavigationURL(raw string) bool {
 	return err == nil && parsed.IsAbs() && parsed.Hostname() != "" && parsed.User == nil && parsed.Fragment == "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
 }
 
+func validRecentURL(raw string) bool {
+	if !validNavigationURL(raw) {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for key := range parsed.Query() {
+		normalized := strings.Map(func(character rune) rune {
+			if character >= 'A' && character <= 'Z' {
+				return character + ('a' - 'A')
+			}
+			if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+				return character
+			}
+			return -1
+		}, key)
+		if credentialBearingURLQueryKeys[normalized] || strings.HasSuffix(normalized, "token") || strings.HasSuffix(normalized, "password") {
+			return false
+		}
+	}
+	return true
+}
+
 func validateAttachmentFilename(value string) (string, error) {
 	if value == "" || value == "." || value == ".." || filepath.Base(value) != value || strings.ContainsAny(value, `/\`) || !utf8.ValidString(value) || len(value) > 180 {
 		return "", errors.New("attachment filename must be one safe path component")
@@ -591,6 +817,10 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was reused with another request")
 	case errors.Is(err, errUnauthorized), errors.Is(err, errLeaseExpired):
 		writeError(w, http.StatusUnauthorized, "lease_invalid", "controller lease is missing, expired, or invalid")
+	case errors.Is(err, errCapabilityExpired):
+		writeError(w, http.StatusUnauthorized, "viewer_capability_expired", "viewer capability expired")
+	case errors.Is(err, errCapabilityUsed):
+		writeError(w, http.StatusConflict, "viewer_capability_used", "viewer capability was already redeemed")
 	case errors.Is(err, errStorageLimit):
 		writeError(w, http.StatusInsufficientStorage, "attachment_limit", "session attachment storage limit was reached")
 	default:

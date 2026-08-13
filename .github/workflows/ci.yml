@@ -339,8 +339,10 @@ jobs:
         run: |
           set -euo pipefail
           node tools/measure-streaming-performance.mjs --self-test
+          node tools/test-evaluate-recovery.mjs
           node tools/test-evaluate-native-performance.mjs
           node tools/test-evaluate-codec-pair.mjs
+          bash tools/test-native-performance-processes.sh
           node tests/acceptance/performance.mjs --self-test
 
       - name: Run deterministic harness and recovery checks

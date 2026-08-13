@@ -3,39 +3,64 @@ import SwiftUI
 
 @main
 struct GhostlightApp: App {
+    @StateObject private var viewModel = SessionViewModel()
+
     var body: some Scene {
         WindowGroup("Ghostlight") {
-            ContentView()
+            ContentView(viewModel: viewModel)
         }
         .defaultSize(width: 1180, height: 760)
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            GhostlightCommands(viewModel: viewModel)
+        }
     }
 }
 
-private struct HomeDestination: Identifiable {
-    let name: String
-    let host: String
-    let url: String
-    let symbol: String
-    let color: Color
+private struct GhostlightCommands: Commands {
+    @ObservedObject var viewModel: SessionViewModel
 
-    var id: String { url }
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("New Tab") { viewModel.perform(.newTab) }
+                .keyboardShortcut("t", modifiers: .command)
+                .disabled(!viewModel.canPerform(.newTab))
+            Button("Close Tab") { viewModel.perform(.closeTab) }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(!viewModel.canPerform(.closeTab))
+        }
 
-    static let defaults = [
-        HomeDestination(name: "Gmail", host: "mail.google.com", url: "https://mail.google.com", symbol: "envelope.fill", color: .red),
-        HomeDestination(name: "Google Calendar", host: "calendar.google.com", url: "https://calendar.google.com", symbol: "calendar", color: .blue),
-        HomeDestination(name: "Google Drive", host: "drive.google.com", url: "https://drive.google.com", symbol: "externaldrive.fill", color: .orange),
-        HomeDestination(name: "GitHub", host: "github.com", url: "https://github.com", symbol: "chevron.left.forwardslash.chevron.right", color: .primary),
-        HomeDestination(name: "ChatGPT", host: "chatgpt.com", url: "https://chatgpt.com", symbol: "bubble.left.and.bubble.right.fill", color: .green),
-        HomeDestination(name: "Slack", host: "app.slack.com", url: "https://app.slack.com", symbol: "number", color: .purple),
-    ]
+        CommandMenu("Navigate") {
+            Button("Open Location…") { viewModel.perform(.focusLocation) }
+                .keyboardShortcut("l", modifiers: .command)
+                .disabled(!viewModel.canPerform(.focusLocation))
+            Divider()
+            Button("Back") { viewModel.perform(.goBack) }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!viewModel.canPerform(.goBack))
+            Button("Forward") { viewModel.perform(.goForward) }
+                .keyboardShortcut("]", modifiers: .command)
+                .disabled(!viewModel.canPerform(.goForward))
+            Button("Reload Page") { viewModel.perform(.reload) }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(!viewModel.canPerform(.reload))
+            Divider()
+            Button("Show Next Tab") { viewModel.perform(.nextTab) }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+                .disabled(!viewModel.canPerform(.nextTab))
+            Button("Show Previous Tab") { viewModel.perform(.previousTab) }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+                .disabled(!viewModel.canPerform(.previousTab))
+        }
+    }
 }
 
 struct ContentView: View {
-    @StateObject private var viewModel = SessionViewModel()
+    @ObservedObject var viewModel: SessionViewModel
     @FocusState private var addressFocused: Bool
     @State private var showingConnection = false
     @State private var showingFileImporter = false
+    @State private var showingShortcutEditor = false
     @State private var showingHome = true
     @State private var homeQuery = ""
 
@@ -56,6 +81,9 @@ struct ContentView: View {
                 .frame(width: 460)
                 .padding(28)
         }
+        .sheet(isPresented: $showingShortcutEditor) {
+            ShortcutEditorView(viewModel: viewModel)
+        }
         .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.data]) { result in
             if case let .success(url) = result { viewModel.attach(url) }
         }
@@ -64,6 +92,9 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.session?.id) { _, sessionID in
             if sessionID != nil { showingHome = true }
+        }
+        .onChange(of: viewModel.addressFocusRequest) { _, _ in
+            addressFocused = true
         }
     }
 
@@ -203,6 +234,7 @@ struct ContentView: View {
             .help("New tab")
 
             Spacer(minLength: 6)
+            commandBadge
             controlBadge
             Button {
                 showingConnection = true
@@ -305,11 +337,13 @@ struct ContentView: View {
             ZStack {
                 ViewerWebView(
                     url: streamURL,
-                    reloadToken: streamURL.hashValue,
+                    credential: viewModel.viewerBootstrap?.viewerCredential,
+                    reloadToken: streamURL.hashValue ^ (viewModel.viewerBootstrap?.expiresAt.hashValue ?? 0),
                     onNavigationStarted: viewModel.viewerNavigationStarted,
                     onNavigationFinished: viewModel.viewerNavigationFinished,
                     onNavigationFailed: viewModel.viewerNavigationFailed,
-                    onMediaReady: viewModel.viewerMediaReady
+                    onMediaReady: viewModel.viewerMediaReady,
+                    onWebContentProcessTerminated: viewModel.viewerProcessTerminated
                 )
 
                 switch viewModel.surfaceState {
@@ -359,11 +393,45 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator.opacity(0.7)))
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Shortcuts")
-                        .font(.headline)
+                    HStack {
+                        Text("Shortcuts")
+                            .font(.headline)
+                        Spacer()
+                        Button("Edit") { showingShortcutEditor = true }
+                            .buttonStyle(.borderless)
+                            .disabled(viewModel.workspacePreferences == nil)
+                    }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                        ForEach(HomeDestination.defaults) { destination in
-                            destinationButton(destination)
+                        ForEach(viewModel.shortcuts) { shortcut in
+                            destinationButton(shortcut)
+                        }
+                    }
+                    if viewModel.workspacePreferences == nil {
+                        ProgressView("Loading shortcuts")
+                            .controlSize(.small)
+                    }
+                    if let error = viewModel.preferencesError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                if !viewModel.recentURLs.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Recent")
+                            .font(.headline)
+                        ForEach(Array(viewModel.recentURLs.prefix(5)), id: \.self) { url in
+                            Button {
+                                viewModel.navigate(to: url)
+                                showingHome = false
+                            } label: {
+                                Label(url, systemImage: "clock.arrow.circlepath")
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!viewModel.canControl)
                         }
                     }
                 }
@@ -427,20 +495,20 @@ struct ContentView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private func destinationButton(_ destination: HomeDestination) -> some View {
+    private func destinationButton(_ shortcut: WorkspaceShortcut) -> some View {
         Button {
-            viewModel.navigate(to: destination.url)
+            viewModel.navigate(to: shortcut.url)
             showingHome = false
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: destination.symbol)
+                Image(systemName: "link")
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(destination.color)
+                    .foregroundStyle(Color.accentColor)
                     .frame(width: 30, height: 30)
-                    .background(destination.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(destination.name).fontWeight(.medium)
-                    Text(destination.host)
+                    Text(shortcut.name).fontWeight(.medium)
+                    Text(URL(string: shortcut.url)?.host ?? shortcut.url)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -514,6 +582,28 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private var commandBadge: some View {
+        switch viewModel.commandStatus {
+        case .idle:
+            EmptyView()
+        case let .pending(count):
+            Label(count == 1 ? "Sending" : "Sending \(count)", systemImage: "clock")
+                .foregroundStyle(.secondary)
+                .help("Waiting for the browser to finish")
+        case let .failed(code, message):
+            Button {
+                viewModel.retryFailedCommand()
+            } label: {
+                Label("Command failed", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canControl)
+            .help("\(code): \(message). Retry with the same command identifier.")
+        }
+    }
+
+    @ViewBuilder
     private var controlBadge: some View {
         switch viewModel.controlState {
         case .controller:
@@ -534,5 +624,124 @@ struct ContentView: View {
         case .disconnected:
             EmptyView()
         }
+    }
+}
+
+private struct ShortcutEditorView: View {
+    @ObservedObject var viewModel: SessionViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var shortcuts: [WorkspaceShortcut]
+    @State private var searchURL: String
+    @State private var newName = ""
+    @State private var newURL = ""
+    @State private var saving = false
+
+    init(viewModel: SessionViewModel) {
+        self.viewModel = viewModel
+        _shortcuts = State(initialValue: viewModel.shortcuts)
+        _searchURL = State(
+            initialValue: viewModel.workspacePreferences?.searchURL ?? WorkspacePreferences.defaultSearchURL
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Search Provider") {
+                    TextField("https://example.com/search?q={query}", text: $searchURL)
+                    Text("Use one {query} placeholder in an HTTP(S) search URL.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Shortcuts") {
+                    ForEach($shortcuts) { $shortcut in
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                TextField("Name", text: $shortcut.name)
+                                TextField("https://example.com", text: $shortcut.url)
+                                    .font(.caption)
+                            }
+                            Button { move(shortcut.id, by: -1) } label: {
+                                Image(systemName: "arrow.up")
+                            }
+                            .disabled(shortcuts.first?.id == shortcut.id)
+                            Button { move(shortcut.id, by: 1) } label: {
+                                Image(systemName: "arrow.down")
+                            }
+                            .disabled(shortcuts.last?.id == shortcut.id)
+                            Button(role: .destructive) {
+                                shortcuts.removeAll { $0.id == shortcut.id }
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                        }
+                    }
+                }
+
+                Section("Add Shortcut") {
+                    TextField("Name", text: $newName)
+                    TextField("https://example.com", text: $newURL)
+                    Button("Add") { addShortcut() }
+                        .disabled(!isValid(name: newName, url: newURL) || shortcuts.count >= 24)
+                }
+            }
+            .navigationTitle("Edit Shortcuts")
+            .frame(minWidth: 560, minHeight: 420)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saving ? "Saving…" : "Save") {
+                        saving = true
+                        Task {
+                            if await viewModel.replaceHomePreferences(
+                                searchURL: searchURL,
+                                shortcuts: shortcuts
+                            ) { dismiss() }
+                            saving = false
+                        }
+                    }
+                    .disabled(
+                        saving
+                            || !WorkspacePreferences.isValidSearchURLTemplate(searchURL)
+                            || shortcuts.contains { !isValid(name: $0.name, url: $0.url) }
+                    )
+                }
+            }
+        }
+    }
+
+    private func addShortcut() {
+        shortcuts.append(
+            WorkspaceShortcut(
+                id: UUID().uuidString.lowercased(),
+                name: newName.trimmingCharacters(in: .whitespacesAndNewlines),
+                url: newURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                position: shortcuts.count
+            )
+        )
+        newName = ""
+        newURL = ""
+    }
+
+    private func move(_ id: String, by offset: Int) {
+        guard let source = shortcuts.firstIndex(where: { $0.id == id }) else { return }
+        let destination = source + offset
+        guard shortcuts.indices.contains(destination) else { return }
+        shortcuts.swapAt(source, destination)
+    }
+
+    private func isValid(name: String, url: String) -> Bool {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              let components = URLComponents(string: url),
+              components.scheme == "http" || components.scheme == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil else { return false }
+        return true
     }
 }

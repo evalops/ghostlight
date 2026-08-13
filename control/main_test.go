@@ -15,6 +15,7 @@ func TestRunShutsDownOnSignal(t *testing.T) {
 	t.Setenv(attachmentDirEnvironment, t.TempDir())
 	t.Setenv(apiTokenEnvironment, "api-test-token")
 	t.Setenv(bridgeTokenEnvironment, "bridge-test-token")
+	t.Setenv(viewerPasswordEnvironment, "viewer-test-secret")
 
 	runErrors := make(chan error, 1)
 	go func() { runErrors <- run() }()
@@ -55,6 +56,7 @@ func TestRunFailsOnUnusableListenAddr(t *testing.T) {
 	t.Setenv(attachmentDirEnvironment, t.TempDir())
 	t.Setenv(apiTokenEnvironment, "api-test-token")
 	t.Setenv(bridgeTokenEnvironment, "bridge-test-token")
+	t.Setenv(viewerPasswordEnvironment, "viewer-test-secret")
 	if err := run(); err == nil {
 		t.Fatal("run() with occupied listen address returned nil error")
 	}

@@ -2,33 +2,129 @@ import SwiftUI
 import WebKit
 
 struct ViewerWebView: NSViewRepresentable {
+    typealias RevealDownload = () -> Void
+
     let url: URL
+    let credential: ViewerCredential?
     let reloadToken: Int
     let onNavigationStarted: () -> Void
     let onNavigationFinished: (URL?) -> Void
     let onNavigationFailed: (String) -> Void
     let onMediaReady: () -> Void
+    let findRequest: FindRequest?
+    let onFindResult: (FindResult) -> Void
+    let onDownloadStarted: (URL) -> Void
+    let onDownloadFinished: (URL, RevealDownload) -> Void
+    let onDownloadFailed: (String) -> Void
+    let onWebContentProcessTerminated: (@escaping () -> Void) -> Void
+    let onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
+    let onCapabilitiesChanged: (Capabilities) -> Void
+
+    init(
+        url: URL,
+        credential: ViewerCredential?,
+        reloadToken: Int,
+        onNavigationStarted: @escaping () -> Void,
+        onNavigationFinished: @escaping (URL?) -> Void,
+        onNavigationFailed: @escaping (String) -> Void,
+        onMediaReady: @escaping () -> Void,
+        findRequest: FindRequest? = nil,
+        onFindResult: @escaping (FindResult) -> Void = { _ in },
+        onDownloadStarted: @escaping (URL) -> Void = { _ in },
+        onDownloadFinished: @escaping (URL, RevealDownload) -> Void = { _, _ in },
+        onDownloadFailed: @escaping (String) -> Void = { _ in },
+        onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void = { _ in },
+        onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void = { _ in },
+        onCapabilitiesChanged: @escaping (Capabilities) -> Void = { _ in }
+    ) {
+        self.url = url
+        self.credential = credential
+        self.reloadToken = reloadToken
+        self.onNavigationStarted = onNavigationStarted
+        self.onNavigationFinished = onNavigationFinished
+        self.onNavigationFailed = onNavigationFailed
+        self.onMediaReady = onMediaReady
+        self.findRequest = findRequest
+        self.onFindResult = onFindResult
+        self.onDownloadStarted = onDownloadStarted
+        self.onDownloadFinished = onDownloadFinished
+        self.onDownloadFailed = onDownloadFailed
+        self.onWebContentProcessTerminated = onWebContentProcessTerminated
+        self.onFullscreenStateChanged = onFullscreenStateChanged
+        self.onCapabilitiesChanged = onCapabilitiesChanged
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onNavigationStarted: onNavigationStarted,
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
-            onMediaReady: onMediaReady
+            onMediaReady: onMediaReady,
+            onFindResult: onFindResult,
+            onDownloadStarted: onDownloadStarted,
+            onDownloadFinished: onDownloadFinished,
+            onDownloadFailed: onDownloadFailed,
+            onWebContentProcessTerminated: onWebContentProcessTerminated,
+            onFullscreenStateChanged: onFullscreenStateChanged,
+            onCapabilitiesChanged: onCapabilitiesChanged
         )
     }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let capabilities = Capabilities.current
+        configuration.preferences.isElementFullscreenEnabled = capabilities.elementFullscreen
         context.coordinator.configureMediaReadiness(configuration)
         context.coordinator.configureNativePerformance(configuration)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         context.coordinator.loadedURL = url
         context.coordinator.reloadToken = reloadToken
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
-        webView.load(URLRequest(url: url))
+        context.coordinator.observeFullscreenState(of: webView)
+        context.coordinator.onCapabilitiesChanged(capabilities)
+        context.coordinator.performFind(findRequest, in: webView)
+        Self.load(url, credential: credential, in: webView)
         return webView
+    }
+
+    static func load(_ url: URL, credential: ViewerCredential?, in webView: WKWebView) {
+        guard let credential else {
+            webView.load(URLRequest(url: url))
+            return
+        }
+        guard credential.type == "cookie", let cookie = viewerCookie(credential, for: url) else {
+            return
+        }
+        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+            DispatchQueue.main.async { webView.load(URLRequest(url: url)) }
+        }
+    }
+
+    static func viewerCookie(_ credential: ViewerCredential, for url: URL) -> HTTPCookie? {
+        guard credential.type == "cookie",
+              let name = credential.name,
+              !name.isEmpty,
+              !credential.value.isEmpty,
+              let host = url.host,
+              credential.expiresAt > Date() else {
+            return nil
+        }
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .name: name,
+            .value: credential.value,
+            .domain: host,
+            .path: credential.path ?? "/",
+            .expires: credential.expiresAt,
+            .secure: credential.secure == true ? "TRUE" : "FALSE",
+        ]
+        if credential.httpOnly == true { properties[HTTPCookiePropertyKey("HttpOnly")] = "TRUE" }
+        if let sameSite = credential.sameSite, !sameSite.isEmpty {
+            properties[HTTPCookiePropertyKey("SameSite")] = sameSite.capitalized
+        }
+        return HTTPCookie(properties: properties)
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
@@ -36,16 +132,152 @@ struct ViewerWebView: NSViewRepresentable {
             onNavigationStarted: onNavigationStarted,
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
-            onMediaReady: onMediaReady
+            onMediaReady: onMediaReady,
+            onFindResult: onFindResult,
+            onDownloadStarted: onDownloadStarted,
+            onDownloadFinished: onDownloadFinished,
+            onDownloadFailed: onDownloadFailed,
+            onWebContentProcessTerminated: onWebContentProcessTerminated,
+            onFullscreenStateChanged: onFullscreenStateChanged,
+            onCapabilitiesChanged: onCapabilitiesChanged
         )
+        context.coordinator.onCapabilitiesChanged(.current)
+        context.coordinator.performFind(findRequest, in: webView)
         if context.coordinator.loadedURL != url || context.coordinator.reloadToken != reloadToken {
             context.coordinator.loadedURL = url
             context.coordinator.reloadToken = reloadToken
-            webView.load(URLRequest(url: url))
+            Self.load(url, credential: credential, in: webView)
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    struct FindRequest: Equatable {
+        let query: String
+        let sequence: Int
+        var backwards = false
+        var caseSensitive = false
+        var wraps = true
+
+        var configuration: WKFindConfiguration {
+            let configuration = WKFindConfiguration()
+            configuration.backwards = backwards
+            configuration.caseSensitive = caseSensitive
+            configuration.wraps = wraps
+            return configuration
+        }
+    }
+
+    struct FindResult: Equatable {
+        let request: FindRequest
+        let matchFound: Bool
+    }
+
+    struct Capabilities: Equatable {
+        let downloads: Bool
+        let findInPage: Bool
+        let nativeContextMenus: Bool
+        let elementFullscreen: Bool
+        let pageAudioMute: Bool
+        let pointerLockControl: Bool
+        let cursorControl: Bool
+
+        static let macOS14 = Capabilities(
+            downloads: true,
+            findInPage: true,
+            nativeContextMenus: true,
+            elementFullscreen: true,
+            pageAudioMute: false,
+            pointerLockControl: false,
+            cursorControl: false
+        )
+
+        static var current: Capabilities {
+            let downloads: Bool
+            if #available(macOS 11.3, *) {
+                downloads = true
+            } else {
+                downloads = false
+            }
+
+            let findInPage: Bool
+            if #available(macOS 11.0, *) {
+                findInPage = true
+            } else {
+                findInPage = false
+            }
+
+            let elementFullscreen: Bool
+            if #available(macOS 12.3, *) {
+                elementFullscreen = true
+            } else {
+                elementFullscreen = false
+            }
+
+            return Capabilities(
+                downloads: downloads,
+                findInPage: findInPage,
+                nativeContextMenus: true,
+                elementFullscreen: elementFullscreen,
+                pageAudioMute: false,
+                pointerLockControl: false,
+                cursorControl: false
+            )
+        }
+    }
+
+    enum PermissionPolicy {
+        static let mediaCaptureDecision = WKPermissionDecision.deny
+    }
+
+    enum DownloadDestination {
+        static func downloadsDirectory(fileManager: FileManager = .default) -> URL? {
+            fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        }
+
+        static func safeFilename(_ suggestedFilename: String) -> String {
+            let withoutControls = String(
+                suggestedFilename.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+            )
+            let component = withoutControls
+                .split(whereSeparator: { $0 == "/" || $0 == "\\" })
+                .last
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard let component, !component.isEmpty, component != ".", component != ".." else {
+                return "download"
+            }
+            return component
+        }
+
+        static func destination(
+            in directory: URL,
+            suggestedFilename: String,
+            fileExists: (URL) -> Bool
+        ) -> URL {
+            let filename = safeFilename(suggestedFilename)
+            let initial = directory.appendingPathComponent(filename, isDirectory: false)
+            guard fileExists(initial) else {
+                return initial
+            }
+
+            let path = filename as NSString
+            let pathExtension = path.pathExtension
+            let stem = path.deletingPathExtension.isEmpty ? "download" : path.deletingPathExtension
+            var suffix = 1
+            while true {
+                let candidateName = pathExtension.isEmpty
+                    ? "\(stem)-\(suffix)"
+                    : "\(stem)-\(suffix).\(pathExtension)"
+                let candidate = directory.appendingPathComponent(candidateName, isDirectory: false)
+                if !fileExists(candidate) {
+                    return candidate
+                }
+                suffix += 1
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
         var loadedURL: URL?
         var reloadToken = 0
         private var activeNavigation: WKNavigation?
@@ -53,18 +285,42 @@ struct ViewerWebView: NSViewRepresentable {
         var onNavigationFinished: (URL?) -> Void
         var onNavigationFailed: (String) -> Void
         var onMediaReady: () -> Void
+        var onFindResult: (FindResult) -> Void
+        var onDownloadStarted: (URL) -> Void
+        var onDownloadFinished: (URL, RevealDownload) -> Void
+        var onDownloadFailed: (String) -> Void
+        var onWebContentProcessTerminated: (@escaping () -> Void) -> Void
+        var onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
+        var onCapabilitiesChanged: (Capabilities) -> Void
         private var nativePerformanceRecorder: NativePerformanceRecorder?
+        private var findSequence: Int?
+        private var downloadDestinations: [ObjectIdentifier: URL] = [:]
+        private var fullscreenObservation: NSKeyValueObservation?
 
         init(
             onNavigationStarted: @escaping () -> Void,
             onNavigationFinished: @escaping (URL?) -> Void,
             onNavigationFailed: @escaping (String) -> Void,
-            onMediaReady: @escaping () -> Void
+            onMediaReady: @escaping () -> Void,
+            onFindResult: @escaping (FindResult) -> Void,
+            onDownloadStarted: @escaping (URL) -> Void,
+            onDownloadFinished: @escaping (URL, RevealDownload) -> Void,
+            onDownloadFailed: @escaping (String) -> Void,
+            onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
+            onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
+            onCapabilitiesChanged: @escaping (Capabilities) -> Void
         ) {
             self.onNavigationStarted = onNavigationStarted
             self.onNavigationFinished = onNavigationFinished
             self.onNavigationFailed = onNavigationFailed
             self.onMediaReady = onMediaReady
+            self.onFindResult = onFindResult
+            self.onDownloadStarted = onDownloadStarted
+            self.onDownloadFinished = onDownloadFinished
+            self.onDownloadFailed = onDownloadFailed
+            self.onWebContentProcessTerminated = onWebContentProcessTerminated
+            self.onFullscreenStateChanged = onFullscreenStateChanged
+            self.onCapabilitiesChanged = onCapabilitiesChanged
         }
 
         func configureMediaReadiness(_ configuration: WKWebViewConfiguration) {
@@ -97,18 +353,52 @@ struct ViewerWebView: NSViewRepresentable {
             onNavigationStarted: @escaping () -> Void,
             onNavigationFinished: @escaping (URL?) -> Void,
             onNavigationFailed: @escaping (String) -> Void,
-            onMediaReady: @escaping () -> Void
+            onMediaReady: @escaping () -> Void,
+            onFindResult: @escaping (FindResult) -> Void,
+            onDownloadStarted: @escaping (URL) -> Void,
+            onDownloadFinished: @escaping (URL, RevealDownload) -> Void,
+            onDownloadFailed: @escaping (String) -> Void,
+            onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
+            onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
+            onCapabilitiesChanged: @escaping (Capabilities) -> Void
         ) {
             self.onNavigationStarted = onNavigationStarted
             self.onNavigationFinished = onNavigationFinished
             self.onNavigationFailed = onNavigationFailed
             self.onMediaReady = onMediaReady
+            self.onFindResult = onFindResult
+            self.onDownloadStarted = onDownloadStarted
+            self.onDownloadFinished = onDownloadFinished
+            self.onDownloadFailed = onDownloadFailed
+            self.onWebContentProcessTerminated = onWebContentProcessTerminated
+            self.onFullscreenStateChanged = onFullscreenStateChanged
+            self.onCapabilitiesChanged = onCapabilitiesChanged
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == MediaReadinessSignal.messageHandlerName,
                   (message.body as? String) == "mediaReady" else { return }
             onMediaReady()
+        }
+
+        func observeFullscreenState(of webView: WKWebView) {
+            fullscreenObservation = webView.observe(\.fullscreenState, options: [.initial, .new]) { [weak self] webView, change in
+                self?.onFullscreenStateChanged(change.newValue ?? webView.fullscreenState)
+            }
+        }
+
+        func performFind(_ request: FindRequest?, in webView: WKWebView) {
+            guard let request, findSequence != request.sequence else {
+                return
+            }
+            findSequence = request.sequence
+            guard !request.query.isEmpty else {
+                onFindResult(FindResult(request: request, matchFound: false))
+                return
+            }
+            webView.find(request.query, configuration: request.configuration) { [weak self] result in
+                self?.onFindResult(FindResult(request: request, matchFound: result.matchFound))
+            }
         }
 
         func webView(
@@ -123,7 +413,11 @@ struct ViewerWebView: NSViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
-            decisionHandler(Self.isSameOrigin(url, as: origin) ? .allow : .cancel)
+            guard Self.isSameOrigin(url, as: origin) else {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(navigationAction.shouldPerformDownload ? .download : .allow)
         }
 
         func webView(
@@ -139,7 +433,82 @@ struct ViewerWebView: NSViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
-            decisionHandler(Self.isSameOrigin(url, as: origin) ? .allow : .cancel)
+            guard Self.isSameOrigin(url, as: origin) else {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            navigationAction: WKNavigationAction,
+            didBecome download: WKDownload
+        ) {
+            download.delegate = self
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            navigationResponse: WKNavigationResponse,
+            didBecome download: WKDownload
+        ) {
+            download.delegate = self
+        }
+
+        func download(
+            _ download: WKDownload,
+            decideDestinationUsing response: URLResponse,
+            suggestedFilename: String,
+            completionHandler: @escaping (URL?) -> Void
+        ) {
+            guard let directory = DownloadDestination.downloadsDirectory() else {
+                onDownloadFailed("The Downloads folder is unavailable.")
+                completionHandler(nil)
+                return
+            }
+
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let destination = DownloadDestination.destination(
+                    in: directory,
+                    suggestedFilename: suggestedFilename,
+                    fileExists: { [self] candidate in
+                        FileManager.default.fileExists(atPath: candidate.path)
+                            || downloadDestinations.values.contains(candidate)
+                    }
+                )
+                downloadDestinations[ObjectIdentifier(download)] = destination
+                onDownloadStarted(destination)
+                completionHandler(destination)
+            } catch {
+                onDownloadFailed(error.localizedDescription)
+                completionHandler(nil)
+            }
+        }
+
+        func downloadDidFinish(_ download: WKDownload) {
+            guard let destination = downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else {
+                return
+            }
+            onDownloadFinished(destination) {
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+            }
+        }
+
+        func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+            downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+            onDownloadFailed(error.localizedDescription)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+            initiatedByFrame frame: WKFrameInfo,
+            type: WKMediaCaptureType,
+            decisionHandler: @escaping (WKPermissionDecision) -> Void
+        ) {
+            decisionHandler(PermissionPolicy.mediaCaptureDecision)
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -170,6 +539,9 @@ struct ViewerWebView: NSViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             activeNavigation = nil
             onNavigationFailed("The viewer process stopped unexpectedly.")
+            onWebContentProcessTerminated { [weak webView] in
+                webView?.reload()
+            }
         }
 
         private func finishNavigation(_ navigation: WKNavigation?, error: Error) {
@@ -193,7 +565,18 @@ struct ViewerWebView: NSViewRepresentable {
         static func isSameOrigin(_ url: URL, as origin: URL) -> Bool {
             url.scheme?.lowercased() == origin.scheme?.lowercased()
                 && url.host?.lowercased() == origin.host?.lowercased()
-                && url.port == origin.port
+                && effectivePort(for: url) == effectivePort(for: origin)
+        }
+
+        private static func effectivePort(for url: URL) -> Int? {
+            if let port = url.port {
+                return port
+            }
+            return switch url.scheme?.lowercased() {
+            case "http": 80
+            case "https": 443
+            default: nil
+            }
         }
 
         static func shouldReportNavigationError(_ error: Error) -> Bool {

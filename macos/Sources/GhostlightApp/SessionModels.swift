@@ -37,6 +37,98 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
     public let name: String
 }
 
+public struct WorkspaceShortcut: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public var name: String
+    public var url: String
+    public var position: Int
+
+    public init(id: String, name: String, url: String, position: Int) {
+        self.id = id
+        self.name = name
+        self.url = url
+        self.position = position
+    }
+}
+
+public struct WorkspacePreferences: Codable, Equatable, Sendable {
+    public static let defaultSearchURL = "https://www.google.com/search?q={query}"
+    public static let maximumRecentURLCount = 20
+
+    public let workspaceID: String
+    public var searchURL: String
+    public var shortcuts: [WorkspaceShortcut]
+    public var recentURLs: [String]
+    public var updatedAt: Date
+
+    public init(
+        workspaceID: String,
+        searchURL: String,
+        shortcuts: [WorkspaceShortcut],
+        recentURLs: [String],
+        updatedAt: Date
+    ) {
+        self.workspaceID = workspaceID
+        self.searchURL = searchURL
+        self.shortcuts = shortcuts
+        self.recentURLs = recentURLs
+        self.updatedAt = updatedAt
+    }
+
+    public static func isValidSearchURLTemplate(_ value: String) -> Bool {
+        guard value.count <= 500,
+              value.components(separatedBy: "{query}").count == 2 else { return false }
+        let target = value.replacingOccurrences(of: "{query}", with: "test")
+        guard let components = URLComponents(string: target),
+              components.scheme == "http" || components.scheme == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil else { return false }
+        return true
+    }
+
+    static func safeRecentURL(_ value: String) -> String? {
+        guard let components = URLComponents(string: value),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil else { return nil }
+
+        let sensitiveNames: Set<String> = [
+            "accesstoken", "apikey", "auth", "authorization", "code", "cookie",
+            "credential", "idtoken", "key", "password", "passwd", "secret",
+            "session", "sessionid", "signature", "sig", "token",
+            "xamzcredential", "xamzsecuritytoken", "xamzsignature",
+            "xgoogcredential", "xgoogsecuritytoken", "xgoogsignature",
+        ]
+        let normalizedName: (String) -> String = {
+            String($0.lowercased().filter { $0.isLetter || $0.isNumber })
+        }
+        let isSensitiveName: (String) -> Bool = {
+            let name = normalizedName($0)
+            return sensitiveNames.contains(name) || name.hasSuffix("token") || name.hasSuffix("password")
+        }
+        guard !(components.queryItems ?? []).contains(where: { isSensitiveName($0.name) }) else {
+            return nil
+        }
+        return components.url?.absoluteString
+    }
+
+    static func sanitizedRecentURLs(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.compactMap(safeRecentURL).filter { seen.insert($0).inserted }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case shortcuts
+        case workspaceID = "workspace_id"
+        case searchURL = "search_url"
+        case recentURLs = "recent_urls"
+        case updatedAt = "updated_at"
+    }
+}
+
 public struct BrowserTab: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String?
@@ -56,9 +148,50 @@ public struct StreamConnection: Codable, Equatable, Sendable, Identifiable {
     public let url: URL
     public let state: String
     public let expiresAt: Date
+    public let capability: String?
+
+    public init(id: String, url: URL, state: String, expiresAt: Date, capability: String? = nil) {
+        self.id = id
+        self.url = url
+        self.state = state
+        self.expiresAt = expiresAt
+        self.capability = capability
+    }
 
     enum CodingKeys: String, CodingKey {
-        case id, url, state
+        case id, url, state, capability
+        case expiresAt = "expires_at"
+    }
+}
+
+public struct ViewerBootstrap: Codable, Equatable, Sendable {
+    public let streamID: String
+    public let viewerURL: URL
+    public let viewerCredential: ViewerCredential
+    public let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case streamID = "stream_id"
+        case viewerURL = "viewer_url"
+        case viewerCredential = "viewer_credential"
+        case expiresAt = "expires_at"
+    }
+}
+
+public struct ViewerCredential: Codable, Equatable, Sendable {
+    public let type: String
+    public let name: String?
+    public let value: String
+    public let path: String?
+    public let secure: Bool?
+    public let httpOnly: Bool?
+    public let sameSite: String?
+    public let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case type, name, value, path, secure
+        case httpOnly = "http_only"
+        case sameSite = "same_site"
         case expiresAt = "expires_at"
     }
 }
@@ -73,6 +206,7 @@ public struct BrowserSession: Codable, Equatable, Sendable, Identifiable {
     public var activeTabID: String?
     public var controller: ControllerLease?
     public var stream: StreamConnection?
+    public var commandReceipts: [CommandReceipt]
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -81,8 +215,25 @@ public struct BrowserSession: Codable, Equatable, Sendable, Identifiable {
         case workspaceID = "workspace_id"
         case runtimeState = "runtime_state"
         case activeTabID = "active_tab_id"
+        case commandReceipts = "command_receipts"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        name = try container.decode(String.self, forKey: .name)
+        revision = try container.decode(Int.self, forKey: .revision)
+        runtimeState = try container.decode(String.self, forKey: .runtimeState)
+        tabs = try container.decode([BrowserTab].self, forKey: .tabs)
+        activeTabID = try container.decodeIfPresent(String.self, forKey: .activeTabID)
+        controller = try container.decodeIfPresent(ControllerLease.self, forKey: .controller)
+        stream = try container.decodeIfPresent(StreamConnection.self, forKey: .stream)
+        commandReceipts = try container.decodeIfPresent([CommandReceipt].self, forKey: .commandReceipts) ?? []
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
 }
 
@@ -155,6 +306,124 @@ public struct BrowserCommand: Codable, Equatable, Sendable {
         case tabID = "tab_id"
         case attachmentID = "attachment_id"
         case expectedRevision = "expected_revision"
+    }
+}
+
+public enum CommandReceiptState: String, Codable, Equatable, Sendable {
+    case queued
+    case applied
+    case failed
+}
+
+public struct CommandReceipt: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let sequence: Int
+    public let sessionID: String
+    public let type: BrowserCommandType
+    public let url: String?
+    public let tabID: String?
+    public let attachmentID: String?
+    public let expectedRevision: Int
+    public let leaseEpoch: Int
+    public let state: CommandReceiptState
+    public let errorCode: String?
+    public let error: String?
+    public let result: JSONValue?
+    public let resultingRevision: Int?
+    public let acknowledgedAt: Date?
+    public let completedAt: Date?
+    public let createdAt: Date
+
+    public init(
+        id: String,
+        sequence: Int,
+        sessionID: String,
+        type: BrowserCommandType,
+        url: String?,
+        tabID: String?,
+        attachmentID: String?,
+        expectedRevision: Int,
+        leaseEpoch: Int,
+        state: CommandReceiptState,
+        errorCode: String?,
+        error: String?,
+        result: JSONValue?,
+        resultingRevision: Int?,
+        acknowledgedAt: Date?,
+        completedAt: Date?,
+        createdAt: Date
+    ) {
+        self.id = id
+        self.sequence = sequence
+        self.sessionID = sessionID
+        self.type = type
+        self.url = url
+        self.tabID = tabID
+        self.attachmentID = attachmentID
+        self.expectedRevision = expectedRevision
+        self.leaseEpoch = leaseEpoch
+        self.state = state
+        self.errorCode = errorCode
+        self.error = error
+        self.result = result
+        self.resultingRevision = resultingRevision
+        self.acknowledgedAt = acknowledgedAt
+        self.completedAt = completedAt
+        self.createdAt = createdAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, sequence, type, url, state, error, result
+        case sessionID = "session_id"
+        case tabID = "tab_id"
+        case attachmentID = "attachment_id"
+        case expectedRevision = "expected_revision"
+        case leaseEpoch = "lease_epoch"
+        case errorCode = "error_code"
+        case resultingRevision = "resulting_revision"
+        case acknowledgedAt = "acknowledged_at"
+        case completedAt = "completed_at"
+        case createdAt = "created_at"
+    }
+}
+
+public enum JSONValue: Codable, Equatable, Sendable {
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else if let value = try? container.decode([String: JSONValue].self) {
+            self = .object(value)
+        } else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case let .object(value): try container.encode(value)
+        case let .array(value): try container.encode(value)
+        case let .string(value): try container.encode(value)
+        case let .number(value): try container.encode(value)
+        case let .bool(value): try container.encode(value)
+        case .null: try container.encodeNil()
+        }
     }
 }
 

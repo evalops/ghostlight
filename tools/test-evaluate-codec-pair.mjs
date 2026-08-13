@@ -22,7 +22,8 @@ try {
     fs.mkdirSync(nativeDirectory, { recursive: true });
     const mimeType = `video/${codec.toUpperCase()}`;
     const server = {
-      status: "measured",
+      run_id: `${directory.replaceAll("/", "-")}-${sourceSHA}`,
+      status: "observed",
       error: null,
       source: { sourceSha: sourceSHA },
       image: { reference: imageReference },
@@ -52,7 +53,8 @@ try {
       })),
     };
     const native = {
-      status: "measured",
+      run_id: `${directory.replaceAll("/", "-")}-${sourceSHA}`,
+      status: "observed",
       source_sha: sourceSHA,
       expected_codec: codec,
       codec: { mime_type: mimeType },
@@ -64,6 +66,14 @@ try {
       dropped_frame_ratio: 0,
       mean_decode_ms: 2,
       full_phase_coverage: 1,
+      evidence: {
+        exact_source: true,
+        wkwebview_native_observer_provenance: true,
+        direct_selected_udp: true,
+        causal_wkwebview_native_marker: true,
+        webrtc_dropped_frames: true,
+        process_cpu_memory: true,
+      },
       phases: Array.from({ length: 4 }, () => ({ media_sample_count: 20, process_sample_count: 20, decoded_fps: 25, dropped_frame_ratio: 0 })),
     };
     fs.writeFileSync(path.join(runDirectory, "receipt.json"), JSON.stringify(server));
@@ -83,6 +93,54 @@ try {
   assert.equal(result.native_h264_power_efficient_decoder, 0);
   assert.equal(result.gates.absolute_native_candidate_health, true);
   assert.equal(result.status, "accepted");
+
+  const copiedServerPath = path.join(temporary, "pair-2/vp8/receipt.json");
+  const copiedNativePath = path.join(temporary, "pair-2/vp8/native/native-receipt.json");
+  const copiedServer = JSON.parse(fs.readFileSync(path.join(temporary, "pair-1/vp8/receipt.json"), "utf8"));
+  const copiedNative = JSON.parse(fs.readFileSync(path.join(temporary, "pair-1/vp8/native/native-receipt.json"), "utf8"));
+  const originalServer = fs.readFileSync(copiedServerPath);
+  const originalNative = fs.readFileSync(copiedNativePath);
+  fs.writeFileSync(copiedServerPath, JSON.stringify(copiedServer));
+  fs.writeFileSync(copiedNativePath, JSON.stringify(copiedNative));
+  const copied = spawnSync(process.execPath, [path.join(root, "tools/evaluate-codec-pair.mjs"), temporary, output], { encoding: "utf8" });
+  assert.notEqual(copied.status, 0, "copied run receipts unexpectedly passed");
+  assert.equal(JSON.parse(fs.readFileSync(output, "utf8")).gates.pair_complete, false);
+  fs.writeFileSync(copiedServerPath, originalServer);
+  fs.writeFileSync(copiedNativePath, originalNative);
+
+  for (const pair of [1, 2, 3]) {
+    const controlPath = path.join(temporary, `pair-${pair}/vp8/receipt.json`);
+    const control = JSON.parse(fs.readFileSync(controlPath, "utf8"));
+    control.viewer_cpu_median_pct = [70, 100, 130][pair - 1];
+    fs.writeFileSync(controlPath, JSON.stringify(control));
+    const nativeControlPath = path.join(temporary, `pair-${pair}/vp8/native/native-receipt.json`);
+    const nativeControl = JSON.parse(fs.readFileSync(nativeControlPath, "utf8"));
+    nativeControl.mac_cpu_median_pct = [7, 10, 13][pair - 1];
+    fs.writeFileSync(nativeControlPath, JSON.stringify(nativeControl));
+  }
+  const noisy = spawnSync(
+    process.execPath,
+    [path.join(root, "tools/evaluate-codec-pair.mjs"), temporary, output],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(noisy.status, 0);
+  const noisyResult = JSON.parse(fs.readFileSync(output, "utf8"));
+  assert.equal(noisyResult.gates.viewer_cpu_reduction_exceeds_noise, false);
+  assert.equal(noisyResult.gates.native_cpu_reduction_exceeds_noise, false);
+
+  for (const [directory, codec] of order) {
+    if (codec !== "vp8") continue;
+    const pair = Number(directory.match(/pair-(\d+)/)[1]);
+    const controlPath = path.join(temporary, directory, "receipt.json");
+    const control = JSON.parse(fs.readFileSync(controlPath, "utf8"));
+    control.viewer_cpu_median_pct = 100;
+    fs.writeFileSync(controlPath, JSON.stringify(control));
+    const nativeControlPath = path.join(temporary, directory, "native/native-receipt.json");
+    const nativeControl = JSON.parse(fs.readFileSync(nativeControlPath, "utf8"));
+    nativeControl.mac_cpu_median_pct = 10;
+    fs.writeFileSync(nativeControlPath, JSON.stringify(nativeControl));
+    assert.ok(pair >= 1);
+  }
 
   const brokenPath = path.join(temporary, "pair-1/vp8/receipt.json");
   const broken = JSON.parse(fs.readFileSync(brokenPath, "utf8"));
