@@ -7,17 +7,20 @@ struct ViewerWebView: NSViewRepresentable {
     let onNavigationStarted: () -> Void
     let onNavigationFinished: (URL?) -> Void
     let onNavigationFailed: (String) -> Void
+    let onMediaReady: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onNavigationStarted: onNavigationStarted,
             onNavigationFinished: onNavigationFinished,
-            onNavigationFailed: onNavigationFailed
+            onNavigationFailed: onNavigationFailed,
+            onMediaReady: onMediaReady
         )
     }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        context.coordinator.configureMediaReadiness(configuration)
         context.coordinator.configureNativePerformance(configuration)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         context.coordinator.loadedURL = url
@@ -32,7 +35,8 @@ struct ViewerWebView: NSViewRepresentable {
         context.coordinator.update(
             onNavigationStarted: onNavigationStarted,
             onNavigationFinished: onNavigationFinished,
-            onNavigationFailed: onNavigationFailed
+            onNavigationFailed: onNavigationFailed,
+            onMediaReady: onMediaReady
         )
         if context.coordinator.loadedURL != url || context.coordinator.reloadToken != reloadToken {
             context.coordinator.loadedURL = url
@@ -41,23 +45,33 @@ struct ViewerWebView: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var loadedURL: URL?
         var reloadToken = 0
         private var activeNavigation: WKNavigation?
         var onNavigationStarted: () -> Void
         var onNavigationFinished: (URL?) -> Void
         var onNavigationFailed: (String) -> Void
+        var onMediaReady: () -> Void
         private var nativePerformanceRecorder: NativePerformanceRecorder?
 
         init(
             onNavigationStarted: @escaping () -> Void,
             onNavigationFinished: @escaping (URL?) -> Void,
-            onNavigationFailed: @escaping (String) -> Void
+            onNavigationFailed: @escaping (String) -> Void,
+            onMediaReady: @escaping () -> Void
         ) {
             self.onNavigationStarted = onNavigationStarted
             self.onNavigationFinished = onNavigationFinished
             self.onNavigationFailed = onNavigationFailed
+            self.onMediaReady = onMediaReady
+        }
+
+        func configureMediaReadiness(_ configuration: WKWebViewConfiguration) {
+            configuration.userContentController.add(self, name: MediaReadinessSignal.messageHandlerName)
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: MediaReadinessSignal.userScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
         }
 
         func configureNativePerformance(_ webViewConfiguration: WKWebViewConfiguration) {
@@ -82,11 +96,19 @@ struct ViewerWebView: NSViewRepresentable {
         func update(
             onNavigationStarted: @escaping () -> Void,
             onNavigationFinished: @escaping (URL?) -> Void,
-            onNavigationFailed: @escaping (String) -> Void
+            onNavigationFailed: @escaping (String) -> Void,
+            onMediaReady: @escaping () -> Void
         ) {
             self.onNavigationStarted = onNavigationStarted
             self.onNavigationFinished = onNavigationFinished
             self.onNavigationFailed = onNavigationFailed
+            self.onMediaReady = onMediaReady
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == MediaReadinessSignal.messageHandlerName,
+                  (message.body as? String) == "mediaReady" else { return }
+            onMediaReady()
         }
 
         func webView(
@@ -179,4 +201,46 @@ struct ViewerWebView: NSViewRepresentable {
             return !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled)
         }
     }
+}
+
+enum MediaReadinessSignal {
+    static let messageHandlerName = "ghostlightMedia"
+
+    static let userScript = #"""
+    (() => {
+      if (window.__ghostlightMediaSignalInstalled) return;
+      window.__ghostlightMediaSignalInstalled = true;
+      const peers = new Set();
+      let sent = false;
+      const NativePeerConnection = window.RTCPeerConnection;
+      if (NativePeerConnection) {
+        const TrackedPeerConnection = function (...args) {
+          const peer = new NativePeerConnection(...args);
+          peers.add(peer);
+          return peer;
+        };
+        TrackedPeerConnection.prototype = NativePeerConnection.prototype;
+        Object.setPrototypeOf(TrackedPeerConnection, NativePeerConnection);
+        window.RTCPeerConnection = TrackedPeerConnection;
+      }
+      const connected = () => [...peers].some((peer) => peer.connectionState === "connected");
+      const signal = (video) => {
+        if (sent || !connected() || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth < 1) return;
+        sent = true;
+        window.webkit.messageHandlers.ghostlightMedia.postMessage("mediaReady");
+      };
+      const observe = (video) => {
+        if (video.__ghostlightMediaObserved) return;
+        video.__ghostlightMediaObserved = true;
+        if ("requestVideoFrameCallback" in video) {
+          const frame = () => { signal(video); if (!sent) video.requestVideoFrameCallback(frame); };
+          video.requestVideoFrameCallback(frame);
+        }
+      };
+      const scan = () => document.querySelectorAll("video").forEach(observe);
+      new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
+      const timer = setInterval(() => { scan(); if (sent) clearInterval(timer); }, 250);
+      window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
+    })();
+    """#
 }
