@@ -295,6 +295,13 @@ jobs:
           fi
           python3 tests/acceptance/test_audit_screenshots.py
 
+      - name: Run performance harness self-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/measure-streaming-performance.mjs --self-test
+          node tests/acceptance/performance.mjs --self-test
+
       - name: Run deterministic harness and recovery checks
         shell: bash
         run: |

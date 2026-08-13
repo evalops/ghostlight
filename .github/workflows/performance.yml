@@ -1,0 +1,80 @@
+---
+name: Streaming performance
+
+# Weekly end-to-end streaming performance measurement against the dedicated LAN
+# Docker host, plus a manual lane. The harness in
+# tools/measure-streaming-performance.mjs provisions its own pinned viewer over
+# SSH, measures causal input-to-present latency, per-process CPU, and freezes,
+# and exits non-zero when its gates report blocked, which fails this job.
+#
+# Runner/host prerequisites (self-hosted runner with the `ghostlight-perf` label):
+# - passwordless SSH from the runner to the Docker host
+#   (default developer@192.168.4.113; override with
+#   GHOSTLIGHT_PERFORMANCE_REMOTE_HOST / GHOSTLIGHT_PERFORMANCE_REMOTE_ADDRESS)
+# - passwordless sudo on the Docker host for nsenter/socat (the CDP pipe bridge)
+# - the digest-pinned viewer image pullable on the Docker host
+# - direct LAN UDP reachability between the runner and the Docker host (the lane
+#   runs with GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL=false; the SSH-tunnel TCP mode is
+#   smoke-only per the harness limitations)
+# - Playwright Chromium system libraries on the runner, or
+#   GHOSTLIGHT_PERFORMANCE_BROWSER pointing at a system Chromium
+#
+# Until such a runner is registered, this lane stays queued; that is intended.
+
+"on":
+  schedule:
+    - cron: "17 3 * * 0" # Sundays 03:17 UTC, off the top-of-hour rush
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghostlight-performance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: End-to-end streaming performance
+    runs-on:
+      - self-hosted
+      - ghostlight-perf
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Node.js
+        # actions/setup-node v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: tests/acceptance/package-lock.json
+
+      - name: Install the locked Playwright harness
+        run: npm ci --ignore-scripts --prefix tests/acceptance
+
+      - name: Install the Playwright Chromium browser
+        run: tests/acceptance/node_modules/.bin/playwright install chromium
+
+      - name: Measure streaming performance
+        shell: bash
+        env:
+          GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL: "false"
+          GHOSTLIGHT_PERFORMANCE_OUTPUT_DIR: output/playwright/performance
+          GHOSTLIGHT_PERFORMANCE_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          node tools/measure-streaming-performance.mjs
+
+      - name: Upload performance receipts
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: streaming-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/playwright/performance/
+          if-no-files-found: warn
+          retention-days: 30
