@@ -231,11 +231,15 @@ async function writeRemoteFiles() {
   return { localConfigDir, localCompose };
 }
 
+function tunnelExited(tunnel) {
+  return Boolean(tunnel && tunnel.exitCode !== null);
+}
+
 async function waitForHTTP(url, timeoutMs = 120000, tunnel = null) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "not attempted";
   while (Date.now() < deadline) {
-    if (tunnel?.exitCode !== null) {
+    if (tunnelExited(tunnel)) {
       throw new Error(`SSH tunnel exited while waiting for ${url} (code ${tunnel.exitCode}): ${tunnel.getStderr?.() ?? "no stderr"}`);
     }
     try {
@@ -1475,6 +1479,9 @@ function runSelfTests() {
   assert.doesNotMatch(chromiumConfig(), /remote-debugging/);
   assert.doesNotMatch(composeConfig(), /performance-cdp-pipe|9223/);
   assert.match(x11NavigationScript("typing"), /xdotool key --clearmodifiers ctrl\+l/);
+  assert.equal(tunnelExited(null), false);
+  assert.equal(tunnelExited({ exitCode: null }), false);
+  assert.equal(tunnelExited({ exitCode: 1 }), true);
 
   const samples = [
     { captured_at: "2026-08-12T00:00:00.000Z", cpu_pct: 10, memory_mib: 100 },

@@ -54,7 +54,7 @@ def page_body(kind: str) -> str:
         content = """
         <section class="panel input-card">
           <h2>Compose message</h2>
-          <p class="muted">The input receives synthetic text-entry events from the WebRTC client.</p>
+          <p class="muted">The input receives synthetic text-entry events from the X11 benchmark driver.</p>
           <input id="typing-input" aria-label="Message body" autocomplete="off" spellcheck="false">
           <p id="typing-count" class="muted">Characters: 0</p>
         </section>
