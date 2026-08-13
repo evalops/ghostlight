@@ -17,7 +17,9 @@ struct ViewerWebView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> WKWebView {
-        let webView = WKWebView(frame: .zero)
+        let configuration = WKWebViewConfiguration()
+        context.coordinator.configureNativePerformance(configuration)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         context.coordinator.loadedURL = url
         context.coordinator.reloadToken = reloadToken
         webView.navigationDelegate = context.coordinator
@@ -46,6 +48,7 @@ struct ViewerWebView: NSViewRepresentable {
         var onNavigationStarted: () -> Void
         var onNavigationFinished: (URL?) -> Void
         var onNavigationFailed: (String) -> Void
+        private var nativePerformanceRecorder: NativePerformanceRecorder?
 
         init(
             onNavigationStarted: @escaping () -> Void,
@@ -55,6 +58,25 @@ struct ViewerWebView: NSViewRepresentable {
             self.onNavigationStarted = onNavigationStarted
             self.onNavigationFinished = onNavigationFinished
             self.onNavigationFailed = onNavigationFailed
+        }
+
+        func configureNativePerformance(_ webViewConfiguration: WKWebViewConfiguration) {
+            guard let performance = NativePerformanceConfiguration.fromEnvironment() else {
+                return
+            }
+            let recorder = NativePerformanceRecorder(configuration: performance)
+            nativePerformanceRecorder = recorder
+            webViewConfiguration.userContentController.add(
+                recorder,
+                name: NativePerformanceConfiguration.messageHandlerName
+            )
+            webViewConfiguration.userContentController.addUserScript(
+                WKUserScript(
+                    source: performance.userScript,
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: true
+                )
+            )
         }
 
         func update(

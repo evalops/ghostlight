@@ -3,6 +3,28 @@ import XCTest
 @testable import GhostlightApp
 
 final class SessionClientTests: XCTestCase {
+    func testNativePerformanceConfigurationRequiresCompleteScopedEnvironment() {
+        XCTAssertNil(NativePerformanceConfiguration.fromEnvironment([:]))
+        XCTAssertNil(NativePerformanceConfiguration.fromEnvironment([
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT": "/tmp/receipt.json",
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_NEKO_PASSWORD": "test",
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA": String(repeating: "a", count: 40),
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC": "av1",
+        ]))
+
+        let configuration = NativePerformanceConfiguration.fromEnvironment([
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT": "/tmp/receipt.json",
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_NEKO_PASSWORD": "p'ass\\word",
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA": String(repeating: "a", count: 40),
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC": "H264",
+            "GHOSTLIGHT_NATIVE_PERFORMANCE_DISPLAY_NAME": "Native observer",
+        ])
+        XCTAssertEqual(configuration?.expectedCodec, "h264")
+        XCTAssertEqual(configuration?.displayName, "Native observer")
+        XCTAssertTrue(configuration?.userScript.contains("TrackedPeerConnection") == true)
+        XCTAssertTrue(configuration?.userScript.contains("p'ass") == true)
+    }
+
     override func tearDown() {
         StubURLProtocol.requestHandler = nil
         super.tearDown()

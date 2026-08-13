@@ -14,7 +14,9 @@ const require = createRequire(join(ROOT_DIR, "tests", "acceptance", "package.jso
 const { chromium } = require("playwright");
 const { ws: WebSocket } = require(join(ROOT_DIR, "tests", "acceptance", "node_modules", "playwright-core", "lib", "utilsBundle.js"));
 const FIXTURE_PATH = join(ROOT_DIR, "tools", "performance-fixture.py");
-const IMAGE = process.env.GHOSTLIGHT_PERFORMANCE_IMAGE ?? "ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44";
+const runtimeImageMatch = fsSync.readFileSync(join(ROOT_DIR, "runtime", ".env.example"), "utf8").match(/^NEKO_IMAGE=(\S+)$/m);
+if (!runtimeImageMatch) throw new Error("runtime/.env.example must define NEKO_IMAGE");
+const IMAGE = process.env.GHOSTLIGHT_PERFORMANCE_IMAGE ?? runtimeImageMatch[1];
 const REMOTE = process.env.GHOSTLIGHT_PERFORMANCE_REMOTE_HOST ?? "developer@192.168.4.113";
 const REMOTE_HOST = process.env.GHOSTLIGHT_PERFORMANCE_REMOTE_ADDRESS ?? "192.168.4.113";
 const BIND_ADDRESS = process.env.GHOSTLIGHT_PERFORMANCE_BIND_ADDRESS ?? REMOTE_HOST;
@@ -25,6 +27,7 @@ const WIDTH = Number(process.env.GHOSTLIGHT_PERFORMANCE_WIDTH ?? 1920);
 const HEIGHT = Number(process.env.GHOSTLIGHT_PERFORMANCE_HEIGHT ?? 1080);
 const CPU_USED = Number(process.env.GHOSTLIGHT_PERFORMANCE_CPU_USED ?? 4);
 const USE_DAMAGE = process.env.GHOSTLIGHT_PERFORMANCE_USE_DAMAGE === "true";
+const CODEC = (process.env.GHOSTLIGHT_PERFORMANCE_CODEC ?? "vp8").toLowerCase();
 const BITRATE_KBPS = Number(process.env.GHOSTLIGHT_PERFORMANCE_BITRATE_KBPS ?? 3072);
 const PHASE_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_PHASE_SECONDS ?? 30);
 const WARMUP_SECONDS = Number(process.env.GHOSTLIGHT_PERFORMANCE_WARMUP_SECONDS ?? 10);
@@ -39,6 +42,7 @@ const PASSWORD = process.env.GHOSTLIGHT_PERFORMANCE_NEKO_PASSWORD ?? "ghostlight
 const CONTROL_JSON = process.env.GHOSTLIGHT_PERFORMANCE_CONTROL_JSON ?? "";
 const SOURCE_SHA_OVERRIDE = process.env.GHOSTLIGHT_PERFORMANCE_SOURCE_SHA ?? "";
 const RUN_ID = process.env.GHOSTLIGHT_PERFORMANCE_RUN_ID ?? `run-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+const NATIVE_OBSERVER_COMMAND = process.env.GHOSTLIGHT_PERFORMANCE_NATIVE_OBSERVER_COMMAND ?? "";
 const PROJECT = (process.env.GHOSTLIGHT_PERFORMANCE_PROJECT ?? `ghostlight_perf_${Date.now()}_${Math.random().toString(16).slice(2, 7)}`).replace(/[^a-z0-9_-]/gi, "_").slice(0, 50);
 const REMOTE_DIR = `/tmp/${PROJECT}`;
 const VIEWER_PORT = PORT_BASE;
@@ -60,6 +64,7 @@ if (!Number.isInteger(CDP_COMMAND_TIMEOUT_MS) || CDP_COMMAND_TIMEOUT_MS < 100 ||
 if (!Number.isInteger(X11_INPUT_TIMEOUT_MS) || X11_INPUT_TIMEOUT_MS < 100 || X11_INPUT_TIMEOUT_MS > 60000) throw new Error("GHOSTLIGHT_PERFORMANCE_X11_INPUT_TIMEOUT_MS must be 100..60000");
 if (!Number.isFinite(MIN_CPU_REDUCTION_PCT) || MIN_CPU_REDUCTION_PCT < 0 || MIN_CPU_REDUCTION_PCT > 100) throw new Error("GHOSTLIGHT_PERFORMANCE_MIN_CPU_REDUCTION_PCT must be 0..100");
 if (!new Set(["pipe", "tcp"]).has(CDP_MODE)) throw new Error("GHOSTLIGHT_PERFORMANCE_CDP_MODE must be pipe or tcp");
+if (!new Set(["vp8", "h264"]).has(CODEC)) throw new Error("GHOSTLIGHT_PERFORMANCE_CODEC must be vp8 or h264");
 
 const command = (program, args, options = {}) => execFileSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options });
 const remoteCommand = (script, options = {}) => command("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", REMOTE, script], options);
@@ -90,6 +95,22 @@ function vp8Pipeline() {
   ].join(" ");
 }
 
+function h264Pipeline() {
+  return [
+    `ximagesrc display-name=:99.0 show-pointer=false use-damage=${USE_DAMAGE ? "true" : "false"}`,
+    `! video/x-raw,framerate=${TARGET_FPS}/1`,
+    "! videoconvert ! queue ! video/x-raw,format=NV12",
+    `! x264enc name=encoder threads=4 bitrate=${BITRATE_KBPS} key-int-max=${TARGET_FPS * 2}`,
+    `vbv-buf-capacity=${BITRATE_KBPS} byte-stream=true tune=zerolatency speed-preset=veryfast`,
+    "! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline",
+    "! appsink name=appsink",
+  ].join(" ");
+}
+
+function videoPipeline() {
+  return CODEC === "h264" ? h264Pipeline() : vp8Pipeline();
+}
+
 function nekoConfig() {
   return [
     `desktop:\n  screen: ${yamlQuote(`${WIDTH}x${HEIGHT}@${TARGET_FPS}`)}`,
@@ -103,9 +124,9 @@ function nekoConfig() {
     "    enabled: false",
     "capture:",
     "  video:",
-    "    codec: vp8",
+    `    codec: ${CODEC}`,
     "    ids: [main]",
-    `    pipeline: ${yamlQuote(vp8Pipeline())}`,
+    `    pipeline: ${yamlQuote(videoPipeline())}`,
     "",
   ].join("\n");
 }
@@ -136,7 +157,7 @@ function composeConfig() {
       NEKO_SERVER_BIND: "0.0.0.0:8080"
       NEKO_WEBRTC_UDPMUX: ${yamlQuote(String(WEBRTC_PORT))}
       NEKO_WEBRTC_TCPMUX: ${yamlQuote(String(WEBRTC_PORT))}
-      NEKO_WEBRTC_ICELITE: "0"
+      NEKO_WEBRTC_ICELITE: "1"
       NEKO_WEBRTC_NAT1TO1: ${yamlQuote(ICE_ADDRESS)}
       NEKO_LEGACY: "true"
     healthcheck:
@@ -1330,11 +1351,20 @@ function validateControlReceipt(parsed, sourceSha) {
   if (!parsed || parsed.status !== "measured" || parsed.gates?.passed !== true) throw new Error("paired control must be a measured receipt with passing gates");
   if (parsed.source?.sourceSha !== sourceSha || parsed.source?.sourceTree !== "clean") throw new Error(`paired control source must match clean HEAD ${sourceSha}`);
   if (parsed.image?.reference !== IMAGE) throw new Error(`paired control image must match ${IMAGE}`);
+  if (parsed.configuration?.codec !== "vp8" || parsed.diagnostics?.codec?.mime_type?.toLowerCase() !== "video/vp8") throw new Error("paired control must negotiate the frozen VP8 codec");
   if (parsed.configuration?.resolution !== "1920x1080" || parsed.configuration?.target_fps !== 25 || parsed.configuration?.cpu_used !== 4 || parsed.configuration?.use_damage !== false || parsed.configuration?.bitrate_kbps !== BITRATE_KBPS) {
     throw new Error("paired control must use the frozen 1920x1080@25 VP8 cpu-used=4 use-damage=false configuration");
   }
   if (parsed.diagnostics?.udp_transport_selected !== true || parsed.phases?.length !== 4 || parsed.phases.some((phase) => phase.selected_ice_pair?.protocol?.toLowerCase() !== "udp")) {
     throw new Error("paired control must prove selected candidatePair protocol=udp in all four phases");
+  }
+  if (parsed.diagnostics?.active_media !== 1
+      || parsed.diagnostics?.actual_to_target_fps_ratio == null || parsed.diagnostics.actual_to_target_fps_ratio < 0.90
+      || parsed.diagnostics?.dropped_frame_ratio == null || parsed.diagnostics.dropped_frame_ratio > 0.01
+      || parsed.diagnostics?.freeze_ratio == null || parsed.diagnostics.freeze_ratio > 0
+      || parsed.diagnostics?.visual_event_success_rate == null || parsed.diagnostics.visual_event_success_rate < 0.99
+      || parsed.diagnostics?.input_to_present_p95_ms == null || parsed.diagnostics.input_to_present_p95_ms > 1000) {
+    throw new Error("paired control must pass absolute media, fps, drop, freeze, marker, and latency health gates");
   }
   return controlMetrics(parsed);
 }
@@ -1418,6 +1448,7 @@ async function main() {
     resolution: `${WIDTH}x${HEIGHT}`,
     cpu_used: CPU_USED,
     use_damage: USE_DAMAGE,
+    codec: CODEC,
     bitrate_kbps: BITRATE_KBPS,
     warmup_seconds: WARMUP_SECONDS,
     phase_seconds: PHASE_SECONDS,
@@ -1433,6 +1464,7 @@ async function main() {
   let clientBrowser;
   let remotePage;
   let inputDriver;
+  let nativeObserver;
   let cdpDiagnostics = { enabled: CDP_DIAGNOSTICS, status: CDP_DIAGNOSTICS ? "not-attempted" : "disabled", target: null, error: null };
   let processStart;
   let processEnd;
@@ -1487,6 +1519,30 @@ async function main() {
     const initialClientStats = await collectClientStats(clientPage);
     await fs.writeFile(join(OUTPUT_DIR, "initial-webrtc.json"), `${JSON.stringify({ ...initialClientStats, reports: undefined }, null, 2)}\n`, { mode: 0o600 });
     if (!initialClientStats.inbound_count) throw new Error("no inbound video RTP stream was negotiated");
+    if (initialClientStats.codec?.mime_type?.toLowerCase() !== `video/${CODEC}`) {
+      throw new Error(`negotiated codec mismatch: expected video/${CODEC}, got ${initialClientStats.codec?.mime_type ?? "missing"}`);
+    }
+
+    if (NATIVE_OBSERVER_COMMAND) {
+      nativeObserver = spawn("/bin/zsh", ["-lc", NATIVE_OBSERVER_COMMAND], {
+        cwd: ROOT_DIR,
+        env: {
+          ...process.env,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_VIEWER_URL: VIEWER_URL,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_NEKO_PASSWORD: PASSWORD,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC: CODEC,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA: source.sourceSha,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT_DIR: join(OUTPUT_DIR, "native"),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let nativeStdout = "";
+      let nativeStderr = "";
+      nativeObserver.stdout.on("data", (chunk) => { nativeStdout += chunk.toString(); });
+      nativeObserver.stderr.on("data", (chunk) => { nativeStderr += chunk.toString(); });
+      nativeObserver.getStdout = () => nativeStdout;
+      nativeObserver.getStderr = () => nativeStderr;
+    }
 
     for (const phase of ["static-gmail", "scrolling", "typing", "animation"]) {
       const result = await runPhase(clientPage, remote.containerId, inputDriver, phase);
@@ -1497,10 +1553,21 @@ async function main() {
     if (!USE_SSH_TUNNEL && (!phaseResults.length || phaseResults.some((phase) => phase.selected_ice_pair?.protocol?.toLowerCase() !== "udp"))) {
       throw new Error("direct-LAN WebRTC receipt requires selected candidatePair protocol=udp in every phase");
     }
+    if (nativeObserver) {
+      const nativeExited = await waitForWorkerClose(nativeObserver, 90000);
+      if (!nativeExited) {
+        nativeObserver.kill("SIGTERM");
+        throw new Error("native WKWebView observer did not finish within 90 seconds after the four phases");
+      }
+      await fs.writeFile(join(OUTPUT_DIR, "native-observer.stdout"), nativeObserver.getStdout(), { mode: 0o600 });
+      await fs.writeFile(join(OUTPUT_DIR, "native-observer.stderr"), nativeObserver.getStderr(), { mode: 0o600 });
+      if (nativeObserver.exitCode !== 0) throw new Error(`native WKWebView observer exited ${nativeObserver.exitCode}: ${nativeObserver.getStderr()}`);
+    }
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
   } finally {
     if (remotePage) await remotePage.close().catch(() => {});
+    if (nativeObserver?.exitCode === null) nativeObserver.kill("SIGTERM");
     if (clientBrowser) await clientBrowser.close().catch(() => {});
     await stopX11InputDriver(inputDriver).catch(() => {});
     if (remote?.containerId) processEnd = await processSnapshot(remote.containerId, "end").catch((error) => ({ label: "end", captured_at: new Date().toISOString(), processes: [], process_cpu_sum_pct: null, error: error instanceof Error ? error.message : String(error) }));
@@ -1546,6 +1613,7 @@ async function main() {
       bitrate_kbps: BITRATE_KBPS,
       cpu_used: CPU_USED,
       use_damage: USE_DAMAGE,
+      codec: CODEC,
       phase_seconds: PHASE_SECONDS,
       warmup_seconds: WARMUP_SECONDS,
       minimum_cpu_reduction_pct: MIN_CPU_REDUCTION_PCT,
@@ -1583,11 +1651,12 @@ async function main() {
         sampling_hz: 1,
         by_phase: Object.fromEntries(phaseResults.map((phase) => [phase.phase, phase.process_cpu_attribution])),
         samples: processTimeSeries.samples,
-        boundary: "vp8enc runs in-process in Neko/GStreamer and is not separately attributable from the Neko process; no separate vp8enc CPU number is claimed.",
+        boundary: "The selected software encoder runs in-process in Neko/GStreamer and is not separately attributable from the Neko process; no separate encoder CPU number is claimed.",
       },
       container_cpu_samples: containerStats,
       selected_ice_pairs: aggregate.selected_ice_pairs,
       cdp: cdpDiagnostics,
+      native_observer: NATIVE_OBSERVER_COMMAND ? join(OUTPUT_DIR, "native", "native-receipt.json") : null,
     },
     comparison: { paired_control: Boolean(control), control_source: CONTROL_JSON || null, control: control ?? null },
     phases: phaseResults.map(sanitizePhase),
@@ -1604,9 +1673,9 @@ async function main() {
       "Input-to-present is measured only when the remote fixture's causal marker changes after an X11 xdotool F8 dispatch; the timestamp is set immediately before writing to one persistent scoped SSH input channel, so it includes LAN command transit but not per-marker SSH process startup.",
       "The synthetic fixture is launched and driven through Chromium's real X11 input path with xdotool. CDP is disabled by default and optional diagnostics never gate a measurement.",
       "Viewer CPU is attributed to the exact pinned container through timestamped Docker stats sliced to each phase window; host-wide CPU is not substituted.",
-      "Process CPU samples are captured at approximately 1 Hz from /proc utime+stime deltas. Chromium, Neko, X-related, and other categories are reported; vp8enc remains in-process within Neko/GStreamer and is not separately attributable.",
+      "Process CPU samples are captured at approximately 1 Hz from /proc utime+stime deltas. Chromium, Neko, X-related, and other categories are reported; the software encoder remains in-process within Neko/GStreamer and is not separately attributable.",
       USE_SSH_TUNNEL ? "SSH TCP forwarding is smoke-only and is not used as the 1080p25 control transport; a direct-LAN run must set GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL=false and prove selected candidatePair protocol=udp." : "This receipt requires a direct-LAN selected candidatePair protocol=udp in every phase.",
-      "The public pinned viewer image and software VP8 fallback were used. No software H.264 or VAAPI claim is made by this harness.",
+      CODEC === "h264" ? "The current public pinned viewer image and its software x264 constrained-baseline pipeline were used; no VAAPI claim is made." : "The current public pinned viewer image and frozen software VP8 pipeline were used.",
     ],
     error: failure ? failure.message : null,
   };
@@ -1634,24 +1703,29 @@ async function runSelfTests() {
     status: "measured",
     source: { sourceSha: "test-head", sourceTree: "clean" },
     image: { reference: IMAGE },
-    configuration: { resolution: "1920x1080", target_fps: 25, cpu_used: 4, use_damage: false, bitrate_kbps: BITRATE_KBPS },
     gates: { passed: true },
     viewer_cpu_median_pct: 100,
-    diagnostics: { dropped_frame_ratio: 0.01, freeze_ratio: 0.02, input_to_present_p95_ms: 300, udp_transport_selected: true },
+    configuration: { resolution: "1920x1080", target_fps: 25, cpu_used: 4, use_damage: false, bitrate_kbps: BITRATE_KBPS, codec: "vp8" },
+    diagnostics: { codec: { mime_type: "video/VP8" }, active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0, freeze_ratio: 0, visual_event_success_rate: 1, input_to_present_p95_ms: 300, udp_transport_selected: true },
     phases: Array.from({ length: 4 }, () => ({ selected_ice_pair: { protocol: "udp" } })),
   };
   assert.deepEqual(validateControlReceipt(controlReceipt, "test-head"), {
     viewer_cpu_median_pct: 100,
-    dropped_frame_ratio: 0.01,
-    freeze_ratio: 0.02,
+    codec: { mime_type: "video/VP8" },
+    active_media: 1,
+    actual_to_target_fps_ratio: 1,
+    dropped_frame_ratio: 0,
+    freeze_ratio: 0,
+    visual_event_success_rate: 1,
     input_to_present_p95_ms: 300,
     udp_transport_selected: true,
   });
   assert.throws(() => validateControlReceipt({ ...controlReceipt, status: "blocked" }, "test-head"), /measured receipt/);
   assert.throws(() => validateControlReceipt(controlReceipt, "other-head"), /match clean HEAD/);
   assert.throws(() => validateControlReceipt({ ...controlReceipt, diagnostics: { ...controlReceipt.diagnostics, udp_transport_selected: false } }, "test-head"), /protocol=udp/);
+  assert.throws(() => validateControlReceipt({ ...controlReceipt, diagnostics: { ...controlReceipt.diagnostics, freeze_ratio: 0.01 } }, "test-head"), /absolute media/);
 
-  const gateAggregate = { active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0.01, freeze_ratio: 0.02, visual_event_success_rate: 1, input_to_present_p95_ms: 300, viewer_cpu_median_pct: 101 };
+  const gateAggregate = { active_media: 1, actual_to_target_fps_ratio: 1, dropped_frame_ratio: 0, freeze_ratio: 0, visual_event_success_rate: 1, input_to_present_p95_ms: 300, viewer_cpu_median_pct: 101 };
   assert.equal(buildGates(gateAggregate, validateControlReceipt(controlReceipt, "test-head")).passed, false);
   assert.equal(buildGates({ ...gateAggregate, viewer_cpu_median_pct: 94 }, validateControlReceipt(controlReceipt, "test-head")).passed, true);
 
