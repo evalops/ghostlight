@@ -60,6 +60,8 @@ RUN set -eux; \
 
 FROM ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7
 
+ARG GHOSTLIGHT_REVISION=unknown
+
 USER root
 
 # intel-media-va-driver-non-free ships only for amd64, so it installs behind an
@@ -116,4 +118,4 @@ LABEL org.opencontainers.image.source="https://github.com/evalops/ghostlight" \
       org.opencontainers.image.description="Ghostlight hardened Neko Chromium 3.1.5 viewer with a native browser-session agent" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="neko-v3.1.5-ghostlight.3" \
-      org.opencontainers.image.revision="395ca1a6f62b7b0e270e654d366a2d57b8042efd"
+      org.opencontainers.image.revision="${GHOSTLIGHT_REVISION}"

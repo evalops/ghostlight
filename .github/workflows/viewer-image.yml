@@ -8,6 +8,12 @@ name: Publish hardened viewer
       - viewer/**
       - .github/workflows/viewer-image.yml
   workflow_dispatch:
+    inputs:
+      allow_non_main:
+        description: Publish the exact selected ref before merge
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -15,7 +21,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || inputs.allow_non_main
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -44,6 +50,8 @@ jobs:
           provenance: mode=max
           sbom: true
           push: true
+          build-args: |
+            GHOSTLIGHT_REVISION=${{ github.sha }}
           tags: ghcr.io/evalops/ghostlight-viewer:sha-${{ github.sha }}
 
       - name: Verify the published digest is pullable
