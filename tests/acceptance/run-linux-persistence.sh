@@ -39,6 +39,7 @@ ENV_FILE="$WORK_DIR/runtime.env"
 OVERRIDE_FILE="$WORK_DIR/compose.override.yml"
 TRANSCRIPT="$OUTPUT_DIR/transcript.txt"
 SOURCE_SHA="${GHOSTLIGHT_ACCEPTANCE_SOURCE_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf unknown)}"
+read -r API_TOKEN BRIDGE_TOKEN < <(python3 -c 'import secrets; print(secrets.token_hex(32), secrets.token_hex(32))')
 profile_owned_by_viewer=0
 export COMPOSE_BAKE="${COMPOSE_BAKE:-false}"
 
@@ -93,6 +94,8 @@ NEKO_WEBRTC_ICELITE=0
 NEKO_WEBRTC_NAT1TO1=127.0.0.1
 GHOSTLIGHT_VIEWER_URL=http://127.0.0.1:$VIEWER_PORT
 GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080
+GHOSTLIGHT_API_TOKEN=$API_TOKEN
+GHOSTLIGHT_BRIDGE_TOKEN=$BRIDGE_TOKEN
 NEKO_IMAGE=$NEKO_IMAGE_REF
 EOF
 chmod 600 "$ENV_FILE"

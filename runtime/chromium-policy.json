@@ -38,6 +38,13 @@
   "ExtensionInstallBlocklist": [
     "*"
   ],
+  "NativeMessagingBlocklist": [
+    "*"
+  ],
+  "NativeMessagingAllowlist": [
+    "org.evalops.ghostlight.browser_agent"
+  ],
+  "NativeMessagingUserLevelHosts": false,
   "DefaultCookiesSetting": 1,
   "RestoreOnStartup": 1
 }

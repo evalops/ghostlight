@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,12 +26,24 @@ const (
 	healthPath                 = "/healthz"
 	readinessPath              = "/readyz"
 	viewerDiscoveryPath        = "/v1/viewer"
+	stateDirEnvironment        = "GHOSTLIGHT_STATE_DIR"
+	attachmentDirEnvironment   = "GHOSTLIGHT_ATTACHMENT_DIR"
+	apiTokenEnvironment        = "GHOSTLIGHT_API_TOKEN"
+	bridgeTokenEnvironment     = "GHOSTLIGHT_BRIDGE_TOKEN"
+	leaseTTLEnvironment        = "GHOSTLIGHT_LEASE_TTL_SECONDS"
+	defaultLeaseTTL            = 30 * time.Second
+	defaultStreamTTL           = 2 * time.Minute
 )
 
 type Config struct {
 	ListenAddr      string
 	ViewerURL       string
 	ViewerHealthURL string
+	StateDir        string
+	AttachmentDir   string
+	APIToken        string
+	BridgeToken     string
+	LeaseTTL        time.Duration
 }
 
 type APIError struct {
@@ -46,6 +60,9 @@ type handler struct {
 	viewerHealthURL string
 	viewerClient    *http.Client
 	viewerTimeout   time.Duration
+	config          Config
+	store           *sqliteStore
+	now             func() time.Time
 
 	// probeMu guards the in-flight readiness probe so concurrent /readyz
 	// requests share one upstream health check instead of one per request.
@@ -75,7 +92,34 @@ func loadConfig() (Config, error) {
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
-	return Config{ListenAddr: listenAddr, ViewerURL: viewerURL, ViewerHealthURL: viewerHealthURL}, nil
+	stateDir := strings.TrimSpace(os.Getenv(stateDirEnvironment))
+	if stateDir == "" {
+		return Config{}, fmt.Errorf("%s: must be set", stateDirEnvironment)
+	}
+	attachmentDir := strings.TrimSpace(os.Getenv(attachmentDirEnvironment))
+	if attachmentDir == "" {
+		return Config{}, fmt.Errorf("%s: must be set", attachmentDirEnvironment)
+	}
+	apiToken := strings.TrimSpace(os.Getenv(apiTokenEnvironment))
+	if apiToken == "" {
+		return Config{}, fmt.Errorf("%s: must be set", apiTokenEnvironment)
+	}
+	bridgeToken := strings.TrimSpace(os.Getenv(bridgeTokenEnvironment))
+	if bridgeToken == "" {
+		return Config{}, fmt.Errorf("%s: must be set", bridgeTokenEnvironment)
+	}
+	if subtle.ConstantTimeCompare([]byte(apiToken), []byte(bridgeToken)) == 1 {
+		return Config{}, errors.New("GHOSTLIGHT_API_TOKEN and GHOSTLIGHT_BRIDGE_TOKEN must be different")
+	}
+	leaseTTL := defaultLeaseTTL
+	if raw := strings.TrimSpace(os.Getenv(leaseTTLEnvironment)); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err != nil || seconds < 1 || seconds > 3600 {
+			return Config{}, fmt.Errorf("%s: must be an integer from 1 through 3600", leaseTTLEnvironment)
+		}
+		leaseTTL = time.Duration(seconds) * time.Second
+	}
+	return Config{ListenAddr: listenAddr, ViewerURL: viewerURL, ViewerHealthURL: viewerHealthURL, StateDir: stateDir, AttachmentDir: attachmentDir, APIToken: apiToken, BridgeToken: bridgeToken, LeaseTTL: leaseTTL}, nil
 }
 
 func validateViewerURL(raw string) error {
@@ -127,7 +171,35 @@ func newHandlerWithHealthURL(viewerURL, viewerHealthURL string, client *http.Cli
 		viewerHealthURL: healthURL(viewerHealthURL),
 		viewerClient:    &clientCopy,
 		viewerTimeout:   viewerHealthTimeout,
+		now:             time.Now,
 	}, nil
+}
+
+func newHandlerWithConfig(config Config, client *http.Client, now func() time.Time) (*handler, error) {
+	if strings.TrimSpace(config.APIToken) == "" {
+		return nil, errors.New("API token must not be empty")
+	}
+	if strings.TrimSpace(config.BridgeToken) == "" {
+		return nil, errors.New("bridge token must not be empty")
+	}
+	if subtle.ConstantTimeCompare([]byte(config.APIToken), []byte(config.BridgeToken)) == 1 {
+		return nil, errors.New("API token and bridge token must be different")
+	}
+	if config.LeaseTTL <= 0 {
+		config.LeaseTTL = defaultLeaseTTL
+	}
+	h, err := newHandlerWithHealthURL(config.ViewerURL, config.ViewerHealthURL, client)
+	if err != nil {
+		return nil, err
+	}
+	store, err := openSQLiteStore(config.StateDir, config.AttachmentDir, now)
+	if err != nil {
+		return nil, err
+	}
+	h.config = config
+	h.store = store
+	h.now = now
+	return h, nil
 }
 
 func healthURL(viewerURL string) string {
@@ -154,6 +226,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleReadiness(w, r)
 	case r.URL.Path == viewerDiscoveryPath:
 		h.handleViewerDiscovery(w, r)
+	case strings.HasPrefix(r.URL.Path, "/v1/bridge/"):
+		h.handleBridge(w, r)
+	case r.URL.Path == "/v1/workspaces" || strings.HasPrefix(r.URL.Path, "/v1/sessions"):
+		h.handleAPI(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
@@ -176,6 +252,12 @@ func (h *handler) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	if !h.viewerReady(r) {
 		writeError(w, http.StatusServiceUnavailable, "viewer_unavailable", "configured viewer health check failed")
 		return
+	}
+	if h.store != nil {
+		if err := h.store.db.PingContext(r.Context()); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "session storage check failed")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "viewer": "ready"})
 }

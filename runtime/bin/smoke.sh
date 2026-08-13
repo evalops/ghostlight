@@ -117,6 +117,11 @@ CONTROL_HEALTH_URL="${CONTROL_URL%/}${CONTROL_HEALTH_PATH}"
 CONTROL_READY_URL="${CONTROL_URL%/}${CONTROL_READY_PATH}"
 VIEWER_HEALTH_URL="${DIRECT_VIEWER_URL%/}${VIEWER_HEALTH_PATH}"
 VIEWER_DISCOVERY_URL="${CONTROL_URL%/}${VIEWER_DISCOVERY_PATH}"
+WORKSPACES_URL="${CONTROL_URL%/}/v1/workspaces"
+BRIDGE_BOOTSTRAP_URL="${CONTROL_URL%/}/v1/bridge/bootstrap"
+api_token="$(env_value GHOSTLIGHT_API_TOKEN)"
+bridge_token="$(env_value GHOSTLIGHT_BRIDGE_TOKEN)"
+[[ -n "$api_token" && -n "$bridge_token" ]] || die "control and bridge tokens must be configured"
 
 health_response="$(request_with_retry "$CONTROL_HEALTH_URL")" \
   || die "control liveness failed at $CONTROL_HEALTH_URL; inspect 'docker compose --env-file $ENV_FILE -f $COMPOSE_FILE logs control'"
@@ -143,4 +148,14 @@ discovered_viewer_health_url="$(url_with_path "$discovered_viewer_url" "$VIEWER_
 request_with_retry "$discovered_viewer_health_url" \
   || die "discovered viewer health failed at $discovered_viewer_url; check GHOSTLIGHT_VIEWER_URL and NEKO_WEBRTC_NAT1TO1"
 
-printf 'smoke passed: control liveness, viewer /health, control readiness, and stateless viewer discovery (%s)\n' "$discovered_viewer_url"
+workspaces_response="$(request_once "$WORKSPACES_URL" -H "Authorization: Bearer $api_token")" \
+  || die "authenticated workspace discovery failed at $WORKSPACES_URL"
+printf '%s' "$workspaces_response" | grep -Eq '"id"[[:space:]]*:[[:space:]]*"default"' \
+  || die "workspace discovery did not return the durable default workspace"
+
+bootstrap_response="$(request_once "$BRIDGE_BOOTSTRAP_URL" -H "Authorization: Bearer $bridge_token")" \
+  || die "browser-agent bootstrap failed at $BRIDGE_BOOTSTRAP_URL"
+printf '%s' "$bootstrap_response" | grep -Eq '"session_id"[[:space:]]*:[[:space:]]*"default"' \
+  || die "browser-agent bootstrap did not return the durable default session"
+
+printf 'smoke passed: liveness, readiness, legacy viewer discovery, durable workspace, and browser-agent bootstrap (%s)\n' "$discovered_viewer_url"
