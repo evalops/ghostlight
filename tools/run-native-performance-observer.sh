@@ -9,10 +9,15 @@ EXPECTED_CODEC="${GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC:-}"
 SOURCE_SHA="${GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA:-}"
 OUTPUT_DIR="${GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT_DIR:-$ROOT_DIR/output/native-performance}"
 APP_PATH="${GHOSTLIGHT_APP_PATH:-$ROOT_DIR/macos/.build/Ghostlight.app}"
+STOP_FILE="${GHOSTLIGHT_NATIVE_PERFORMANCE_STOP_FILE:-}"
+PHASE_DIR="${GHOSTLIGHT_NATIVE_PERFORMANCE_PHASE_DIR:-}"
+MAX_WAIT_SECONDS="${GHOSTLIGHT_NATIVE_PERFORMANCE_MAX_WAIT_SECONDS:-360}"
 
 [[ "$(uname -s)" == Darwin ]] || { printf 'macOS is required\n' >&2; exit 1; }
 [[ -n "$VIEWER_URL" && -n "$PASSWORD" && -n "$EXPECTED_CODEC" && -n "$SOURCE_SHA" ]] || { printf 'native performance environment is incomplete\n' >&2; exit 1; }
+[[ -n "$STOP_FILE" && -f "$STOP_FILE" && -n "$PHASE_DIR" && -d "$PHASE_DIR" ]] || { printf 'native performance phase coordination is incomplete\n' >&2; exit 1; }
 [[ "$EXPECTED_CODEC" == vp8 || "$EXPECTED_CODEC" == h264 ]] || { printf 'expected codec must be vp8 or h264\n' >&2; exit 1; }
+[[ "$MAX_WAIT_SECONDS" =~ ^[0-9]+$ && "$MAX_WAIT_SECONDS" -ge 60 ]] || { printf 'native performance wait must be at least 60 seconds\n' >&2; exit 1; }
 [[ "$SOURCE_SHA" == "$(git -C "$ROOT_DIR" rev-parse HEAD)" ]] || { printf 'native source SHA must match HEAD\n' >&2; exit 1; }
 [[ -x "$APP_PATH/Contents/MacOS/GhostlightApp" ]] || { printf 'package Ghostlight.app before native measurement\n' >&2; exit 1; }
 
@@ -104,9 +109,16 @@ PY
 done
 [[ "$ready" == 1 ]] || { printf 'WKWebView did not produce ten active media samples\n' >&2; exit 1; }
 
+deadline=$((SECONDS + MAX_WAIT_SECONDS))
+while [[ -f "$STOP_FILE" && "$SECONDS" -lt "$deadline" ]]; do
+  kill -0 "$APP_PID" >/dev/null 2>&1 || { printf 'Ghostlight.app exited before all benchmark phases completed\n' >&2; exit 1; }
+  sleep 1
+done
+[[ ! -f "$STOP_FILE" ]] || { printf 'native observer phase coordination timed out\n' >&2; exit 1; }
+
 osascript -e 'tell application id "org.evalops.Ghostlight" to quit' >/dev/null 2>&1 || true
 wait "$APP_PID" >/dev/null 2>&1 || true
 APP_PID=""
 wait "$SAMPLER_PID" >/dev/null 2>&1 || true
 SAMPLER_PID=""
-node "$ROOT_DIR/tools/evaluate-native-performance.mjs" "$RAW_RECEIPT" "$CPU_SAMPLES" "$EXPECTED_CODEC" "$SOURCE_SHA" "$RECEIPT"
+node "$ROOT_DIR/tools/evaluate-native-performance.mjs" "$RAW_RECEIPT" "$CPU_SAMPLES" "$EXPECTED_CODEC" "$SOURCE_SHA" "$RECEIPT" "$PHASE_DIR"
