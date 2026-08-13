@@ -19,6 +19,25 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertNil(session.stream)
     }
 
+    func testSessionControllerSummaryDecodesWithoutLeaseSecret() throws {
+        let payload = Self.sessionJSON.replacingOccurrences(
+            of: "\"controller\":null",
+            with: "\"controller\":{\"id\":\"lease-1\",\"session_id\":\"session-1\",\"client_id\":\"other-mac\",\"epoch\":3,\"expires_at\":\"2030-08-13T12:00:30Z\",\"renew_after\":\"2030-08-13T12:00:10Z\"}"
+        )
+        let session = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(payload.utf8))
+
+        XCTAssertEqual(session.controller?.clientID, "other-mac")
+        XCTAssertNil(session.controller?.token)
+    }
+
+    func testAttachmentDecodesControlContractFilename() throws {
+        let payload = #"{"id":"attachment-1","session_id":"session-1","filename":"brief.pdf","content_type":"application/pdf","size":42,"digest":"sha256:abc","created_at":"2026-08-13T12:00:00Z"}"#
+        let attachment = try SessionJSON.decoder.decode(Attachment.self, from: Data(payload.utf8))
+
+        XCTAssertEqual(attachment.filename, "brief.pdf")
+        XCTAssertEqual(attachment.size, 42)
+    }
+
     func testCreateSessionUsesContractBodyAndStableIdempotencyKey() async throws {
         var captured: URLRequest?
         NativeSessionURLProtocol.requestHandler = { request in
@@ -29,16 +48,55 @@ final class NativeSessionTests: XCTestCase {
         let client = SessionClient(session: makeSession())
         _ = try await client.createSession(
             at: try XCTUnwrap(URL(string: "https://control.example.test/base")),
+            apiToken: "api-secret",
             idempotencyKey: "mac-client-1"
         )
 
         XCTAssertEqual(captured?.httpMethod, "POST")
         XCTAssertEqual(captured?.url?.absoluteString, "https://control.example.test/base/v1/sessions")
         XCTAssertEqual(captured?.value(forHTTPHeaderField: "Idempotency-Key"), "mac-client-1")
-        XCTAssertEqual(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(Self.bodyData(from: captured))),
-            ["workspace_id": "default", "name": "Browser"] as NSDictionary
+        XCTAssertEqual(captured?.value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")
+        let body = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try XCTUnwrap(Self.bodyData(from: captured))) as? NSDictionary
         )
+        XCTAssertEqual(body, ["workspace_id": "default"] as NSDictionary)
+    }
+
+    func testWorkspaceListDecodesTopLevelArray() async throws {
+        NativeSessionURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")
+            return (Self.response(for: request), Data(#"[{"id":"default","name":"Default"}]"#.utf8))
+        }
+
+        let workspaces = try await SessionClient(session: makeSession()).listWorkspaces(
+            at: try XCTUnwrap(URL(string: "https://control.example.test")),
+            apiToken: "api-secret"
+        )
+
+        XCTAssertEqual(workspaces.map(\.id), ["default"])
+    }
+
+    func testCommandWireValuesMatchControlContract() throws {
+        let commands = [
+            BrowserCommand(type: .goBack, tabID: "tab-1", expectedRevision: 7),
+            BrowserCommand(type: .goForward, tabID: "tab-1", expectedRevision: 7),
+            BrowserCommand(type: .newTab, url: "https://www.google.com", expectedRevision: 7),
+            BrowserCommand(type: .attach, attachmentID: "attachment-1", expectedRevision: 7),
+        ]
+        let values = try commands.map { command -> String in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: SessionJSON.encoder.encode(command)) as? [String: Any])
+            return try XCTUnwrap(object["type"] as? String)
+        }
+
+        XCTAssertEqual(values, ["back", "forward", "create_tab", "stage_attachment"])
+        XCTAssertEqual(commands[2].url, "https://www.google.com")
+    }
+
+    func testUntitledTabDecodes() throws {
+        let payload = Self.sessionJSON.replacingOccurrences(of: "\"title\":\"Example\",", with: "")
+        let session = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(payload.utf8))
+
+        XCTAssertNil(session.tabs.first?.title)
     }
 
     func testEventsReturnsNilForUnchanged204() async throws {
@@ -52,6 +110,7 @@ final class NativeSessionTests: XCTestCase {
 
         let result = try await SessionClient(session: makeSession()).sessionEvents(
             at: try XCTUnwrap(URL(string: "https://control.example.test")),
+            apiToken: "api-secret",
             sessionID: "session-1",
             afterRevision: 7
         )
@@ -66,19 +125,21 @@ final class NativeSessionTests: XCTestCase {
             if request.httpMethod == "PUT" {
                 return (Self.response(for: request), Data(Self.leaseJSON.utf8))
             }
-            return (Self.response(for: request), Data(Self.sessionJSON.utf8))
+            return (Self.response(for: request, status: 202), Data(Self.commandJSON.utf8))
         }
         let client = SessionClient(session: makeSession())
         let origin = try XCTUnwrap(URL(string: "https://control.example.test"))
 
         _ = try await client.renewLease(
             at: origin,
+            apiToken: "api-secret",
             sessionID: "session-1",
             leaseID: "lease-1",
             token: "secret"
         )
         _ = try await client.sendCommand(
             at: origin,
+            apiToken: "api-secret",
             sessionID: "session-1",
             token: "secret",
             idempotencyKey: "command-1",
@@ -86,8 +147,10 @@ final class NativeSessionTests: XCTestCase {
         )
 
         XCTAssertEqual(requests[0].httpMethod, "PUT")
-        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer secret")
-        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "X-Ghostlight-Lease-Token"), "secret")
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "X-Ghostlight-Lease-Token"), "secret")
         XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Idempotency-Key"), "command-1")
         let command = try JSONSerialization.jsonObject(with: try XCTUnwrap(Self.bodyData(from: requests[1]))) as? [String: Any]
         XCTAssertEqual(command?["type"] as? String, "navigate")
@@ -110,13 +173,46 @@ final class NativeSessionTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set("https://legacy.example.test", forKey: "GhostlightControlPlaneURL")
 
-        let viewModel = SessionViewModel(defaults: defaults, autoConnect: false)
+        let viewModel = SessionViewModel(
+            defaults: defaults,
+            environment: ["GHOSTLIGHT_API_TOKEN": "memory-only"],
+            autoConnect: false
+        )
 
         XCTAssertEqual(viewModel.controlOrigin, "https://legacy.example.test")
         XCTAssertEqual(defaults.string(forKey: "GhostlightControlOrigin"), "https://legacy.example.test")
         XCTAssertNil(defaults.object(forKey: "GhostlightControlPlaneURL"))
         XCTAssertNotNil(defaults.string(forKey: "GhostlightClientID"))
         XCTAssertNil(defaults.object(forKey: "GhostlightLeaseToken"))
+        XCTAssertEqual(viewModel.apiToken, "memory-only")
+        XCTAssertNil(defaults.object(forKey: "GhostlightAPIToken"))
+    }
+
+    @MainActor
+    func testConnectFailsClosedWithoutAPIToken() throws {
+        let viewModel = SessionViewModel(
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            autoConnect: false
+        )
+        viewModel.controlOrigin = "https://control.example.test"
+
+        viewModel.connect()
+
+        XCTAssertEqual(viewModel.controlState, .failed("Enter the control API token."))
+    }
+
+    @MainActor
+    func testConnectNormalizesPaddedAPITokenBeforeStartingRequests() throws {
+        let viewModel = SessionViewModel(
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            autoConnect: false
+        )
+        viewModel.controlOrigin = "https://control.example.test"
+        viewModel.apiToken = "  api-secret\n"
+
+        viewModel.connect()
+
+        XCTAssertEqual(viewModel.apiToken, "api-secret")
     }
 
     @MainActor
@@ -140,6 +236,32 @@ final class NativeSessionTests: XCTestCase {
 
         viewModel.setAddressFocused(false)
         XCTAssertEqual(viewModel.addressDraft, "https://new.example")
+    }
+
+    @MainActor
+    func testActiveTabChangeReplacesFocusedAddressDraft() throws {
+        let viewModel = SessionViewModel(defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)), autoConnect: false)
+        var session = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
+        viewModel.apply(session)
+        viewModel.setAddressFocused(true)
+        viewModel.addressDraft = "unfinished.example"
+
+        session.revision += 1
+        session.tabs[0].active = false
+        session.tabs.append(
+            BrowserTab(
+                id: "tab-2",
+                title: "Second tab",
+                url: "https://second.example",
+                active: true,
+                loading: false,
+                faviconURL: nil
+            )
+        )
+        session.activeTabID = "tab-2"
+        viewModel.apply(session)
+
+        XCTAssertEqual(viewModel.addressDraft, "https://second.example")
     }
 
     @MainActor
@@ -185,7 +307,7 @@ final class NativeSessionTests: XCTestCase {
     private static let sessionJSON = #"""
     {
       "id":"session-1","workspace_id":"default","name":"Browser","revision":7,
-      "runtime_state":"ready","tabs":[{"id":"tab-1","title":"Example","url":"https://example.com","active":true,"loading":false,"can_go_back":true,"can_go_forward":false}],
+      "runtime_state":"ready","tabs":[{"id":"tab-1","title":"Example","url":"https://example.com","active":true,"loading":false,"audible":false,"discarded":false,"window_id":1,"index":0}],
       "active_tab_id":"tab-1","controller":null,"stream":null,
       "created_at":"2026-08-13T12:00:00Z","updated_at":"2026-08-13T12:00:01Z"
     }
@@ -193,8 +315,16 @@ final class NativeSessionTests: XCTestCase {
 
     private static let leaseJSON = #"""
     {
-      "id":"lease-1","token":"secret","epoch":2,
+      "id":"lease-1","session_id":"session-1","client_id":"mac","token":"secret","epoch":2,
       "expires_at":"2030-08-13T12:00:30Z","renew_after":"2030-08-13T12:00:10Z"
+    }
+    """#
+
+    private static let commandJSON = #"""
+    {
+      "id":"command-1","sequence":1,"session_id":"session-1","type":"navigate",
+      "url":"https://example.com","tab_id":"tab-1","expected_revision":7,
+      "lease_epoch":2,"state":"queued","created_at":"2026-08-13T12:00:02Z"
     }
     """#
 }

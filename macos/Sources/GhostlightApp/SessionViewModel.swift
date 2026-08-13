@@ -21,6 +21,7 @@ enum SurfaceState: Equatable {
 @MainActor
 final class SessionViewModel: ObservableObject {
     @Published var controlOrigin: String
+    @Published var apiToken: String
     @Published var addressDraft = ""
     @Published private(set) var controlState: ControlState = .disconnected
     @Published private(set) var surfaceState: SurfaceState = .idle
@@ -49,8 +50,10 @@ final class SessionViewModel: ObservableObject {
         client: any SessionServicing = SessionClient(),
         defaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        now: @escaping @Sendable () -> Date = Date.init,
-        sleepUntil: @escaping @Sendable (Date) async throws -> Void = SessionViewModel.defaultSleepUntil,
+        now: @escaping @Sendable () -> Date = { Date() },
+        sleepUntil: @escaping @Sendable (Date) async throws -> Void = { date in
+            try await SessionViewModel.defaultSleepUntil(date)
+        },
         autoConnect: Bool = true
     ) {
         self.client = client
@@ -62,6 +65,7 @@ final class SessionViewModel: ObservableObject {
             ?? defaults.string(forKey: Self.legacyOriginKey)
         let environmentOrigin = environment["GHOSTLIGHT_CONTROL_URL"]
         self.controlOrigin = environmentOrigin ?? migrated ?? "http://localhost:8080"
+        self.apiToken = environment["GHOSTLIGHT_API_TOKEN"] ?? ""
 
         if defaults.string(forKey: Self.originKey) == nil, let migrated {
             defaults.set(migrated, forKey: Self.originKey)
@@ -112,11 +116,17 @@ final class SessionViewModel: ObservableObject {
             controlState = .failed(error.localizedDescription)
             return
         }
+        let apiToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiToken.isEmpty else {
+            controlState = .failed("Enter the control API token.")
+            return
+        }
+        self.apiToken = apiToken
 
         lifecycleTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let browser = try await resumeOrCreate(at: origin)
+                let browser = try await resumeOrCreate(at: origin, apiToken: apiToken)
                 guard owns(runID) else { return }
                 defaults.set(origin.absoluteString, forKey: Self.originKey)
                 defaults.set(browser.id, forKey: Self.sessionIDKey)
@@ -124,7 +134,7 @@ final class SessionViewModel: ObservableObject {
                 startEvents(at: origin, sessionID: browser.id, runID: runID)
 
                 do {
-                    let connection = try await client.createStream(at: origin, sessionID: browser.id)
+                    let connection = try await client.createStream(at: origin, apiToken: apiToken, sessionID: browser.id)
                     guard owns(runID) else { return }
                     stream = connection
                     surfaceState = .loadingPage(connection.url)
@@ -134,7 +144,7 @@ final class SessionViewModel: ObservableObject {
                 }
 
                 do {
-                    let acquired = try await client.acquireLease(at: origin, sessionID: browser.id, clientID: clientID)
+                    let acquired = try await client.acquireLease(at: origin, apiToken: apiToken, sessionID: browser.id, clientID: clientID)
                     guard owns(runID) else { return }
                     installLease(acquired)
                     startLeaseRenewal(at: origin, sessionID: browser.id, runID: runID)
@@ -167,8 +177,9 @@ final class SessionViewModel: ObservableObject {
 
     func apply(_ incoming: BrowserSession) {
         if let current = session, incoming.revision <= current.revision { return }
+        let activeTabChanged = session?.activeTabID != incoming.activeTabID
         session = incoming
-        if !isAddressFocused { syncAddressDraft() }
+        if activeTabChanged || !isAddressFocused { syncAddressDraft() }
     }
 
     func setAddressFocused(_ focused: Bool) {
@@ -177,6 +188,10 @@ final class SessionViewModel: ObservableObject {
     }
 
     func installLease(_ lease: ControllerLease) {
+        guard lease.token != nil else {
+            becomeObserver()
+            return
+        }
         self.lease = lease
         controlState = now() < lease.expiresAt ? .controller(expiresAt: lease.expiresAt) : .expired
     }
@@ -189,7 +204,7 @@ final class SessionViewModel: ObservableObject {
     func goBack() { send(.init(type: .goBack, tabID: activeTab?.id, expectedRevision: session?.revision ?? 0)) }
     func goForward() { send(.init(type: .goForward, tabID: activeTab?.id, expectedRevision: session?.revision ?? 0)) }
     func reload() { send(.init(type: .reload, tabID: activeTab?.id, expectedRevision: session?.revision ?? 0)) }
-    func newTab() { send(.init(type: .newTab, expectedRevision: session?.revision ?? 0)) }
+    func newTab() { send(.init(type: .newTab, url: "https://www.google.com", expectedRevision: session?.revision ?? 0)) }
     func closeTab(_ id: String) { send(.init(type: .closeTab, tabID: id, expectedRevision: session?.revision ?? 0)) }
     func activateTab(_ id: String) { send(.init(type: .activateTab, tabID: id, expectedRevision: session?.revision ?? 0)) }
 
@@ -207,6 +222,7 @@ final class SessionViewModel: ObservableObject {
             do {
                 let attachment = try await client.uploadAttachment(
                     at: context.origin,
+                    apiToken: context.apiToken,
                     sessionID: context.sessionID,
                     token: context.token,
                     fileURL: fileURL
@@ -241,16 +257,17 @@ final class SessionViewModel: ObservableObject {
         surfaceState = .failed(message)
     }
 
-    private func resumeOrCreate(at origin: URL) async throws -> BrowserSession {
+    private func resumeOrCreate(at origin: URL, apiToken: String) async throws -> BrowserSession {
         if let sessionID = defaults.string(forKey: Self.sessionIDKey) {
             do {
-                return try await client.getSession(at: origin, sessionID: sessionID)
+                return try await client.getSession(at: origin, apiToken: apiToken, sessionID: sessionID)
             } catch let error as SessionClientError where error.statusCode == 404 {
                 defaults.removeObject(forKey: Self.sessionIDKey)
             }
         }
         return try await client.createSession(
             at: origin,
+            apiToken: apiToken,
             idempotencyKey: "ghostlight-macos-\(clientID)-browser"
         )
     }
@@ -261,26 +278,27 @@ final class SessionViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let updated = try await client.sendCommand(
+                _ = try await client.sendCommand(
                     at: context.origin,
+                    apiToken: context.apiToken,
                     sessionID: context.sessionID,
                     token: context.token,
                     idempotencyKey: UUID().uuidString.lowercased(),
                     command: command
                 )
-                apply(updated)
             } catch {
                 commandError = error.localizedDescription
             }
         }
     }
 
-    private var commandContext: (origin: URL, sessionID: String, token: String)? {
+    private var commandContext: (origin: URL, apiToken: String, sessionID: String, token: String)? {
         guard canControl,
               let origin = try? ControlPlaneURLValidator.validate(controlOrigin),
               let session,
-              let lease else { return nil }
-        return (origin, session.id, lease.token)
+              let lease,
+              let leaseToken = lease.token else { return nil }
+        return (origin, apiToken, session.id, leaseToken)
     }
 
     private func startEvents(at origin: URL, sessionID: String, runID: UUID) {
@@ -292,6 +310,7 @@ final class SessionViewModel: ObservableObject {
                     let revision = session?.revision ?? 0
                     if let updated = try await client.sessionEvents(
                         at: origin,
+                        apiToken: apiToken,
                         sessionID: sessionID,
                         afterRevision: revision
                     ) {
@@ -311,7 +330,7 @@ final class SessionViewModel: ObservableObject {
         leaseTask?.cancel()
         leaseTask = Task { [weak self] in
             guard let self else { return }
-            while owns(runID), let current = lease, !Task.isCancelled {
+            while owns(runID), let current = lease, let token = current.token, !Task.isCancelled {
                 do {
                     try await sleepUntil(current.renewAfter)
                     guard owns(runID), now() < current.expiresAt else {
@@ -321,9 +340,10 @@ final class SessionViewModel: ObservableObject {
                     }
                     let renewed = try await client.renewLease(
                         at: origin,
+                        apiToken: apiToken,
                         sessionID: sessionID,
                         leaseID: current.id,
-                        token: current.token
+                        token: token
                     )
                     installLease(renewed)
                 } catch is CancellationError {

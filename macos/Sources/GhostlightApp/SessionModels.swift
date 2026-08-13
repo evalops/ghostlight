@@ -37,39 +37,17 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
     public let name: String
 }
 
-public struct WorkspaceList: Codable, Equatable, Sendable {
-    public let workspaces: [Workspace]
-}
-
 public struct BrowserTab: Codable, Equatable, Sendable, Identifiable {
     public var id: String
-    public var title: String
+    public var title: String?
     public var url: String
     public var active: Bool
     public var loading: Bool
-    public var canGoBack: Bool
-    public var canGoForward: Bool
     public var faviconURL: URL?
 
     enum CodingKeys: String, CodingKey {
         case id, title, url, active, loading
-        case canGoBack = "can_go_back"
-        case canGoForward = "can_go_forward"
         case faviconURL = "favicon_url"
-    }
-}
-
-public struct SessionController: Codable, Equatable, Sendable {
-    public let clientID: String?
-    public let leaseID: String?
-    public let epoch: Int?
-    public let expiresAt: Date?
-
-    enum CodingKeys: String, CodingKey {
-        case clientID = "client_id"
-        case leaseID = "lease_id"
-        case epoch
-        case expiresAt = "expires_at"
     }
 }
 
@@ -93,7 +71,7 @@ public struct BrowserSession: Codable, Equatable, Sendable, Identifiable {
     public var runtimeState: String
     public var tabs: [BrowserTab]
     public var activeTabID: String?
-    public var controller: SessionController?
+    public var controller: ControllerLease?
     public var stream: StreamConnection?
     public var createdAt: Date
     public var updatedAt: Date
@@ -110,13 +88,17 @@ public struct BrowserSession: Codable, Equatable, Sendable, Identifiable {
 
 public struct ControllerLease: Codable, Equatable, Sendable, Identifiable {
     public let id: String
-    public let token: String
+    public let sessionID: String
+    public let clientID: String
+    public let token: String?
     public let epoch: Int
     public let expiresAt: Date
     public let renewAfter: Date
 
     enum CodingKeys: String, CodingKey {
         case id, token, epoch
+        case sessionID = "session_id"
+        case clientID = "client_id"
         case expiresAt = "expires_at"
         case renewAfter = "renew_after"
     }
@@ -124,13 +106,13 @@ public struct ControllerLease: Codable, Equatable, Sendable, Identifiable {
 
 public struct Attachment: Codable, Equatable, Sendable, Identifiable {
     public let id: String
-    public let name: String?
+    public let filename: String
     public let contentType: String?
     public let size: Int?
     public let createdAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, size
+        case id, filename, size
         case contentType = "content_type"
         case createdAt = "created_at"
     }
@@ -138,13 +120,13 @@ public struct Attachment: Codable, Equatable, Sendable, Identifiable {
 
 public enum BrowserCommandType: String, Codable, Sendable {
     case navigate
-    case goBack = "go_back"
-    case goForward = "go_forward"
+    case goBack = "back"
+    case goForward = "forward"
     case reload
-    case newTab = "new_tab"
+    case newTab = "create_tab"
     case closeTab = "close_tab"
     case activateTab = "activate_tab"
-    case attach
+    case attach = "stage_attachment"
 }
 
 public struct BrowserCommand: Codable, Equatable, Sendable {

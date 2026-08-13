@@ -46,15 +46,15 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
 }
 
 protocol SessionServicing: Sendable {
-    func getSession(at origin: URL, sessionID: String) async throws -> BrowserSession
-    func createSession(at origin: URL, idempotencyKey: String) async throws -> BrowserSession
-    func sessionEvents(at origin: URL, sessionID: String, afterRevision: Int) async throws -> BrowserSession?
-    func acquireLease(at origin: URL, sessionID: String, clientID: String) async throws -> ControllerLease
-    func renewLease(at origin: URL, sessionID: String, leaseID: String, token: String) async throws -> ControllerLease
-    func releaseLease(at origin: URL, sessionID: String, leaseID: String, token: String) async throws
-    func sendCommand(at origin: URL, sessionID: String, token: String, idempotencyKey: String, command: BrowserCommand) async throws -> BrowserSession
-    func uploadAttachment(at origin: URL, sessionID: String, token: String, fileURL: URL) async throws -> Attachment
-    func createStream(at origin: URL, sessionID: String) async throws -> StreamConnection
+    func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession
+    func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession
+    func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int) async throws -> BrowserSession?
+    func acquireLease(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> ControllerLease
+    func renewLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws -> ControllerLease
+    func releaseLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws
+    func sendCommand(at origin: URL, apiToken: String, sessionID: String, token: String, idempotencyKey: String, command: BrowserCommand) async throws -> BrowserCommand
+    func uploadAttachment(at origin: URL, apiToken: String, sessionID: String, token: String, fileURL: URL) async throws -> Attachment
+    func createStream(at origin: URL, apiToken: String, sessionID: String) async throws -> StreamConnection
 }
 
 public final class SessionClient: SessionServicing, @unchecked Sendable {
@@ -67,27 +67,27 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
         self.session = session
     }
 
-    public func listWorkspaces(at origin: URL) async throws -> [Workspace] {
-        let response: WorkspaceList = try await send(.get, origin: origin, path: ["v1", "workspaces"])
-        return response.workspaces
+    public func listWorkspaces(at origin: URL, apiToken: String) async throws -> [Workspace] {
+        try await send(.get, origin: origin, path: ["v1", "workspaces"], headers: Self.apiBearer(apiToken))
     }
 
-    public func getSession(at origin: URL, sessionID: String) async throws -> BrowserSession {
-        try await send(.get, origin: origin, path: ["v1", "sessions", sessionID])
+    public func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession {
+        try await send(.get, origin: origin, path: ["v1", "sessions", sessionID], headers: Self.apiBearer(apiToken))
     }
 
-    public func createSession(at origin: URL, idempotencyKey: String) async throws -> BrowserSession {
+    public func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession {
         try await send(
             .post,
             origin: origin,
             path: ["v1", "sessions"],
-            headers: ["Idempotency-Key": idempotencyKey],
-            body: try SessionJSON.encoder.encode(CreateSessionRequest(workspaceID: "default", name: "Browser"))
+            headers: Self.apiBearer(apiToken).merging(["Idempotency-Key": idempotencyKey]) { _, new in new },
+            body: try SessionJSON.encoder.encode(CreateSessionRequest(workspaceID: "default"))
         )
     }
 
     public func sessionEvents(
         at origin: URL,
+        apiToken: String,
         sessionID: String,
         afterRevision: Int
     ) async throws -> BrowserSession? {
@@ -95,21 +95,24 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             .get,
             origin: origin,
             path: ["v1", "sessions", sessionID, "events"],
-            queryItems: [URLQueryItem(name: "after_revision", value: String(afterRevision))]
+            queryItems: [URLQueryItem(name: "after_revision", value: String(afterRevision))],
+            headers: Self.apiBearer(apiToken)
         )
     }
 
-    public func acquireLease(at origin: URL, sessionID: String, clientID: String) async throws -> ControllerLease {
+    public func acquireLease(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> ControllerLease {
         try await send(
             .post,
             origin: origin,
             path: ["v1", "sessions", sessionID, "leases"],
+            headers: Self.apiBearer(apiToken),
             body: try SessionJSON.encoder.encode(AcquireLeaseRequest(clientID: clientID))
         )
     }
 
     public func renewLease(
         at origin: URL,
+        apiToken: String,
         sessionID: String,
         leaseID: String,
         token: String
@@ -118,12 +121,14 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             .put,
             origin: origin,
             path: ["v1", "sessions", sessionID, "leases", leaseID],
-            headers: Self.bearer(token)
+            headers: Self.authorized(apiToken: apiToken, leaseToken: token),
+            body: Data("{}".utf8)
         )
     }
 
     public func releaseLease(
         at origin: URL,
+        apiToken: String,
         sessionID: String,
         leaseID: String,
         token: String
@@ -132,23 +137,25 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             .delete,
             origin: origin,
             path: ["v1", "sessions", sessionID, "leases", leaseID],
-            headers: Self.bearer(token)
+            headers: Self.authorized(apiToken: apiToken, leaseToken: token)
         )
     }
 
     public func sendCommand(
         at origin: URL,
+        apiToken: String,
         sessionID: String,
         token: String,
         idempotencyKey: String,
         command: BrowserCommand
-    ) async throws -> BrowserSession {
+    ) async throws -> BrowserCommand {
         try await send(
             .post,
             origin: origin,
             path: ["v1", "sessions", sessionID, "commands"],
             headers: [
-                "Authorization": "Bearer \(token)",
+                "Authorization": "Bearer \(apiToken)",
+                "X-Ghostlight-Lease-Token": token,
                 "Idempotency-Key": idempotencyKey,
             ],
             body: try SessionJSON.encoder.encode(command)
@@ -157,6 +164,7 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
 
     public func uploadAttachment(
         at origin: URL,
+        apiToken: String,
         sessionID: String,
         token: String,
         fileURL: URL
@@ -173,7 +181,8 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             origin: origin,
             path: ["v1", "sessions", sessionID, "attachments"],
             headers: [
-                "Authorization": "Bearer \(token)",
+                "Authorization": "Bearer \(apiToken)",
+                "X-Ghostlight-Lease-Token": token,
                 "Content-Type": "multipart/form-data; boundary=\(boundary)",
             ],
             body: body,
@@ -181,8 +190,8 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
         )
     }
 
-    public func createStream(at origin: URL, sessionID: String) async throws -> StreamConnection {
-        try await send(.post, origin: origin, path: ["v1", "sessions", sessionID, "stream"])
+    public func createStream(at origin: URL, apiToken: String, sessionID: String) async throws -> StreamConnection {
+        try await send(.post, origin: origin, path: ["v1", "sessions", sessionID, "stream"], headers: Self.apiBearer(apiToken))
     }
 
     private func send<T: Decodable>(
@@ -262,12 +271,16 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
         }
     }
 
-    private static func bearer(_ token: String) -> [String: String] {
+    private static func apiBearer(_ token: String) -> [String: String] {
         ["Authorization": "Bearer \(token)"]
+    }
+
+    private static func authorized(apiToken: String, leaseToken: String) -> [String: String] {
+        ["Authorization": "Bearer \(apiToken)", "X-Ghostlight-Lease-Token": leaseToken]
     }
 }
 
 private enum HTTPMethod: String { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
-private struct CreateSessionRequest: Encodable { let workspaceID: String; let name: String; enum CodingKeys: String, CodingKey { case workspaceID = "workspace_id"; case name } }
+private struct CreateSessionRequest: Encodable { let workspaceID: String; enum CodingKeys: String, CodingKey { case workspaceID = "workspace_id" } }
 private struct AcquireLeaseRequest: Encodable { let clientID: String; enum CodingKeys: String, CodingKey { case clientID = "client_id" } }
 private struct EmptyResponse: Decodable {}
