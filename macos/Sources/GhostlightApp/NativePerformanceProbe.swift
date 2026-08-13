@@ -127,7 +127,9 @@ struct NativePerformanceConfiguration: Equatable {
 
           const timer = setInterval(() => {
             observeVideo();
-            if (!document.querySelector("video")) connect();
+            // Neko renders its video element before authentication. Presence of
+            // that element therefore cannot prove that the observer connected.
+            if (peers.length === 0) connect();
             snapshot().catch(() => {});
           }, 1000);
           window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
