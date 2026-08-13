@@ -50,12 +50,15 @@ FROM ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afa
 
 USER root
 
+# intel-media-va-driver-non-free ships only for amd64, so it installs behind an
+# architecture gate. All three GPU packages are inert until
+# runtime/docker-compose.gpu.yml passes /dev/dri and the GPU Chromium flags.
 RUN set -eux; \
     printf '%s\n' \
       'Types: deb' \
       'URIs: https://snapshot.debian.org/archive/debian/20260812T000000Z' \
       'Suites: trixie trixie-updates' \
-      'Components: main' \
+      'Components: main non-free' \
       'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
       'Check-Valid-Until: no' \
       '' \
@@ -74,6 +77,13 @@ RUN set -eux; \
       libheif1=1.19.8-1+deb13u1 \
       libheif-plugin-dav1d=1.19.8-1+deb13u1 \
       libheif-plugin-libde265=1.19.8-1+deb13u1; \
+    apt-get install --yes --no-install-recommends \
+      gstreamer1.0-vaapi=1.26.2-1 \
+      vainfo=2.22.0+ds1-2; \
+    if [ "$(dpkg --print-architecture)" = amd64 ]; then \
+      apt-get install --yes --no-install-recommends \
+        intel-media-va-driver-non-free=25.2.3+ds1-1; \
+    fi; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
 COPY --from=neko-builder /build/neko /usr/bin/neko

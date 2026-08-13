@@ -1,0 +1,16 @@
+# Experimental opt-in Intel VA-API GPU acceleration for the viewer.
+# Never loaded by default; combine with the default file:
+#   docker compose --env-file runtime/.env \
+#     -f runtime/docker-compose.yml -f runtime/docker-compose.gpu.yml up -d
+# See docs/gpu-acceleration.md for prerequisites and verification.
+services:
+  viewer:
+    devices:
+      - "/dev/dri:/dev/dri"
+    # Host group owning /dev/dri/renderD* (often "render"). Resolve it with:
+    #   stat -c '%g' /dev/dri/renderD*
+    # and set RENDER_GID in runtime/.env when it differs from the default.
+    group_add:
+      - "${RENDER_GID:-109}"
+    volumes:
+      - "./config/chromium-gpu.conf:/etc/neko/supervisord/chromium.conf:ro"
