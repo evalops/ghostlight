@@ -50,6 +50,7 @@ protocol SessionServicing: Sendable {
     func putWorkspacePreferences(_ preferences: WorkspacePreferences, at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences
     func createChromePairing(at origin: URL, apiToken: String, workspaceID: String, deviceName: String) async throws -> ChromePairing
     func listChromeHandoffs(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeHandoff]
+    func listChromeLibrary(at origin: URL, apiToken: String, workspaceID: String, kind: String) async throws -> [ChromeLibraryItem]
     func updateChromeHandoff(at origin: URL, apiToken: String, workspaceID: String, handoffID: String, state: String) async throws -> ChromeHandoff
     func listChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeDevice]
     func revokeChromeDevice(at origin: URL, apiToken: String, workspaceID: String, deviceID: String) async throws
@@ -154,6 +155,21 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             path: ["v1", "workspaces", workspaceID, "chrome-handoffs", handoffID],
             headers: Self.apiBearer(apiToken),
             body: try SessionJSON.encoder.encode(ChromeHandoffUpdate(state: state))
+        )
+    }
+
+    public func listChromeLibrary(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        kind: String
+    ) async throws -> [ChromeLibraryItem] {
+        try await send(
+            .get,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "chrome-library"],
+            queryItems: [URLQueryItem(name: "kind", value: kind)],
+            headers: Self.apiBearer(apiToken)
         )
     }
 

@@ -243,6 +243,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleChromePairingRedemption(w, r)
 	case r.URL.Path == "/v1/chrome-handoffs":
 		h.handleChromeDeviceHandoffs(w, r)
+	case r.URL.Path == "/v1/chrome-handoff-batches":
+		h.handleChromeDeviceHandoffBatch(w, r)
+	case r.URL.Path == "/v1/chrome-library-snapshots":
+		h.handleChromeLibrarySnapshot(w, r)
 	case r.URL.Path == "/v1/workspaces" || strings.HasPrefix(r.URL.Path, "/v1/workspaces/") || strings.HasPrefix(r.URL.Path, "/v1/sessions"):
 		h.handleAPI(w, r)
 	default:

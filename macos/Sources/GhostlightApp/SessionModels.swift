@@ -153,14 +153,39 @@ public struct ChromeHandoff: Codable, Equatable, Sendable, Identifiable {
     public let state: String
     public let createdAt: Date
     public let updatedAt: Date
+    public let groupID: String?
+    public let position: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, url, state
+        case id, title, url, state, position
         case workspaceID = "workspace_id"
         case deviceID = "device_id"
         case deviceName = "device_name"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case groupID = "group_id"
+    }
+}
+
+public struct ChromeLibraryItem: Codable, Equatable, Sendable, Identifiable {
+    public let kind: String
+    public let externalID: String
+    public let parentExternalID: String?
+    public let title: String?
+    public let url: String?
+    public let position: Int
+    public let read: Bool
+    public let deviceID: String
+    public let deviceName: String
+
+    public var id: String { "\(deviceID):\(kind):\(externalID)" }
+
+    enum CodingKeys: String, CodingKey {
+        case kind, title, url, position, read
+        case externalID = "external_id"
+        case parentExternalID = "parent_external_id"
+        case deviceID = "device_id"
+        case deviceName = "device_name"
     }
 }
 

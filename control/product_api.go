@@ -64,6 +64,8 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceChromeHandoffs(w, r, parts[2], "")
 	case len(parts) == 5 && parts[1] == "workspaces" && parts[3] == "chrome-handoffs":
 		h.handleWorkspaceChromeHandoffs(w, r, parts[2], parts[4])
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-library":
+		h.handleWorkspaceChromeLibrary(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "sessions":
 		h.handleSessions(w, r)
 	case len(parts) >= 3 && parts[1] == "sessions":

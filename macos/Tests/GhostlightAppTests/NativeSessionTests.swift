@@ -170,11 +170,36 @@ final class NativeSessionTests: XCTestCase {
 
         XCTAssertEqual(pairing.deviceName, "Jonathan's Chrome")
         XCTAssertEqual(handoffs.map(\.url), ["https://example.test/work"])
+        XCTAssertEqual(handoffs[0].groupID, "window-group-1")
+        XCTAssertEqual(handoffs[0].position, 2)
         XCTAssertEqual(requests.map(\.httpMethod), ["POST", "GET", "PUT"])
         XCTAssertEqual(requests[0].url?.path, "/base/v1/workspaces/default/chrome-pairings")
         XCTAssertEqual(requests[1].url?.path, "/base/v1/workspaces/default/chrome-handoffs")
         XCTAssertEqual(requests[2].url?.path, "/base/v1/workspaces/default/chrome-handoffs/handoff-1")
         XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer api-secret" })
+    }
+
+    func testChromeLibraryUsesScopedKindQueryAndDecodesDeviceProvenance() async throws {
+        var request: URLRequest?
+        NativeSessionURLProtocol.requestHandler = { value in
+            request = value
+            let body = #"[{"kind":"bookmark","external_id":"bookmark-1","title":"Docs","url":"https://docs.example.test","position":0,"read":false,"device_id":"device-1","device_name":"Chrome"}]"#
+            return (Self.response(for: value), Data(body.utf8))
+        }
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+        let items = try await SessionClient(session: makeSession()).listChromeLibrary(
+            at: origin,
+            apiToken: "api-secret",
+            workspaceID: "default",
+            kind: "bookmark"
+        )
+
+        XCTAssertEqual(items.map(\.title), ["Docs"])
+        XCTAssertEqual(items.map(\.deviceName), ["Chrome"])
+        XCTAssertEqual(request?.url?.path, "/base/v1/workspaces/default/chrome-library")
+        XCTAssertEqual(URLComponents(url: try XCTUnwrap(request?.url), resolvingAgainstBaseURL: false)?.queryItems,
+                       [URLQueryItem(name: "kind", value: "bookmark")])
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")
     }
 
     func testCommandWireValuesMatchControlContract() throws {
@@ -814,7 +839,8 @@ final class NativeSessionTests: XCTestCase {
     {
       "id":"handoff-1","workspace_id":"default","device_id":"device-1",
       "device_name":"Jonathan's Chrome","title":"Work","url":"https://example.test/work",
-      "state":"pending","created_at":"2026-08-13T12:00:00Z","updated_at":"2026-08-13T12:00:00Z"
+      "group_id":"window-group-1","position":2,"state":"pending",
+      "created_at":"2026-08-13T12:00:00Z","updated_at":"2026-08-13T12:00:00Z"
     }
     """#
 
@@ -952,6 +978,7 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
     }
     func createChromePairing(at origin: URL, apiToken: String, workspaceID: String, deviceName: String) async throws -> ChromePairing { fatalError() }
     func listChromeHandoffs(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeHandoff] { [] }
+    func listChromeLibrary(at origin: URL, apiToken: String, workspaceID: String, kind: String) async throws -> [ChromeLibraryItem] { [] }
     func updateChromeHandoff(at origin: URL, apiToken: String, workspaceID: String, handoffID: String, state: String) async throws -> ChromeHandoff {
         lock.withLock { resolvedHandoffs.append("\(handoffID):\(state)") }
         return ChromeHandoff(
@@ -963,7 +990,9 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
             url: "https://example.test/work",
             state: state,
             createdAt: Date(timeIntervalSince1970: 1_000),
-            updatedAt: Date(timeIntervalSince1970: 1_001)
+            updatedAt: Date(timeIntervalSince1970: 1_001),
+            groupID: nil,
+            position: nil
         )
     }
     func listChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeDevice] { [] }

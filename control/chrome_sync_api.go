@@ -92,7 +92,7 @@ func (h *handler) handleChromeDeviceHandoffs(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnauthorized, "device_invalid", "Chrome device token is missing, revoked, or invalid")
 		return
 	}
-	if device.Scope != chromeDeviceScope {
+	if !strings.Contains(" "+device.Scope+" ", " handoff:write ") {
 		writeError(w, http.StatusForbidden, "scope_denied", "Chrome device is not allowed to create handoffs")
 		return
 	}
@@ -124,6 +124,145 @@ func (h *handler) handleChromeDeviceHandoffs(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusCreated, handoff)
+}
+
+func (h *handler) handleChromeDeviceHandoffBatch(w http.ResponseWriter, r *http.Request) {
+	if h.store == nil {
+		writeError(w, http.StatusNotFound, "not_found", "route not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	device, err := h.store.chromeDeviceForToken(r.Context(), bearerToken(r))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "device_invalid", "Chrome device token is missing, revoked, or invalid")
+		return
+	}
+	if !strings.Contains(" "+device.Scope+" ", " handoff:write ") {
+		writeError(w, http.StatusForbidden, "scope_denied", "Chrome device is not allowed to create handoffs")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 150 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Idempotency-Key is required")
+		return
+	}
+	var input struct {
+		GroupID string          `json:"group_id"`
+		Tabs    []ChromeHandoff `json:"tabs"`
+	}
+	body, err := decodeStrictJSON(r, &input)
+	input.GroupID = strings.TrimSpace(input.GroupID)
+	if err != nil || len(input.GroupID) < 16 || len(input.GroupID) > 100 || len(input.Tabs) < 1 || len(input.Tabs) > maxHandoffBatch {
+		writeError(w, http.StatusBadRequest, "invalid_request", "handoff batch must contain 1 through 25 tabs and a group_id")
+		return
+	}
+	for index := range input.Tabs {
+		input.Tabs[index].Title = strings.TrimSpace(input.Tabs[index].Title)
+		input.Tabs[index].URL = strings.TrimSpace(input.Tabs[index].URL)
+		if utf8.RuneCountInString(input.Tabs[index].Title) > maxChromeHandoffTitle || len(input.Tabs[index].URL) > 4096 || !validRecentURL(input.Tabs[index].URL) {
+			writeError(w, http.StatusBadRequest, "unsafe_url", "every handoff must contain a safe HTTP or HTTPS URL without credentials, fragments, or credential-bearing query parameters")
+			return
+		}
+	}
+	digest := sha256.Sum256(body)
+	values, err := h.store.createChromeHandoffs(r.Context(), device, key, hex.EncodeToString(digest[:]), input.GroupID, input.Tabs)
+	if err != nil {
+		if errors.Is(err, errStorageLimit) {
+			writeError(w, http.StatusInsufficientStorage, "handoff_limit", "pending Chrome handoff limit was reached")
+		} else {
+			writeStoreError(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, values)
+}
+
+func (h *handler) handleChromeLibrarySnapshot(w http.ResponseWriter, r *http.Request) {
+	if h.store == nil {
+		writeError(w, http.StatusNotFound, "not_found", "route not found")
+		return
+	}
+	if r.Method != http.MethodPut {
+		writeMethodNotAllowed(w, http.MethodPut)
+		return
+	}
+	device, err := h.store.chromeDeviceForToken(r.Context(), bearerToken(r))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "device_invalid", "Chrome device token is missing, revoked, or invalid")
+		return
+	}
+	if !strings.Contains(" "+device.Scope+" ", " library:replace ") {
+		writeError(w, http.StatusForbidden, "scope_denied", "Chrome device is not allowed to replace library snapshots")
+		return
+	}
+	var input struct {
+		Kind     string              `json:"kind"`
+		Revision int64               `json:"revision"`
+		Items    []ChromeLibraryItem `json:"items"`
+	}
+	body, err := decodeStrictJSON(r, &input)
+	if err != nil || input.Revision < 1 || len(input.Items) > maxChromeLibraryItems || !validChromeLibrary(input.Kind, input.Items) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Chrome library snapshot is invalid")
+		return
+	}
+	digest := sha256.Sum256(body)
+	receipt, err := h.store.replaceChromeLibrary(r.Context(), device, input.Kind, input.Revision, hex.EncodeToString(digest[:]), input.Items)
+	if err != nil {
+		switch {
+		case errors.Is(err, errStaleRevision):
+			writeError(w, http.StatusConflict, "stale_revision", "a newer Chrome library snapshot already exists")
+		case errors.Is(err, errIdempotencyKey):
+			writeError(w, http.StatusConflict, "snapshot_conflict", "this Chrome library revision already contains different content")
+		default:
+			writeStoreError(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, receipt)
+}
+
+func (h *handler) handleWorkspaceChromeLibrary(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	kind := r.URL.Query().Get("kind")
+	if kind != "bookmark" && kind != "reading_list" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "kind must be bookmark or reading_list")
+		return
+	}
+	items, err := h.store.listChromeLibrary(r.Context(), workspaceID, kind)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func validChromeLibrary(kind string, items []ChromeLibraryItem) bool {
+	if kind != "bookmark" && kind != "reading_list" {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, item := range items {
+		if item.Kind != "" && item.Kind != kind {
+			return false
+		}
+		if item.ExternalID == "" || len(item.ExternalID) > 200 || len(item.ParentExternalID) > 200 || utf8.RuneCountInString(item.Title) > 300 || item.Position < 0 || seen[item.ExternalID] {
+			return false
+		}
+		seen[item.ExternalID] = true
+		if kind == "reading_list" && !validRecentURL(item.URL) {
+			return false
+		}
+		if kind == "bookmark" && item.URL != "" && !validRecentURL(item.URL) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *handler) handleWorkspaceChromeHandoffs(w http.ResponseWriter, r *http.Request, workspaceID, handoffID string) {

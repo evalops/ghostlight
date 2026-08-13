@@ -87,6 +87,8 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var viewerBootstrap: ViewerBootstrap?
     @Published private(set) var workspacePreferences: WorkspacePreferences?
     @Published private(set) var chromeHandoffs: [ChromeHandoff] = []
+    @Published private(set) var chromeBookmarks: [ChromeLibraryItem] = []
+    @Published private(set) var chromeReadingList: [ChromeLibraryItem] = []
     @Published private(set) var chromeDevices: [ChromeDevice] = []
     @Published private(set) var chromePairing: ChromePairing?
     @Published private(set) var chromeSyncError: String?
@@ -220,6 +222,7 @@ final class SessionViewModel: ObservableObject {
                 apply(browser)
                 await loadWorkspacePreferences(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
                 await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
+                await loadChromeLibrary(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
                 await loadChromeDevices(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
                 guard owns(runID) else { return }
                 startEvents(at: origin, sessionID: browser.id, runID: runID)
@@ -424,6 +427,15 @@ final class SessionViewModel: ObservableObject {
 
     func dismissChromeHandoff(_ handoff: ChromeHandoff) {
         resolveChromeHandoff(handoff.id, state: "dismissed")
+    }
+
+    func openChromeLibraryItem(_ item: ChromeLibraryItem) {
+        guard let url = item.url,
+              WorkspacePreferences.safeRecentURL(url) != nil else { return }
+        submit(CommandSubmission(
+            idempotencyKey: "chrome-library-\(UUID().uuidString)",
+            command: BrowserCommand(type: .newTab, url: url, expectedRevision: session?.revision ?? 0)
+        ))
     }
 
     func refreshChromeDevices() async {
@@ -737,6 +749,27 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    private func loadChromeLibrary(at origin: URL, apiToken: String, workspaceID: String) async {
+        do {
+            async let bookmarks = client.listChromeLibrary(
+                at: origin, apiToken: apiToken, workspaceID: workspaceID, kind: "bookmark"
+            )
+            async let readingList = client.listChromeLibrary(
+                at: origin, apiToken: apiToken, workspaceID: workspaceID, kind: "reading_list"
+            )
+            let (bookmarkValues, readingValues) = try await (bookmarks, readingList)
+            guard session?.workspaceID == workspaceID else { return }
+            chromeBookmarks = bookmarkValues.filter { $0.url != nil }
+            chromeReadingList = readingValues.filter { $0.url != nil }
+            chromeSyncError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard session?.workspaceID == workspaceID else { return }
+            chromeSyncError = error.localizedDescription
+        }
+    }
+
     private func loadChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async {
         do {
             let values = try await client.listChromeDevices(
@@ -855,6 +888,9 @@ final class SessionViewModel: ObservableObject {
                     pollCount += 1
                     if pollCount.isMultiple(of: 8), let workspaceID = session?.workspaceID {
                         await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+                    }
+                    if pollCount.isMultiple(of: 32), let workspaceID = session?.workspaceID {
+                        await loadChromeLibrary(at: origin, apiToken: apiToken, workspaceID: workspaceID)
                     }
                     try await Task.sleep(for: .milliseconds(250))
                 } catch is CancellationError {
