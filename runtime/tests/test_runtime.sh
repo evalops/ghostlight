@@ -70,6 +70,15 @@ assert_contains "$RUNTIME_DIR/docker-compose.yml" '/etc/chromium/policies/manage
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_VIEWER_URL'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_VIEWER_HEALTH_URL'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'NEKO_SERVER_BIND: "0.0.0.0:8080"'
+# These are literal Compose interpolation expressions, not shell expansions.
+# shellcheck disable=SC2016
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'NEKO_CAPTURE_VIDEO_CODEC: "${NEKO_CAPTURE_VIDEO_CODEC:-h264}"'
+# shellcheck disable=SC2016
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'NEKO_CAPTURE_VIDEO_PIPELINE: "${NEKO_CAPTURE_VIDEO_PIPELINE-ximagesrc display-name={display}'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink}'
+# shellcheck disable=SC2016
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-1}"'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'healthcheck:'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'http://127.0.0.1:8080/health'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '/v1/viewer'
@@ -77,6 +86,9 @@ assert_contains "$RUNTIME_DIR/docker-compose.yml" 'http://127.0.0.1:8080/readyz'
 
 assert_contains "$RUNTIME_DIR/.env.example" '__GENERATE_AT_INSTALL__'
 assert_contains "$RUNTIME_DIR/.env.example" 'GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080'
+assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_CODEC=h264'
+assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_WEBRTC_ICELITE=1'
+assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_PIPELINE=ximagesrc display-name={display}'
 python3 - "$RUNTIME_DIR/chromium-policy.json" <<'PY'
 import json
 import sys
@@ -138,7 +150,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"${FAKE_DOCKER_LOG:?}"' \
   'if [[ "$*" == *"config --format json"* ]]; then' \
   '  cat <<'\''JSON'\''' \
-  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"0","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
+  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_CAPTURE_VIDEO_CODEC":"h264","NEKO_CAPTURE_VIDEO_PIPELINE":"ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"1","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
   'JSON' \
   '  exit 0' \
   'fi' \
@@ -268,6 +280,8 @@ grep --fixed-strings -- 'target: /etc/chromium/policies/managed/policies.json' <
   || fail "Compose must mount the persistent Chromium policy"
 grep --fixed-strings -- 'NEKO_SERVER_BIND: 0.0.0.0:8080' <<<"$resolved_runtime" >/dev/null \
   || fail "Neko must accept readiness probes from the private Compose network"
+grep --fixed-strings -- 'ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink' <<<"$resolved_runtime" >/dev/null \
+  || fail "Compose must render the H.264 capture pipeline from .env.example intact"
 
 mkdir -p "$root_compose_fixture/runtime" "$root_compose_fixture/control"
 cp "$REPO_DIR/compose.yaml" "$root_compose_fixture/compose.yaml"

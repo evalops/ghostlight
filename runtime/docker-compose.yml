@@ -30,11 +30,17 @@ services:
       # Neko defaults to container-local loopback; control readiness uses the private Compose network.
       NEKO_SERVER_BIND: "0.0.0.0:8080"
       NEKO_DESKTOP_SCREEN: "${NEKO_DESKTOP_SCREEN:-1920x1080@30}"
+      # Neko forces VP8 when no capture pipeline is configured, so H.264 needs both the
+      # codec and a matching pipeline. VP8 revert: NEKO_CAPTURE_VIDEO_CODEC=vp8 plus an
+      # empty NEKO_CAPTURE_VIDEO_PIPELINE (the upstream default VP8 pipeline is implicit).
+      # The pipeline framerate cap must match NEKO_DESKTOP_SCREEN; both default to 30.
+      NEKO_CAPTURE_VIDEO_CODEC: "${NEKO_CAPTURE_VIDEO_CODEC:-h264}"
+      NEKO_CAPTURE_VIDEO_PIPELINE: "${NEKO_CAPTURE_VIDEO_PIPELINE-ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink}"
       NEKO_MEMBER_MULTIUSER_USER_PASSWORD: "${NEKO_USER_PASSWORD:?generate NEKO_USER_PASSWORD and set it in runtime/.env}"
       NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: "${NEKO_ADMIN_PASSWORD:?generate NEKO_ADMIN_PASSWORD and set it in runtime/.env}"
       NEKO_WEBRTC_UDPMUX: "${NEKO_WEBRTC_UDPMUX:-52000}"
       NEKO_WEBRTC_TCPMUX: "${NEKO_WEBRTC_TCPMUX:-52000}"
-      NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-0}"
+      NEKO_WEBRTC_ICELITE: "${NEKO_WEBRTC_ICELITE:-1}"
       NEKO_WEBRTC_NAT1TO1: "${NEKO_WEBRTC_NAT1TO1:-127.0.0.1}"
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null || exit 1"]

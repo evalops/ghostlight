@@ -73,6 +73,8 @@ NEKO_WEBRTC_NAT1TO1=<linux-host>
 
 Use `127.0.0.1` for a Linux-local stack. `GHOSTLIGHT_BIND_ADDRESS` controls the host interface for the control, viewer, and WebRTC port publications. Preflight accepts literal IPv4 loopback, link-local, or RFC 1918 addresses and IPv6 loopback, link-local, or unique-local addresses. It rejects hostnames, public addresses, and wildcard addresses.
 
+The viewer streams H.264 (constrained baseline, 3072 kbps, zero-latency x264) by default through `NEKO_CAPTURE_VIDEO_CODEC` and `NEKO_CAPTURE_VIDEO_PIPELINE` in `runtime/.env`. Neko forces VP8 when no capture pipeline is configured, so reverting to VP8 takes both changes: `NEKO_CAPTURE_VIDEO_CODEC=vp8` and an empty `NEKO_CAPTURE_VIDEO_PIPELINE`. `NEKO_DESKTOP_SCREEN` defaults to `1920x1080@30`; `1920x1080@60` is a supported knob, and the `framerate=30/1` cap in `NEKO_CAPTURE_VIDEO_PIPELINE` must change to `framerate=60/1` with it. `NEKO_WEBRTC_ICELITE=1` runs Neko's server-side ICE lite agent, which suits the trusted-LAN deployment and stays compatible with the full-ICE WKWebView client.
+
 Validate and start the stack:
 
 ```sh
@@ -200,9 +202,9 @@ tools/collect-performance.sh
 
 The Playwright client authenticates to Neko and samples inbound WebRTC for ten seconds. It records decoded frames, dropped frames, received bytes, bitrate, negotiated codec, H.264 receiver capability, a dispatch-to-next-presented-frame phase, one-second container statistics, Neko pipeline logs, a transcript, and SHA-256 receipts under `output/playwright/performance/`. It fails when no decoded inbound video frames appear. The harness does not prove that the input caused the next frame, so this phase is not an input-latency measurement.
 
-Set `GHOSTLIGHT_PERFORMANCE_CODEC=h264` for a measurement-only H.264 preference run. The H.264 setting does not change the runtime default. Retain the pinned Neko default until paired default/H.264 receipts and a native WKWebView decode receipt support a change. The phase excludes physical keyboard polling and display scanout.
+`GHOSTLIGHT_PERFORMANCE_CODEC=h264` reorders the Playwright client's codec preference toward H.264; `default` (the unset value) leaves the negotiation to the runtime. The runtime default is now H.264, so a default-preference run against the stock stack already records an H.264 receipt. For a paired comparison, capture one run against the H.264 default and one against a VP8-reverted stack (`NEKO_CAPTURE_VIDEO_CODEC=vp8` plus an empty `NEKO_CAPTURE_VIDEO_PIPELINE`). The native WKWebView decode receipt — power-efficient decoder use, decode time, and CPU on the Mac client — is still outstanding. The phase excludes physical keyboard polling and display scanout.
 
-The committed [VP8 measurement](docs/performance/2026-08-12-vp8-baseline/README.md) captured 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, a 72.43 ms dispatch-to-next-presented-frame phase, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB on `2026-08-12`. The next frame was not proven to have been caused by the input, so 72.43 ms is not input latency. Its transcript records a working-tree source label instead of an exact commit SHA. The browser advertised H.264 receive support, but no paired H.264 or native WKWebView decode receipt exists.
+The committed [VP8 measurement](docs/performance/2026-08-12-vp8-baseline/README.md) captured 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, a 72.43 ms dispatch-to-next-presented-frame phase, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB on `2026-08-12`. The next frame was not proven to have been caused by the input, so 72.43 ms is not input latency. Its transcript records a working-tree source label instead of an exact commit SHA. The browser advertised H.264 receive support, and the runtime has since switched its default to H.264; the paired VP8/H.264 rerun and the native WKWebView decode receipt remain outstanding.
 
 ## Container updates
 

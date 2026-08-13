@@ -14,6 +14,9 @@ CDP_PORT="${GHOSTLIGHT_ACCEPTANCE_CDP_PORT:-29280}"
 MARKER="${GHOSTLIGHT_ACCEPTANCE_MARKER:-synthetic-$(date -u +%Y%m%dT%H%M%SZ)}"
 SKIP_PROFILE_CHECK="${GHOSTLIGHT_ACCEPTANCE_SKIP_PROFILE_CHECK:-0}"
 share_viewer_network="${GHOSTLIGHT_ACCEPTANCE_SHARE_VIEWER_NETWORK:-0}"
+# H.264 needs both the codec and a matching pipeline; Neko forces VP8 when the pipeline is empty.
+NEKO_VIDEO_CODEC="${GHOSTLIGHT_ACCEPTANCE_VIDEO_CODEC:-h264}"
+NEKO_VIDEO_PIPELINE="${GHOSTLIGHT_ACCEPTANCE_VIDEO_PIPELINE:-ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink}"
 DEFAULT_NEKO_IMAGE_REF="$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$ROOT_DIR/runtime/.env.example")"
 [[ "$DEFAULT_NEKO_IMAGE_REF" =~ ^ghcr\.io/(m1k1o/neko/chromium|evalops/ghostlight-viewer)@sha256:[0-9a-f]{64}$ ]] || {
   printf 'runtime/.env.example does not contain a canonical Neko image pin\n' >&2
@@ -82,6 +85,8 @@ CHROMIUM_PROFILE_DIR=$PROFILE_DIR
 NEKO_USER_PASSWORD=acceptance-user-password
 NEKO_ADMIN_PASSWORD=acceptance-admin-password
 NEKO_DESKTOP_SCREEN=1920x1080@30
+NEKO_CAPTURE_VIDEO_CODEC=$NEKO_VIDEO_CODEC
+NEKO_CAPTURE_VIDEO_PIPELINE=$NEKO_VIDEO_PIPELINE
 NEKO_WEBRTC_UDPMUX=$WEBRTC_PORT
 NEKO_WEBRTC_TCPMUX=$WEBRTC_PORT
 NEKO_WEBRTC_ICELITE=0
