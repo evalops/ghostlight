@@ -18,6 +18,23 @@ enum SurfaceState: Equatable {
     case failed(String)
 }
 
+enum CommandStatus: Equatable {
+    case idle
+    case pending(Int)
+    case failed(code: String, message: String)
+}
+
+enum NativeBrowserAction: CaseIterable, Equatable {
+    case focusLocation
+    case newTab
+    case closeTab
+    case reload
+    case goBack
+    case goForward
+    case nextTab
+    case previousTab
+}
+
 @MainActor
 final class SessionViewModel: ObservableObject {
     @Published var controlOrigin: String
@@ -28,6 +45,8 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var session: BrowserSession?
     @Published private(set) var stream: StreamConnection?
     @Published private(set) var commandError: String?
+    @Published private(set) var commandStatus: CommandStatus = .idle
+    @Published private(set) var addressFocusRequest = 0
 
     static let originKey = "GhostlightControlOrigin"
     static let sessionIDKey = "GhostlightSessionID"
@@ -45,6 +64,10 @@ final class SessionViewModel: ObservableObject {
     private var leaseTask: Task<Void, Never>?
     private var eventsTask: Task<Void, Never>?
     private var lifecycleID = UUID()
+    private var submissionsByKey: [String: CommandSubmission] = [:]
+    private var submissionsByReceiptID: [String: CommandSubmission] = [:]
+    private var receiptsByID: [String: CommandReceipt] = [:]
+    private var failedSubmission: CommandSubmission?
 
     init(
         client: any SessionServicing = SessionClient(),
@@ -108,6 +131,7 @@ final class SessionViewModel: ObservableObject {
         controlState = .connecting
         surfaceState = .idle
         commandError = nil
+        clearCommandTracking()
 
         let origin: URL
         do {
@@ -173,9 +197,11 @@ final class SessionViewModel: ObservableObject {
         addressDraft = ""
         controlState = .disconnected
         surfaceState = .idle
+        clearCommandTracking()
     }
 
     func apply(_ incoming: BrowserSession) {
+        incoming.commandReceipts.forEach { accept($0, submission: submissionsByReceiptID[$0.id]) }
         if let current = session, incoming.revision <= current.revision { return }
         let activeTabChanged = session?.activeTabID != incoming.activeTabID
         session = incoming
@@ -207,6 +233,45 @@ final class SessionViewModel: ObservableObject {
     func newTab() { send(.init(type: .newTab, url: "https://www.google.com", expectedRevision: session?.revision ?? 0)) }
     func closeTab(_ id: String) { send(.init(type: .closeTab, tabID: id, expectedRevision: session?.revision ?? 0)) }
     func activateTab(_ id: String) { send(.init(type: .activateTab, tabID: id, expectedRevision: session?.revision ?? 0)) }
+
+    func canPerform(_ action: NativeBrowserAction) -> Bool {
+        guard canControl else { return false }
+        switch action {
+        case .focusLocation, .closeTab, .reload, .goBack, .goForward:
+            return activeTab != nil
+        case .nextTab, .previousTab:
+            return (session?.tabs.count ?? 0) > 1
+        case .newTab:
+            return session != nil
+        }
+    }
+
+    func perform(_ action: NativeBrowserAction) {
+        guard canPerform(action) else { return }
+        switch action {
+        case .focusLocation:
+            addressFocusRequest &+= 1
+        case .newTab:
+            newTab()
+        case .closeTab:
+            if let id = activeTab?.id { closeTab(id) }
+        case .reload:
+            reload()
+        case .goBack:
+            goBack()
+        case .goForward:
+            goForward()
+        case .nextTab:
+            cycleTab(offset: 1)
+        case .previousTab:
+            cycleTab(offset: -1)
+        }
+    }
+
+    func retryFailedCommand() {
+        guard let failedSubmission, canControl else { return }
+        submit(failedSubmission)
+    }
 
     func navigate() {
         navigate(to: addressDraft)
@@ -289,22 +354,93 @@ final class SessionViewModel: ObservableObject {
 
     private func send(_ command: BrowserCommand) {
         guard let context = commandContext else { return }
+        let submission = CommandSubmission(idempotencyKey: UUID().uuidString.lowercased(), command: command)
+        submit(submission, context: context)
+    }
+
+    private func submit(_ submission: CommandSubmission) {
+        guard let context = commandContext else { return }
+        submit(submission, context: context)
+    }
+
+    private func submit(
+        _ submission: CommandSubmission,
+        context: (origin: URL, apiToken: String, sessionID: String, token: String)
+    ) {
         commandError = nil
+        failedSubmission = nil
+        submissionsByKey[submission.idempotencyKey] = submission
+        updateCommandStatus()
         Task { [weak self] in
             guard let self else { return }
             do {
-                _ = try await client.sendCommand(
+                let receipt = try await client.sendCommand(
                     at: context.origin,
                     apiToken: context.apiToken,
                     sessionID: context.sessionID,
                     token: context.token,
-                    idempotencyKey: UUID().uuidString.lowercased(),
-                    command: command
+                    idempotencyKey: submission.idempotencyKey,
+                    command: submission.command
                 )
+                accept(receipt, submission: submission)
             } catch {
+                submissionsByKey.removeValue(forKey: submission.idempotencyKey)
+                failedSubmission = submission
                 commandError = error.localizedDescription
+                commandStatus = .failed(code: "request_failed", message: error.localizedDescription)
             }
         }
+    }
+
+    private func accept(_ receipt: CommandReceipt, submission: CommandSubmission?) {
+        if let submission {
+            submissionsByKey.removeValue(forKey: submission.idempotencyKey)
+            submissionsByReceiptID[receipt.id] = submission
+        }
+        if let existing = receiptsByID[receipt.id], existing.state != .queued, receipt.state == .queued {
+            updateCommandStatus()
+            return
+        }
+        receiptsByID[receipt.id] = receipt
+        switch receipt.state {
+        case .queued:
+            break
+        case .applied:
+            submissionsByReceiptID.removeValue(forKey: receipt.id)
+            if failedSubmission?.idempotencyKey == submission?.idempotencyKey { failedSubmission = nil }
+        case .failed:
+            failedSubmission = submission ?? submissionsByReceiptID[receipt.id]
+        }
+        updateCommandStatus()
+    }
+
+    private func updateCommandStatus() {
+        if let failed = receiptsByID.values
+            .filter({ $0.state == .failed })
+            .max(by: { $0.sequence < $1.sequence }) {
+            commandStatus = .failed(
+                code: failed.errorCode ?? "command_failed",
+                message: failed.error ?? failed.errorCode ?? "The browser command failed."
+            )
+            return
+        }
+        let pending = submissionsByKey.count + receiptsByID.values.filter { $0.state == .queued }.count
+        commandStatus = pending == 0 ? .idle : .pending(pending)
+    }
+
+    private func cycleTab(offset: Int) {
+        guard let tabs = session?.tabs, tabs.count > 1 else { return }
+        let activeIndex = tabs.firstIndex(where: { $0.id == activeTab?.id }) ?? 0
+        let nextIndex = (activeIndex + offset + tabs.count) % tabs.count
+        activateTab(tabs[nextIndex].id)
+    }
+
+    private func clearCommandTracking() {
+        submissionsByKey.removeAll()
+        submissionsByReceiptID.removeAll()
+        receiptsByID.removeAll()
+        failedSubmission = nil
+        commandStatus = .idle
     }
 
     private var commandContext: (origin: URL, apiToken: String, sessionID: String, token: String)? {
@@ -397,4 +533,9 @@ final class SessionViewModel: ObservableObject {
         let interval = max(0, date.timeIntervalSinceNow)
         try await Task.sleep(for: .seconds(interval))
     }
+}
+
+private struct CommandSubmission: Equatable {
+    let idempotencyKey: String
+    let command: BrowserCommand
 }

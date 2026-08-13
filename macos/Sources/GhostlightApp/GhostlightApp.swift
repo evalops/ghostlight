@@ -3,12 +3,55 @@ import SwiftUI
 
 @main
 struct GhostlightApp: App {
+    @StateObject private var viewModel = SessionViewModel()
+
     var body: some Scene {
         WindowGroup("Ghostlight") {
-            ContentView()
+            ContentView(viewModel: viewModel)
         }
         .defaultSize(width: 1180, height: 760)
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            GhostlightCommands(viewModel: viewModel)
+        }
+    }
+}
+
+private struct GhostlightCommands: Commands {
+    @ObservedObject var viewModel: SessionViewModel
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("New Tab") { viewModel.perform(.newTab) }
+                .keyboardShortcut("t", modifiers: .command)
+                .disabled(!viewModel.canPerform(.newTab))
+            Button("Close Tab") { viewModel.perform(.closeTab) }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(!viewModel.canPerform(.closeTab))
+        }
+
+        CommandMenu("Navigate") {
+            Button("Open Location…") { viewModel.perform(.focusLocation) }
+                .keyboardShortcut("l", modifiers: .command)
+                .disabled(!viewModel.canPerform(.focusLocation))
+            Divider()
+            Button("Back") { viewModel.perform(.goBack) }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!viewModel.canPerform(.goBack))
+            Button("Forward") { viewModel.perform(.goForward) }
+                .keyboardShortcut("]", modifiers: .command)
+                .disabled(!viewModel.canPerform(.goForward))
+            Button("Reload Page") { viewModel.perform(.reload) }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(!viewModel.canPerform(.reload))
+            Divider()
+            Button("Show Next Tab") { viewModel.perform(.nextTab) }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+                .disabled(!viewModel.canPerform(.nextTab))
+            Button("Show Previous Tab") { viewModel.perform(.previousTab) }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+                .disabled(!viewModel.canPerform(.previousTab))
+        }
     }
 }
 
@@ -32,7 +75,7 @@ private struct HomeDestination: Identifiable {
 }
 
 struct ContentView: View {
-    @StateObject private var viewModel = SessionViewModel()
+    @ObservedObject var viewModel: SessionViewModel
     @FocusState private var addressFocused: Bool
     @State private var showingConnection = false
     @State private var showingFileImporter = false
@@ -64,6 +107,9 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.session?.id) { _, sessionID in
             if sessionID != nil { showingHome = true }
+        }
+        .onChange(of: viewModel.addressFocusRequest) { _, _ in
+            addressFocused = true
         }
     }
 
@@ -203,6 +249,7 @@ struct ContentView: View {
             .help("New tab")
 
             Spacer(minLength: 6)
+            commandBadge
             controlBadge
             Button {
                 showingConnection = true
@@ -510,6 +557,28 @@ struct ContentView: View {
             .frame(width: 34, height: 34)
             Text("Ghostlight")
                 .font(.system(.headline, design: .rounded).weight(.semibold))
+        }
+    }
+
+    @ViewBuilder
+    private var commandBadge: some View {
+        switch viewModel.commandStatus {
+        case .idle:
+            EmptyView()
+        case let .pending(count):
+            Label(count == 1 ? "Sending" : "Sending \(count)", systemImage: "clock")
+                .foregroundStyle(.secondary)
+                .help("Waiting for the browser to finish")
+        case let .failed(code, message):
+            Button {
+                viewModel.retryFailedCommand()
+            } label: {
+                Label("Command failed", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canControl)
+            .help("\(code): \(message). Retry with the same command identifier.")
         }
     }
 

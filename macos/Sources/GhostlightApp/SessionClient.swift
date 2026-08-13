@@ -52,7 +52,7 @@ protocol SessionServicing: Sendable {
     func acquireLease(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> ControllerLease
     func renewLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws -> ControllerLease
     func releaseLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws
-    func sendCommand(at origin: URL, apiToken: String, sessionID: String, token: String, idempotencyKey: String, command: BrowserCommand) async throws -> BrowserCommand
+    func sendCommand(at origin: URL, apiToken: String, sessionID: String, token: String, idempotencyKey: String, command: BrowserCommand) async throws -> CommandReceipt
     func uploadAttachment(at origin: URL, apiToken: String, sessionID: String, token: String, fileURL: URL) async throws -> Attachment
     func createStream(at origin: URL, apiToken: String, sessionID: String) async throws -> StreamConnection
 }
@@ -148,7 +148,7 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
         token: String,
         idempotencyKey: String,
         command: BrowserCommand
-    ) async throws -> BrowserCommand {
+    ) async throws -> CommandReceipt {
         try await send(
             .post,
             origin: origin,

@@ -19,6 +19,28 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertNil(session.stream)
     }
 
+    func testBrowserSessionDecodesQueuedAndTerminalCommandReceipts() throws {
+        let payload = Self.sessionJSON.replacingOccurrences(
+            of: "\"active_tab_id\":\"tab-1\"",
+            with: #"""
+            "active_tab_id":"tab-1","command_receipts":[
+              {"id":"command-queued","sequence":1,"session_id":"session-1","type":"reload","tab_id":"tab-1","expected_revision":7,"lease_epoch":2,"state":"queued","created_at":"2026-08-13T12:00:02Z"},
+              {"id":"command-failed","sequence":2,"session_id":"session-1","type":"back","tab_id":"tab-1","expected_revision":7,"lease_epoch":2,"state":"failed","error_code":"navigation_failed","error":"History entry unavailable","result":{"retryable":false},"resulting_revision":8,"completed_at":"2026-08-13T12:00:03Z","created_at":"2026-08-13T12:00:02Z"}
+            ]
+            """#
+        )
+
+        let session = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(payload.utf8))
+
+        XCTAssertEqual(session.commandReceipts.map(\.id), ["command-queued", "command-failed"])
+        XCTAssertEqual(session.commandReceipts[0].state, .queued)
+        XCTAssertEqual(session.commandReceipts[1].state, .failed)
+        XCTAssertEqual(session.commandReceipts[1].errorCode, "navigation_failed")
+        XCTAssertEqual(session.commandReceipts[1].resultingRevision, 8)
+        XCTAssertNotNil(session.commandReceipts[1].completedAt)
+        XCTAssertEqual(session.commandReceipts[1].result, .object(["retryable": .bool(false)]))
+    }
+
     func testSessionControllerSummaryDecodesWithoutLeaseSecret() throws {
         let payload = Self.sessionJSON.replacingOccurrences(
             of: "\"controller\":null",
@@ -157,6 +179,24 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(command?["expected_revision"] as? Int, 7)
     }
 
+    func testCommandSubmissionDecodesQueuedReceipt() async throws {
+        NativeSessionURLProtocol.requestHandler = { request in
+            (Self.response(for: request, status: 202), Data(Self.commandJSON.utf8))
+        }
+
+        let receipt = try await SessionClient(session: makeSession()).sendCommand(
+            at: try XCTUnwrap(URL(string: "https://control.example.test")),
+            apiToken: "api-secret",
+            sessionID: "session-1",
+            token: "secret",
+            idempotencyKey: "command-key",
+            command: BrowserCommand(type: .reload, tabID: "tab-1", expectedRevision: 7)
+        )
+
+        XCTAssertEqual(receipt.id, "command-1")
+        XCTAssertEqual(receipt.state, .queued)
+    }
+
     func testMediaReadinessRequiresConnectedPeerAndDecodedFrame() {
         let script = MediaReadinessSignal.userScript
 
@@ -288,6 +328,111 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertFalse(viewModel.canControl)
     }
 
+    @MainActor
+    func testQueuedReceiptTransitionsToAppliedAtSameSessionRevision() async throws {
+        let service = NativeSessionServiceStub(receipts: [Self.queuedReceipt])
+        let viewModel = try makeControllingViewModel(service: service)
+
+        viewModel.perform(.reload)
+        await service.waitForCommandCount(1)
+        await Task.yield()
+        XCTAssertEqual(viewModel.commandStatus, .pending(1))
+
+        var event = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
+        event.commandReceipts = [Self.appliedReceipt]
+        viewModel.apply(event)
+
+        XCTAssertEqual(viewModel.commandStatus, .idle)
+    }
+
+    @MainActor
+    func testQueuedReceiptTransitionsToFailedAndRetryReusesSubmission() async throws {
+        let service = NativeSessionServiceStub(receipts: [Self.queuedReceipt, Self.failedReceipt])
+        let viewModel = try makeControllingViewModel(service: service)
+
+        viewModel.perform(.goBack)
+        await service.waitForCommandCount(1)
+        await Task.yield()
+        var event = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
+        event.commandReceipts = [Self.failedReceipt]
+        viewModel.apply(event)
+
+        XCTAssertEqual(
+            viewModel.commandStatus,
+            .failed(code: "navigation_failed", message: "History entry unavailable")
+        )
+
+        viewModel.retryFailedCommand()
+        await service.waitForCommandCount(2)
+        let submissions = service.commandSubmissions
+        XCTAssertEqual(submissions.map(\.idempotencyKey), [submissions[0].idempotencyKey, submissions[0].idempotencyKey])
+        XCTAssertEqual(submissions.map(\.command), [submissions[0].command, submissions[0].command])
+    }
+
+    @MainActor
+    func testNativeCommandActionsRouteExactlyOnceAndCycleTabs() async throws {
+        let service = NativeSessionServiceStub(receipts: Self.routableActions.enumerated().map { index, action in
+            Self.receipt(id: "command-\(index)", type: action.expectedCommandType, state: .queued)
+        })
+        let viewModel = try makeControllingViewModel(service: service, includeSecondTab: true)
+
+        for action in Self.routableActions {
+            viewModel.perform(action)
+        }
+        await service.waitForCommandCount(Self.routableActions.count)
+
+        XCTAssertEqual(
+            service.commandSubmissions.map(\.command.type.rawValue).sorted(),
+            Self.routableActions.map(\.expectedCommandType.rawValue).sorted()
+        )
+        XCTAssertEqual(service.commandSubmissions.count, Self.routableActions.count)
+        viewModel.perform(.focusLocation)
+        XCTAssertEqual(viewModel.addressFocusRequest, 1)
+        XCTAssertEqual(service.commandSubmissions.count, Self.routableActions.count)
+    }
+
+    @MainActor
+    func testObserverNativeCommandActionsDoNotSubmit() async throws {
+        let service = NativeSessionServiceStub(receipts: [])
+        let viewModel = SessionViewModel(
+            client: service,
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            autoConnect: false
+        )
+        viewModel.apply(try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8)))
+        viewModel.becomeObserver()
+
+        NativeBrowserAction.allCases.forEach(viewModel.perform)
+        await Task.yield()
+
+        XCTAssertTrue(service.commandSubmissions.isEmpty)
+        XCTAssertEqual(viewModel.addressFocusRequest, 0)
+    }
+
+    @MainActor
+    private func makeControllingViewModel(
+        service: NativeSessionServiceStub,
+        includeSecondTab: Bool = false
+    ) throws -> SessionViewModel {
+        let viewModel = SessionViewModel(
+            client: service,
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            now: { Date(timeIntervalSince1970: 1_000) },
+            autoConnect: false
+        )
+        var session = try SessionJSON.decoder.decode(BrowserSession.self, from: Data(Self.sessionJSON.utf8))
+        if includeSecondTab {
+            session.tabs.append(
+                BrowserTab(id: "tab-2", title: "Second", url: "https://second.example", active: false, loading: false, faviconURL: nil)
+            )
+        }
+        viewModel.controlOrigin = "https://control.example.test"
+        viewModel.apiToken = "api-secret"
+        viewModel.apply(session)
+        viewModel.installLease(try SessionJSON.decoder.decode(ControllerLease.self, from: Data(Self.leaseJSON.utf8)))
+        return viewModel
+    }
+
     private func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [NativeSessionURLProtocol.self]
@@ -337,6 +482,109 @@ final class NativeSessionTests: XCTestCase {
       "lease_epoch":2,"state":"queued","created_at":"2026-08-13T12:00:02Z"
     }
     """#
+
+    private static let queuedReceipt = receipt(id: "command-1", type: .reload, state: .queued)
+    private static let appliedReceipt = receipt(id: "command-1", type: .reload, state: .applied)
+    private static let failedReceipt = receipt(
+        id: "command-1",
+        type: .goBack,
+        state: .failed,
+        errorCode: "navigation_failed",
+        error: "History entry unavailable"
+    )
+    private static let routableActions: [NativeBrowserAction] = [
+        .newTab, .closeTab, .reload, .goBack, .goForward, .nextTab, .previousTab,
+    ]
+
+    private static func receipt(
+        id: String,
+        type: BrowserCommandType,
+        state: CommandReceiptState,
+        errorCode: String? = nil,
+        error: String? = nil
+    ) -> CommandReceipt {
+        CommandReceipt(
+            id: id,
+            sequence: 1,
+            sessionID: "session-1",
+            type: type,
+            url: nil,
+            tabID: "tab-1",
+            attachmentID: nil,
+            expectedRevision: 7,
+            leaseEpoch: 2,
+            state: state,
+            errorCode: errorCode,
+            error: error,
+            result: nil,
+            resultingRevision: state == .queued ? nil : 8,
+            acknowledgedAt: nil,
+            completedAt: state == .queued ? nil : Date(timeIntervalSince1970: 1_001),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+    }
+}
+
+private extension NativeBrowserAction {
+    var expectedCommandType: BrowserCommandType {
+        switch self {
+        case .newTab: .newTab
+        case .closeTab: .closeTab
+        case .reload: .reload
+        case .goBack: .goBack
+        case .goForward: .goForward
+        case .nextTab, .previousTab: .activateTab
+        case .focusLocation: fatalError("Focus Location does not submit a browser command")
+        }
+    }
+}
+
+private final class NativeSessionServiceStub: SessionServicing, @unchecked Sendable {
+    struct Submission {
+        let idempotencyKey: String
+        let command: BrowserCommand
+    }
+
+    private let lock = NSLock()
+    private var receipts: [CommandReceipt]
+    private var submissions: [Submission] = []
+
+    init(receipts: [CommandReceipt]) {
+        self.receipts = receipts
+    }
+
+    var commandSubmissions: [Submission] {
+        lock.withLock { submissions }
+    }
+
+    func waitForCommandCount(_ count: Int) async {
+        for _ in 0..<100 where commandSubmissions.count < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession { fatalError() }
+    func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession { fatalError() }
+    func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int) async throws -> BrowserSession? { nil }
+    func acquireLease(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> ControllerLease { fatalError() }
+    func renewLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws -> ControllerLease { fatalError() }
+    func releaseLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws {}
+    func uploadAttachment(at origin: URL, apiToken: String, sessionID: String, token: String, fileURL: URL) async throws -> Attachment { fatalError() }
+    func createStream(at origin: URL, apiToken: String, sessionID: String) async throws -> StreamConnection { fatalError() }
+
+    func sendCommand(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        token: String,
+        idempotencyKey: String,
+        command: BrowserCommand
+    ) async throws -> CommandReceipt {
+        lock.withLock {
+            submissions.append(.init(idempotencyKey: idempotencyKey, command: command))
+            return receipts.removeFirst()
+        }
+    }
 }
 
 private final class NativeSessionURLProtocol: URLProtocol {
