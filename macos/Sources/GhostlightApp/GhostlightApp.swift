@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -6,114 +7,531 @@ struct GhostlightApp: App {
         WindowGroup("Ghostlight") {
             ContentView()
         }
+        .defaultSize(width: 1180, height: 760)
+        .windowStyle(.hiddenTitleBar)
     }
+}
+
+private struct HomeDestination: Identifiable {
+    let name: String
+    let host: String
+    let url: String
+    let symbol: String
+    let color: Color
+
+    var id: String { url }
+
+    static let defaults = [
+        HomeDestination(name: "Gmail", host: "mail.google.com", url: "https://mail.google.com", symbol: "envelope.fill", color: .red),
+        HomeDestination(name: "Google Calendar", host: "calendar.google.com", url: "https://calendar.google.com", symbol: "calendar", color: .blue),
+        HomeDestination(name: "Google Drive", host: "drive.google.com", url: "https://drive.google.com", symbol: "externaldrive.fill", color: .orange),
+        HomeDestination(name: "GitHub", host: "github.com", url: "https://github.com", symbol: "chevron.left.forwardslash.chevron.right", color: .primary),
+        HomeDestination(name: "ChatGPT", host: "chatgpt.com", url: "https://chatgpt.com", symbol: "bubble.left.and.bubble.right.fill", color: .green),
+        HomeDestination(name: "Slack", host: "app.slack.com", url: "https://app.slack.com", symbol: "number", color: .purple),
+    ]
 }
 
 struct ContentView: View {
     @StateObject private var viewModel = SessionViewModel()
+    @FocusState private var addressFocused: Bool
+    @State private var showingConnection = false
+    @State private var showingFileImporter = false
+    @State private var showingHome = true
+    @State private var homeQuery = ""
 
     var body: some View {
-        Group {
-            if let viewerURL = viewModel.viewerURL {
-                connectedView(viewerURL: viewerURL)
-            } else {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+                .ignoresSafeArea()
+
+            if viewModel.session == nil || viewModel.streamURL == nil {
                 connectionView
+            } else {
+                browserShell
             }
         }
-        .frame(minWidth: 520, minHeight: 360)
+        .frame(minWidth: 760, minHeight: 520)
+        .sheet(isPresented: $showingConnection) {
+            connectionPanel(compact: true)
+                .frame(width: 460)
+                .padding(28)
+        }
+        .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.data]) { result in
+            if case let .success(url) = result { viewModel.attach(url) }
+        }
+        .onChange(of: addressFocused) { _, focused in
+            viewModel.setAddressFocused(focused)
+        }
+        .onChange(of: viewModel.session?.id) { _, sessionID in
+            if sessionID != nil { showingHome = true }
+        }
     }
 
     private var connectionView: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Ghostlight")
-                    .font(.largeTitle.bold())
-                Text("Connect to a Ghostlight control plane to open its browser viewer.")
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 18) {
+                Spacer()
+                brandMark
+                Text("Your browser, without the distance.")
+                    .font(.system(size: 36, weight: .semibold, design: .rounded))
+                    .tracking(-1.2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Ghostlight keeps Chromium running on your Linux host while this Mac feels like the browser itself.")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(4)
+                    .frame(maxWidth: 460, alignment: .leading)
+                Spacer()
+                Label("Persistent tabs · Native controls · WebRTC stream", systemImage: "sparkles")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(52)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.47, green: 0.29, blue: 0.95).opacity(0.17), .clear],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+
+            Divider()
+
+            connectionPanel(compact: false)
+                .frame(width: 420)
+                .padding(44)
+        }
+    }
+
+    private func connectionPanel(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            if compact {
+                Text("Connection")
+                    .font(.title2.bold())
+            } else {
+                Text("Open your workspace")
+                    .font(.title2.bold())
+                Text("Use the private address and API token from your Ghostlight host.")
                     .foregroundStyle(.secondary)
             }
 
-            Form {
-                TextField("Control-plane URL", text: $viewModel.controlPlaneURL)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("CONTROL PLANE")
+                    .font(.caption2.weight(.semibold))
+                    .tracking(0.7)
+                    .foregroundStyle(.secondary)
+                TextField("http://192.168.4.50:8080", text: $viewModel.controlOrigin)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit {
-                        viewModel.connect()
-                    }
-
-                HStack {
-                    Button("Connect") {
-                        viewModel.connect()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(viewModel.isConnecting)
-
-                    if viewModel.isConnecting {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Connecting…")
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                    .onSubmit(viewModel.connect)
             }
-            .formStyle(.grouped)
 
-            if case let .controlFailed(message) = viewModel.state {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("API TOKEN")
+                    .font(.caption2.weight(.semibold))
+                    .tracking(0.7)
+                    .foregroundStyle(.secondary)
+                SecureField("Required", text: $viewModel.apiToken)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(viewModel.connect)
+                Text("Held in memory for this app session. It is not written to preferences.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if case let .failed(message) = viewModel.controlState {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer()
+            Button(action: viewModel.connect) {
+                HStack {
+                    if case .connecting = viewModel.controlState {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(viewModel.controlState == .connecting ? "Connecting…" : "Open Ghostlight")
+                    Spacer()
+                    Image(systemName: "arrow.right")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .tint(Color(red: 0.43, green: 0.24, blue: 0.92))
+            .disabled(viewModel.controlState == .connecting)
+            .keyboardShortcut(.defaultAction)
         }
-        .padding(32)
     }
 
-    private func connectedView(viewerURL: URL) -> some View {
+    private var browserShell: some View {
         VStack(spacing: 0) {
-            ViewerWebView(
-                url: viewerURL,
-                reloadToken: viewModel.reloadToken,
-                onNavigationStarted: viewModel.viewerNavigationStarted,
-                onNavigationFinished: viewModel.viewerNavigationFinished,
-                onNavigationFailed: viewModel.viewerNavigationFailed
-            )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+            tabStrip
             Divider()
+            navigationBar
+            Divider()
+            viewerSurface
+        }
+        .background(.bar)
+    }
 
-            HStack(spacing: 12) {
-                statusLabel
-                Spacer()
-                if case .viewerFailed = viewModel.state {
-                    Button("Retry", systemImage: "arrow.clockwise") {
-                        viewModel.retryViewer()
+    private var tabStrip: some View {
+        HStack(spacing: 5) {
+            brandMark
+                .scaleEffect(0.72)
+                .frame(width: 30)
+                .padding(.trailing, 6)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(viewModel.session?.tabs ?? []) { tab in
+                        tabButton(tab)
                     }
-                } else if case .viewerLoaded = viewModel.state {
-                    Button("Reload", systemImage: "arrow.clockwise") {
-                        viewModel.reloadViewer()
-                    }
-                }
-                Button("Disconnect", systemImage: "rectangle.portrait.and.arrow.right") {
-                    viewModel.disconnect()
                 }
             }
+
+            Button {
+                viewModel.newTab()
+                showingHome = true
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 26, height: 24)
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canControl)
+            .help("New tab")
+
+            Spacer(minLength: 6)
+            controlBadge
+            Button {
+                showingConnection = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .buttonStyle(.plain)
+            .help("Connection settings")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 42)
+        .background(.ultraThinMaterial)
+    }
+
+    private func tabButton(_ tab: BrowserTab) -> some View {
+        Button {
+            viewModel.activateTab(tab.id)
+            showingHome = false
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: tab.loading ? "circle.dotted" : "globe")
+                    .font(.caption)
+                    .foregroundStyle(tab.active ? Color.accentColor : .secondary)
+                Text((tab.title ?? "").isEmpty ? tab.url : tab.title ?? tab.url)
+                    .lineLimit(1)
+                    .frame(maxWidth: 170, alignment: .leading)
+                if tab.active && viewModel.canControl {
+                    Button {
+                        viewModel.closeTab(tab.id)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.bold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close tab")
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(tab.active ? Color(nsColor: .controlBackgroundColor) : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!viewModel.canControl && !tab.active)
+    }
+
+    private var navigationBar: some View {
+        HStack(spacing: 8) {
+            navButton("house", help: "Home") { showingHome = true }
+            navButton("chevron.left", help: "Back", action: viewModel.goBack)
+            navButton("chevron.right", help: "Forward", action: viewModel.goForward)
+            navButton("arrow.clockwise", help: "Reload", action: viewModel.reload)
+
+            HStack(spacing: 8) {
+                Image(systemName: "lock.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                TextField("Search or enter address", text: $viewModel.addressDraft)
+                    .textFieldStyle(.plain)
+                    .focused($addressFocused)
+                    .onSubmit(openAddressDraft)
+                if viewModel.activeTab?.loading == true {
+                    ProgressView().controlSize(.mini)
+                }
+            }
+            .padding(.horizontal, 11)
+            .frame(height: 30)
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.8))
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.separator.opacity(0.55)))
+            .disabled(!viewModel.canControl)
+
+            Button {
+                showingFileImporter = true
+            } label: {
+                Image(systemName: "paperclip")
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canControl)
+            .help("Attach file")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+        .background(.bar)
+    }
+
+    private func navButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+        .disabled(!viewModel.canControl)
+        .help(help)
+    }
+
+    @ViewBuilder
+    private var viewerSurface: some View {
+        if let streamURL = viewModel.streamURL {
+            ZStack {
+                ViewerWebView(
+                    url: streamURL,
+                    reloadToken: streamURL.hashValue,
+                    onNavigationStarted: viewModel.viewerNavigationStarted,
+                    onNavigationFinished: viewModel.viewerNavigationFinished,
+                    onNavigationFailed: viewModel.viewerNavigationFailed,
+                    onMediaReady: viewModel.viewerMediaReady
+                )
+
+                switch viewModel.surfaceState {
+                case .idle, .loadingPage:
+                    surfaceOverlay(title: "Waking your browser", detail: "Connecting the native window to the live session.", progress: true)
+                case .pageReady:
+                    surfaceOverlay(title: "Starting the stream", detail: "The viewer is ready. Waiting for the first decoded frame.", progress: true)
+                case let .failed(message):
+                    surfaceOverlay(title: "Stream unavailable", detail: message, progress: false)
+                case .mediaReady:
+                    if showingHome { nativeHome }
+                }
+            }
+        }
+    }
+
+    private var nativeHome: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Home")
+                            .font(.system(size: 30, weight: .semibold))
+                        Text(viewModel.session?.name ?? "Browser")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Show current page") { showingHome = false }
+                        .buttonStyle(.bordered)
+                }
+
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search the web or enter an address", text: $homeQuery)
+                        .textFieldStyle(.plain)
+                        .font(.title3)
+                        .onSubmit(openHomeQuery)
+                    Text("RETURN")
+                        .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 48)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator.opacity(0.7)))
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Shortcuts")
+                        .font(.headline)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+                        ForEach(HomeDestination.defaults) { destination in
+                            destinationButton(destination)
+                        }
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 28) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Open tabs")
+                            .font(.headline)
+                        ForEach(Array((viewModel.session?.tabs ?? []).prefix(4))) { tab in
+                            Button {
+                                viewModel.activateTab(tab.id)
+                                showingHome = false
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: tab.active ? "circle.fill" : "circle")
+                                        .font(.system(size: 7))
+                                        .foregroundStyle(tab.active ? Color.accentColor : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text((tab.title ?? "").isEmpty ? tab.url : tab.title ?? tab.url)
+                                            .lineLimit(1)
+                                        Text(tab.url)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            Divider()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Tools")
+                            .font(.headline)
+                        homeTool("Upload a file to this session", symbol: "paperclip", enabled: viewModel.canControl) {
+                            showingFileImporter = true
+                        }
+                        homeTool("New browser tab", symbol: "plus.square", enabled: viewModel.canControl) {
+                            viewModel.newTab()
+                            showingHome = true
+                        }
+                        homeTool("Connection settings", symbol: "slider.horizontal.3") {
+                            showingConnection = true
+                        }
+                    }
+                    .frame(width: 220, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 46)
+            .padding(.vertical, 38)
+            .frame(maxWidth: 980)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func destinationButton(_ destination: HomeDestination) -> some View {
+        Button {
+            viewModel.navigate(to: destination.url)
+            showingHome = false
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: destination.symbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(destination.color)
+                    .frame(width: 30, height: 30)
+                    .background(destination.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(destination.name).fontWeight(.medium)
+                    Text(destination.host)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
             .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.separator.opacity(0.55)))
+        }
+        .buttonStyle(.plain)
+        .disabled(!viewModel.canControl)
+    }
+
+    private func homeTool(
+        _ title: String,
+        symbol: String,
+        enabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    private func openHomeQuery() {
+        guard SessionViewModel.navigationTarget(for: homeQuery) != nil else { return }
+        viewModel.navigate(to: homeQuery)
+        showingHome = false
+    }
+
+    private func openAddressDraft() {
+        guard SessionViewModel.navigationTarget(for: viewModel.addressDraft) != nil else { return }
+        viewModel.navigate()
+        showingHome = false
+    }
+
+    private func surfaceOverlay(title: String, detail: String, progress: Bool) -> some View {
+        VStack(spacing: 12) {
+            if progress { ProgressView().controlSize(.regular) }
+            Text(title).font(.headline)
+            Text(detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .shadow(color: .black.opacity(0.12), radius: 24, y: 10)
+    }
+
+    private var brandMark: some View {
+        HStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color(red: 0.08, green: 0.08, blue: 0.09))
+                Image(systemName: "key.fill")
+                    .rotationEffect(.degrees(-90))
+                    .foregroundStyle(Color(red: 0.55, green: 0.35, blue: 1))
+            }
+            .frame(width: 34, height: 34)
+            Text("Ghostlight")
+                .font(.system(.headline, design: .rounded).weight(.semibold))
         }
     }
 
     @ViewBuilder
-    private var statusLabel: some View {
-        switch viewModel.state {
-        case .loadingViewer:
-            Label("Loading viewer", systemImage: "hourglass")
-                .foregroundStyle(.secondary)
-        case .viewerLoaded:
-            Label("Viewer loaded", systemImage: "checkmark.circle.fill")
+    private var controlBadge: some View {
+        switch viewModel.controlState {
+        case .controller:
+            Label("Control", systemImage: "cursorarrow.rays")
                 .foregroundStyle(.green)
-        case let .viewerFailed(_, message):
-            Label("Viewer failed: \(message)", systemImage: "exclamationmark.triangle.fill")
+        case .observer:
+            Label("Observing", systemImage: "eye")
+                .foregroundStyle(.secondary)
+        case .expired:
+            Label("Lease expired", systemImage: "clock.badge.exclamationmark")
+                .foregroundStyle(.orange)
+        case .connecting:
+            Label("Connecting", systemImage: "ellipsis")
+                .foregroundStyle(.secondary)
+        case .failed:
+            Label("Offline", systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.red)
-                .lineLimit(2)
-        case .disconnected, .discoveringControl, .controlFailed:
+        case .disconnected:
             EmptyView()
         }
     }

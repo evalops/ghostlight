@@ -1,6 +1,6 @@
 # Ghostlight macOS client
 
-`GhostlightApp` is a SwiftUI client for macOS 14 and later. It discovers the configured Neko viewer with `GET /v1/viewer` and loads that URL in an embedded `WKWebView`.
+`GhostlightApp` is the native SwiftUI shell for macOS 14 and later. It resumes or creates the durable browser session, renders its tabs and navigation controls, acquires the exclusive controller lease, and embeds the session's WebRTC viewer in `WKWebView`.
 
 ## Build and run
 
@@ -22,37 +22,32 @@ The release script refuses tracked source changes, cross-builds arm64 and x86_64
 
 The app uses SwiftUI, WebKit, Foundation, and `URLSession`. `Package.swift` declares no third-party Swift package dependency.
 
-## Viewer discovery
+## Native session connection
 
-The connection field defaults to `http://localhost:8080`. Enter the control service origin and select **Connect**. The client appends `/v1/viewer`, sends a bodyless `GET` request with `Accept: application/json`, accepts an HTTP `2xx` response, and decodes this shape:
+Enter the control service origin and `GHOSTLIGHT_API_TOKEN`, then select **Open Ghostlight**. The client authenticates to the workspace/session API, resumes its saved session when possible, creates a stream descriptor, and attempts to acquire the controller lease. The API token is held only in process memory and is never written to `UserDefaults`.
 
-```json
-{"viewer_url":"http://<linux-host>:8081"}
-```
+The control and stream URLs must use HTTP or HTTPS, include a host, and contain no embedded username or password. Server, validation, timeout, network, transport, and decoding failures remain distinct user-visible errors.
 
-The control and viewer URLs must use HTTP or HTTPS, include a host, and contain no embedded username or password. Use an origin without a path for the shipped control service because its route is exactly `/v1/viewer`.
-
-Server error responses, URL validation errors, timeouts, offline-network errors, other transport errors, malformed HTTP responses, invalid JSON, and unsupported viewer URLs map to separate client errors. A server JSON error message appears with its HTTP status when decoding succeeds.
+After the stream connects, the native Home view provides web search, app shortcuts, open tabs, file attachment, and connection settings. Home shortcuts and searches submit the same revision-fenced browser commands as the toolbar. **Show current page** returns to the live WebRTC viewer without disconnecting it.
 
 ## Saved connection
 
-The client stores the control URL in `UserDefaults` after viewer discovery succeeds. On a later launch, that URL triggers automatic discovery. `GHOSTLIGHT_CONTROL_URL` overrides the saved value and also triggers automatic discovery for that launch.
+The client stores the control origin and durable session ID in `UserDefaults` after connection succeeds. `GHOSTLIGHT_CONTROL_URL` overrides the saved origin and `GHOSTLIGHT_API_TOKEN` supplies the memory-only token for unattended launch.
 
-**Disconnect** cancels the in-flight discovery task, removes the saved URL, resets viewer retry state, and prevents saved-URL connection on the next launch.
+Resetting the session cancels event and lease tasks and removes the saved session ID. Lease secrets are never persisted.
 
 ## Viewer state
 
 | State | Trigger | UI result |
 | --- | --- | --- |
-| Control discovery | **Connect** or automatic launch | Connection form shows progress. |
-| Viewer loading | Discovery returns a valid viewer URL or WebKit starts navigation | Embedded viewer and `Loading viewer` status. |
-| Viewer loaded | `WKNavigationDelegate` reports navigation completion | `Viewer loaded` status. |
-| Viewer failed | WebKit reports provisional or committed navigation failure, or its web-content process terminates | Error status and **Retry** button. |
-| Control failed | Discovery validation, transport, HTTP, or decoding failure | Connection form shows the mapped error. |
+| Connecting | **Open Ghostlight** or automatic launch | Resume/create session, stream, and lease requests run. |
+| Controller | Lease acquired and unexpired | Native tab, navigation, attachment, and address controls are enabled. |
+| Observer | Another client owns the lease | Stream and session updates remain visible; mutation controls are disabled. |
+| Page ready | WebKit finishes the same-origin viewer navigation | The shell waits for causal media readiness. |
+| Media ready | Connected peer plus decoded video frame | The loading surface clears and the live browser is authoritative. |
+| Failed | Control or WebKit reports a terminal error | The shell shows an actionable failure state. |
 
-`Viewer loaded` reports WebKit navigation completion. The client does not inspect Neko's authenticated session, ICE state, decoded frames, or WebRTC connection state.
-
-Automatic discovery from a saved or environment URL retries viewer navigation twice after the first reported failure. A third failure leaves the app in `Viewer failed`. A manual **Connect** does not start that automatic retry loop. **Retry** performs one user-requested load and returns to `Viewer failed` after another reported failure. **Reload** loads the discovered viewer entry URL again after a successful navigation. WebKit cancellation errors from superseded navigation are ignored.
+`Media ready` is intentionally stronger than document load: an injected observer requires a connected `RTCPeerConnection` and a decoded video frame before removing the loading surface. WebKit cancellation errors from superseded navigation remain ignored.
 
 The web view permits back and forward navigation gestures. Its network and web-content allowances come from `NSAllowsLocalNetworking` and `NSAllowsArbitraryLoadsInWebContent` in `Info.plist`.
 
@@ -63,6 +58,6 @@ swift test --package-path macos
 macos/package-app.sh
 ```
 
-The tests cover bodyless discovery requests, URL and response validation, HTTP and transport error mapping, saved and environment URL precedence, navigation state transitions, the two-retry limit, explicit retry behavior, redirect handling, disconnect cancellation, and saved-URL removal.
+The tests cover the control payload contract, API and lease authentication separation, idempotency and revision fences, 204 event polling, settings migration, memory-only secrets, monotonic session updates, focused address editing, lease gating, and causal media readiness.
 
-The Swift tests use URL and discovery stubs. They do not launch `Ghostlight.app`, authenticate to Neko, negotiate WebRTC, or inspect restored Chromium state.
+The Swift tests use URL stubs. They do not authenticate to Neko, negotiate a real WebRTC stream, or inspect restored Chromium state.

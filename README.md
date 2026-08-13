@@ -10,7 +10,7 @@ Ghostlight runs a persistent Chromium profile on Linux and streams the browser t
 
 ## Current scope
 
-Ghostlight supports one fixed Chromium profile, one Neko viewer, one macOS client, and a trusted private network. Docker Compose owns service startup, restart, and shutdown. The Go control service now keeps a durable workspace, browser-session catalog, tab snapshots, controller leases, command queue, stream descriptors, and attachment metadata. A Chromium extension reports tab state and applies bounded navigation and tab commands through an authenticated native-messaging bridge. Neko still carries browser media and input; the current macOS release continues to use legacy viewer discovery while the native session shell is completed separately.
+Ghostlight supports one fixed Chromium profile, one Neko viewer, one macOS client, and a trusted private network. Docker Compose owns service startup, restart, and shutdown. The Go control service keeps a durable workspace, browser-session catalog, tab snapshots, controller leases, command queue, stream descriptors, and attachment metadata. A Chromium extension reports tab state and applies bounded navigation and tab commands through an authenticated native-messaging bridge. Neko carries browser media and input while the native macOS shell presents tabs, navigation, files, controller ownership, and stream readiness directly.
 
 ## Daily-driver milestone
 
@@ -112,7 +112,7 @@ open macos/.build/Ghostlight.app
 
 The script creates an ad-hoc signed bundle at `macos/.build/Ghostlight.app` with identifier `org.evalops.Ghostlight`. The bundle has no Developer ID signature or notarization receipt.
 
-Enter the Linux control URL, such as `http://<linux-host>:8080`, and select **Connect**. The app requests `GET /v1/viewer`, saves the control URL after successful discovery, and loads the returned Neko URL in `WKWebView`. Sign in to Neko with `NEKO_USER_PASSWORD`.
+Enter the Linux control URL and `GHOSTLIGHT_API_TOKEN`, then select **Open Ghostlight**. The app resumes or creates the durable browser session, acquires its controller lease when available, and loads the stream URL in `WKWebView`. Sign in to Neko with `NEKO_USER_PASSWORD` when required.
 
 The status row distinguishes `Loading viewer`, `Viewer loaded`, and viewer navigation failure. `Viewer loaded` means WebKit finished the page navigation; it does not confirm a connected WebRTC media stream. Automatic launch from a saved control URL retries failed viewer navigation twice. **Retry** initiates one user-requested reload. **Disconnect** cancels discovery, clears the saved URL, and disables automatic connection on the next launch.
 

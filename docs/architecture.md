@@ -15,7 +15,7 @@ flowchart LR
     profile[("runtime/data/chromium")]
     web["Destination websites"]
 
-    app -->|"Legacy GET /v1/viewer"| control
+    app -->|"Authenticated sessions, leases, commands"| control
     control -->|"GET /health"| viewer
     agent <-->|"Authenticated heartbeat and commands"| control
     compose --> control
@@ -27,7 +27,7 @@ flowchart LR
     viewer <--> web
 ```
 
-Docker Compose starts one Neko Chromium container and one Go control container. Control persists one workspace and browser session, exclusive controller leases, stream descriptors, browser commands, tab snapshots, and attachment metadata. A Manifest V3 extension observes Chromium tabs and applies a bounded command set through a native-messaging host. The current macOS client still requests the configured viewer URL and loads the Neko web client in `WKWebView`; migration to the session API is a later slice. Neko continues to own viewer authentication, signaling, media transport, and input transport. Control carries no website traffic, viewer credentials, signaling, media, or input.
+Docker Compose starts one Neko Chromium container and one Go control container. Control persists one workspace and browser session, exclusive controller leases, stream descriptors, browser commands, tab snapshots, and attachment metadata. A Manifest V3 extension observes Chromium tabs and applies a bounded command set through a native-messaging host. The macOS client presents that session as native tabs and navigation around the Neko `WKWebView`. Neko continues to own viewer authentication, signaling, media transport, and input transport. Control carries no website traffic, viewer credentials, signaling, media, or input.
 
 ## Connection sequence
 
@@ -38,15 +38,17 @@ Docker Compose starts one Neko Chromium container and one Go control container. 
 5. The extension connects to the native host, authenticates with `GHOSTLIGHT_BRIDGE_TOKEN`, bootstraps the durable session, and reports the authoritative tab snapshot.
 6. An API client authenticates with `GHOSTLIGHT_API_TOKEN`, acquires the exclusive controller lease, and submits revision-fenced commands with the returned lease token.
 7. The bridge polls and applies each bounded Chromium command. It records completion locally before sending an idempotent acknowledgment; control retains the terminal status and result. It then publishes a new tab snapshot.
-8. The current macOS client sends legacy `GET /v1/viewer`; `WKWebView` loads the Neko page and negotiates WebRTC after Neko authentication.
+8. The macOS client resumes or creates the durable session, requests a stream descriptor, acquires the controller lease when available, and loads the Neko page in `WKWebView`.
+9. The native loading surface clears only after the embedded client reports a connected peer and a decoded video frame.
 
-The macOS `Viewer loaded` state occurs after step 6 when WebKit reports navigation completion. It is not evidence that steps 7 and 8 completed.
+WebKit navigation completion is only page readiness. The native `mediaReady` state after step 9 is the causal stream-readiness signal.
 
 ## State ownership
 
 | State | Owner | Location | Lifetime |
 | --- | --- | --- | --- |
-| Control URL | macOS client | `UserDefaults` | Saved after discovery; removed by **Disconnect**. |
+| Control URL and session ID | macOS client | `UserDefaults` | Saved after a successful session connection. |
+| Control API token | macOS client | Process memory | Never persisted; supplied in the connection UI or `GHOSTLIGHT_API_TOKEN`. |
 | Runtime configuration and Neko passwords | Linux operator | `runtime/.env` | Persists until the operator changes or removes the file. |
 | Viewer URL | Control process | `GHOSTLIGHT_VIEWER_URL` environment value | Recreated with the control container. |
 | Workspace, session, revision, lease epochs, commands, streams, tab snapshots, and attachment metadata | Control service | `ghostlight-control-state` SQLite volume | Persists across control-container recreation. |

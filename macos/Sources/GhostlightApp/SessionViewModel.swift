@@ -1,204 +1,400 @@
 import Combine
 import Foundation
 
-enum SessionViewState: Equatable {
+enum ControlState: Equatable {
     case disconnected
-    case discoveringControl
-    case loadingViewer(URL, retryAttempt: Int)
-    case viewerLoaded(URL)
-    case viewerFailed(URL, message: String)
-    case controlFailed(String)
+    case connecting
+    case controller(expiresAt: Date)
+    case observer
+    case expired
+    case failed(String)
+}
+
+enum SurfaceState: Equatable {
+    case idle
+    case loadingPage(URL)
+    case pageReady(URL)
+    case mediaReady(URL)
+    case failed(String)
 }
 
 @MainActor
 final class SessionViewModel: ObservableObject {
-    @Published var controlPlaneURL = "http://localhost:8080"
-    @Published private(set) var state: SessionViewState = .disconnected
-    @Published private(set) var reloadToken = 0
+    @Published var controlOrigin: String
+    @Published var apiToken: String
+    @Published var addressDraft = ""
+    @Published private(set) var controlState: ControlState = .disconnected
+    @Published private(set) var surfaceState: SurfaceState = .idle
+    @Published private(set) var session: BrowserSession?
+    @Published private(set) var stream: StreamConnection?
+    @Published private(set) var commandError: String?
 
-    private static let controlPlaneDefaultsKey = "GhostlightControlPlaneURL"
+    static let originKey = "GhostlightControlOrigin"
+    static let sessionIDKey = "GhostlightSessionID"
+    static let clientIDKey = "GhostlightClientID"
+    static let legacyOriginKey = "GhostlightControlPlaneURL"
 
-    private let client: any ViewerDiscovering
+    private let client: any SessionServicing
     private let defaults: UserDefaults
-    private var connectTask: Task<Void, Never>?
-    private var retryTask: Task<Void, Never>?
-    private var connectionID: UUID?
-    private var viewerEntryURL: URL?
-    private var automaticRetryEnabled = false
-    private var viewerRetryAttempt = 0
-
-    static let automaticRetryLimit = 2
+    private let now: @Sendable () -> Date
+    private let sleepUntil: @Sendable (Date) async throws -> Void
+    private(set) var clientID: String
+    private var lease: ControllerLease?
+    private var isAddressFocused = false
+    private var lifecycleTask: Task<Void, Never>?
+    private var leaseTask: Task<Void, Never>?
+    private var eventsTask: Task<Void, Never>?
+    private var lifecycleID = UUID()
 
     init(
-        client: any ViewerDiscovering = SessionClient(),
+        client: any SessionServicing = SessionClient(),
         defaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        now: @escaping @Sendable () -> Date = { Date() },
+        sleepUntil: @escaping @Sendable (Date) async throws -> Void = { date in
+            try await SessionViewModel.defaultSleepUntil(date)
+        },
         autoConnect: Bool = true
     ) {
         self.client = client
         self.defaults = defaults
-        let environmentURL = environment["GHOSTLIGHT_CONTROL_URL"]
-        let savedURL = defaults.string(forKey: Self.controlPlaneDefaultsKey)
-        self.controlPlaneURL = environmentURL ?? savedURL ?? "http://localhost:8080"
+        self.now = now
+        self.sleepUntil = sleepUntil
 
-        if autoConnect, environmentURL != nil || savedURL != nil {
-            connect(automatic: true)
+        let migrated = defaults.string(forKey: Self.originKey)
+            ?? defaults.string(forKey: Self.legacyOriginKey)
+        let environmentOrigin = environment["GHOSTLIGHT_CONTROL_URL"]
+        self.controlOrigin = environmentOrigin ?? migrated ?? "http://localhost:8080"
+        self.apiToken = environment["GHOSTLIGHT_API_TOKEN"] ?? ""
+
+        if defaults.string(forKey: Self.originKey) == nil, let migrated {
+            defaults.set(migrated, forKey: Self.originKey)
+        }
+        defaults.removeObject(forKey: Self.legacyOriginKey)
+
+        let savedClientID = defaults.string(forKey: Self.clientIDKey)
+        let resolvedClientID = savedClientID ?? UUID().uuidString.lowercased()
+        self.clientID = resolvedClientID
+        defaults.set(resolvedClientID, forKey: Self.clientIDKey)
+
+        if autoConnect, environmentOrigin != nil || migrated != nil {
+            connect()
         }
     }
 
-    var viewerURL: URL? {
-        viewerEntryURL
+    deinit {
+        lifecycleTask?.cancel()
+        leaseTask?.cancel()
+        eventsTask?.cancel()
     }
 
-    var isConnecting: Bool {
-        switch state {
-        case .discoveringControl, .loadingViewer:
-            return true
-        case .disconnected, .viewerLoaded, .viewerFailed, .controlFailed:
-            return false
-        }
+    var activeTab: BrowserTab? {
+        guard let session else { return nil }
+        return session.tabs.first(where: { $0.id == session.activeTabID })
+            ?? session.tabs.first(where: \.active)
     }
+
+    var canControl: Bool {
+        guard case .controller = controlState, let lease else { return false }
+        return now() < lease.expiresAt
+    }
+
+    var streamURL: URL? { stream?.url }
 
     func connect() {
-        connect(automatic: false)
-    }
+        cancelLifecycle()
+        let runID = UUID()
+        lifecycleID = runID
+        controlState = .connecting
+        surfaceState = .idle
+        commandError = nil
 
-    private func connect(automatic: Bool) {
-        connectTask?.cancel()
-        retryTask?.cancel()
-        retryTask = nil
-        let requestID = UUID()
-        connectionID = requestID
-        viewerEntryURL = nil
-        automaticRetryEnabled = automatic
-        viewerRetryAttempt = 0
-        state = .discoveringControl
-        let rawControlPlaneURL = controlPlaneURL
+        let origin: URL
+        do {
+            origin = try ControlPlaneURLValidator.validate(controlOrigin)
+        } catch {
+            controlState = .failed(error.localizedDescription)
+            return
+        }
+        let apiToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiToken.isEmpty else {
+            controlState = .failed("Enter the control API token.")
+            return
+        }
+        self.apiToken = apiToken
 
-        connectTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
+        lifecycleTask = Task { [weak self] in
+            guard let self else { return }
             do {
-                let response = try await client.discoverViewer(controlPlaneURL: rawControlPlaneURL)
-                guard !Task.isCancelled, connectionID == requestID else {
-                    return
+                let browser = try await resumeOrCreate(at: origin, apiToken: apiToken)
+                guard owns(runID) else { return }
+                defaults.set(origin.absoluteString, forKey: Self.originKey)
+                defaults.set(browser.id, forKey: Self.sessionIDKey)
+                apply(browser)
+                startEvents(at: origin, sessionID: browser.id, runID: runID)
+
+                do {
+                    let connection = try await client.createStream(at: origin, apiToken: apiToken, sessionID: browser.id)
+                    guard owns(runID) else { return }
+                    stream = connection
+                    surfaceState = .loadingPage(connection.url)
+                } catch {
+                    guard owns(runID) else { return }
+                    surfaceState = .failed(error.localizedDescription)
                 }
-                defaults.set(rawControlPlaneURL, forKey: Self.controlPlaneDefaultsKey)
-                viewerEntryURL = response.viewerURL
-                state = .loadingViewer(response.viewerURL, retryAttempt: 0)
+
+                do {
+                    let acquired = try await client.acquireLease(at: origin, apiToken: apiToken, sessionID: browser.id, clientID: clientID)
+                    guard owns(runID) else { return }
+                    installLease(acquired)
+                    startLeaseRenewal(at: origin, sessionID: browser.id, runID: runID)
+                } catch let error as SessionClientError where error.statusCode == 409 || error.statusCode == 423 {
+                    guard owns(runID) else { return }
+                    becomeObserver()
+                } catch {
+                    guard owns(runID) else { return }
+                    controlState = .failed(error.localizedDescription)
+                }
             } catch is CancellationError {
                 return
             } catch {
-                guard !Task.isCancelled, connectionID == requestID else {
-                    return
-                }
-                state = .controlFailed(error.localizedDescription)
+                guard owns(runID) else { return }
+                controlState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    func resetSession() {
+        cancelLifecycle()
+        defaults.removeObject(forKey: Self.sessionIDKey)
+        session = nil
+        stream = nil
+        lease = nil
+        addressDraft = ""
+        controlState = .disconnected
+        surfaceState = .idle
+    }
+
+    func apply(_ incoming: BrowserSession) {
+        if let current = session, incoming.revision <= current.revision { return }
+        let activeTabChanged = session?.activeTabID != incoming.activeTabID
+        session = incoming
+        if activeTabChanged || !isAddressFocused { syncAddressDraft() }
+    }
+
+    func setAddressFocused(_ focused: Bool) {
+        isAddressFocused = focused
+        if !focused { syncAddressDraft() }
+    }
+
+    func installLease(_ lease: ControllerLease) {
+        guard lease.token != nil else {
+            becomeObserver()
+            return
+        }
+        self.lease = lease
+        controlState = now() < lease.expiresAt ? .controller(expiresAt: lease.expiresAt) : .expired
+    }
+
+    func becomeObserver() {
+        lease = nil
+        controlState = .observer
+    }
+
+    func goBack() { send(.init(type: .goBack, tabID: activeTab?.id, expectedRevision: session?.revision ?? 0)) }
+    func goForward() { send(.init(type: .goForward, tabID: activeTab?.id, expectedRevision: session?.revision ?? 0)) }
+    func reload() { send(.init(type: .reload, tabID: activeTab?.id, expectedRevision: session?.revision ?? 0)) }
+    func newTab() { send(.init(type: .newTab, url: "https://www.google.com", expectedRevision: session?.revision ?? 0)) }
+    func closeTab(_ id: String) { send(.init(type: .closeTab, tabID: id, expectedRevision: session?.revision ?? 0)) }
+    func activateTab(_ id: String) { send(.init(type: .activateTab, tabID: id, expectedRevision: session?.revision ?? 0)) }
+
+    func navigate() {
+        navigate(to: addressDraft)
+    }
+
+    func navigate(to value: String) {
+        guard let target = Self.navigationTarget(for: value) else { return }
+        addressDraft = target
+        send(.init(type: .navigate, tabID: activeTab?.id, url: target, expectedRevision: session?.revision ?? 0))
+    }
+
+    nonisolated static func navigationTarget(for input: String) -> String? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if value.contains("://") { return value }
+        if !value.contains(where: \.isWhitespace), value.contains(".") || value.contains(":") {
+            return "https://\(value)"
+        }
+        var components = URLComponents(string: "https://www.google.com/search")
+        components?.queryItems = [URLQueryItem(name: "q", value: value)]
+        return components?.url?.absoluteString
+    }
+
+    func attach(_ fileURL: URL) {
+        guard let context = commandContext else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let attachment = try await client.uploadAttachment(
+                    at: context.origin,
+                    apiToken: context.apiToken,
+                    sessionID: context.sessionID,
+                    token: context.token,
+                    fileURL: fileURL
+                )
+                send(.init(type: .attach, tabID: activeTab?.id, attachmentID: attachment.id, expectedRevision: session?.revision ?? 0))
+            } catch {
+                commandError = error.localizedDescription
             }
         }
     }
 
     func viewerNavigationStarted() {
-        guard let viewerEntryURL else {
-            return
-        }
-
-        switch state {
-        case .loadingViewer:
-            break
-        case .viewerLoaded, .viewerFailed:
-            state = .loadingViewer(viewerEntryURL, retryAttempt: viewerRetryAttempt)
-        case .disconnected, .discoveringControl, .controlFailed:
-            break
-        }
+        guard let url = stream?.url else { return }
+        surfaceState = .loadingPage(url)
     }
 
     func viewerNavigationFinished(at url: URL?) {
-        guard let viewerEntryURL, case .loadingViewer = state else {
+        guard let entry = stream?.url else { return }
+        guard url.map({ ViewerWebView.Coordinator.isSameOrigin($0, as: entry) }) ?? true else {
+            surfaceState = .failed("The stream navigated to an unexpected origin.")
             return
         }
-        if let url, !ViewerWebView.Coordinator.isSameOrigin(url, as: viewerEntryURL) {
-            viewerNavigationFailed("The viewer navigated to an unexpected origin.")
-            return
-        }
-        retryTask?.cancel()
-        retryTask = nil
-        state = .viewerLoaded(viewerEntryURL)
-        viewerRetryAttempt = 0
-        automaticRetryEnabled = false
+        surfaceState = .pageReady(entry)
+    }
+
+    func viewerMediaReady() {
+        guard let url = stream?.url else { return }
+        surfaceState = .mediaReady(url)
     }
 
     func viewerNavigationFailed(_ message: String) {
-        guard let viewerEntryURL else {
-            return
-        }
-
-        switch state {
-        case .loadingViewer, .viewerLoaded:
-            break
-        case .disconnected, .discoveringControl, .viewerFailed, .controlFailed:
-            return
-        }
-
-        if automaticRetryEnabled, viewerRetryAttempt < Self.automaticRetryLimit {
-            viewerRetryAttempt += 1
-            state = .loadingViewer(viewerEntryURL, retryAttempt: viewerRetryAttempt)
-            scheduleAutomaticRetry()
-            return
-        }
-        state = .viewerFailed(viewerEntryURL, message: message)
-        automaticRetryEnabled = false
+        surfaceState = .failed(message)
     }
 
-    private func scheduleAutomaticRetry() {
-        retryTask?.cancel()
-        let attempt = viewerRetryAttempt
-        let requestID = connectionID
-        retryTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.automaticRetryDelay(forAttempt: attempt))
-            guard !Task.isCancelled, let self else {
-                return
+    private func resumeOrCreate(at origin: URL, apiToken: String) async throws -> BrowserSession {
+        if let sessionID = defaults.string(forKey: Self.sessionIDKey) {
+            do {
+                return try await client.getSession(at: origin, apiToken: apiToken, sessionID: sessionID)
+            } catch let error as SessionClientError where error.statusCode == 404 {
+                defaults.removeObject(forKey: Self.sessionIDKey)
             }
-            guard self.connectionID == requestID,
-                  self.viewerRetryAttempt == attempt,
-                  case .loadingViewer = self.state else {
-                return
+        }
+        return try await client.createSession(
+            at: origin,
+            apiToken: apiToken,
+            idempotencyKey: "ghostlight-macos-\(clientID)-browser"
+        )
+    }
+
+    private func send(_ command: BrowserCommand) {
+        guard let context = commandContext else { return }
+        commandError = nil
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await client.sendCommand(
+                    at: context.origin,
+                    apiToken: context.apiToken,
+                    sessionID: context.sessionID,
+                    token: context.token,
+                    idempotencyKey: UUID().uuidString.lowercased(),
+                    command: command
+                )
+            } catch {
+                commandError = error.localizedDescription
             }
-            self.reloadViewer()
         }
     }
 
-    private static func automaticRetryDelay(forAttempt attempt: Int) -> Duration {
-        // Exponential backoff: 1s after the first failure, 2s after the second.
-        .seconds(1 << (attempt - 1))
+    private var commandContext: (origin: URL, apiToken: String, sessionID: String, token: String)? {
+        guard canControl,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin),
+              let session,
+              let lease,
+              let leaseToken = lease.token else { return nil }
+        return (origin, apiToken, session.id, leaseToken)
     }
 
-    func reloadViewer() {
-        reloadToken &+= 1
-    }
-
-    func retryViewer() {
-        guard let viewerEntryURL, case .viewerFailed = state else {
-            return
+    private func startEvents(at origin: URL, sessionID: String, runID: UUID) {
+        eventsTask?.cancel()
+        eventsTask = Task { [weak self] in
+            guard let self else { return }
+            while owns(runID), !Task.isCancelled {
+                do {
+                    let revision = session?.revision ?? 0
+                    if let updated = try await client.sessionEvents(
+                        at: origin,
+                        apiToken: apiToken,
+                        sessionID: sessionID,
+                        afterRevision: revision
+                    ) {
+                        apply(updated)
+                    }
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
         }
-        automaticRetryEnabled = false
-        viewerRetryAttempt = 0
-        state = .loadingViewer(viewerEntryURL, retryAttempt: 0)
-        reloadViewer()
     }
 
-    func disconnect() {
-        connectTask?.cancel()
-        connectTask = nil
-        retryTask?.cancel()
-        retryTask = nil
-        connectionID = nil
-        viewerEntryURL = nil
-        defaults.removeObject(forKey: Self.controlPlaneDefaultsKey)
-        automaticRetryEnabled = false
-        viewerRetryAttempt = 0
-        state = .disconnected
-        reloadToken = 0
+    private func startLeaseRenewal(at origin: URL, sessionID: String, runID: UUID) {
+        leaseTask?.cancel()
+        leaseTask = Task { [weak self] in
+            guard let self else { return }
+            while owns(runID), let current = lease, let token = current.token, !Task.isCancelled {
+                do {
+                    try await sleepUntil(current.renewAfter)
+                    guard owns(runID), now() < current.expiresAt else {
+                        controlState = .expired
+                        lease = nil
+                        return
+                    }
+                    let renewed = try await client.renewLease(
+                        at: origin,
+                        apiToken: apiToken,
+                        sessionID: sessionID,
+                        leaseID: current.id,
+                        token: token
+                    )
+                    installLease(renewed)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard owns(runID) else { return }
+                    if now() >= current.expiresAt {
+                        lease = nil
+                        controlState = .expired
+                    } else {
+                        becomeObserver()
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    private func syncAddressDraft() {
+        addressDraft = activeTab?.url ?? ""
+    }
+
+    private func owns(_ id: UUID) -> Bool { lifecycleID == id && !Task.isCancelled }
+
+    private func cancelLifecycle() {
+        lifecycleTask?.cancel()
+        leaseTask?.cancel()
+        eventsTask?.cancel()
+        lifecycleTask = nil
+        leaseTask = nil
+        eventsTask = nil
+        lease = nil
+    }
+
+    nonisolated private static func defaultSleepUntil(_ date: Date) async throws {
+        let interval = max(0, date.timeIntervalSinceNow)
+        try await Task.sleep(for: .seconds(interval))
     }
 }
