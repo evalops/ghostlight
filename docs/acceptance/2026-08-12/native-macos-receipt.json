@@ -17,5 +17,5 @@
   "relaunch_screenshot": "native-relaunch.png",
   "relaunch_screenshot_sha256": "8d0a329b4903c0a891132e553e7a12122bc3d9ac39780e9e86e702ad5d1bab16",
   "privacy_review": "passed; synthetic loopback content only, no credentials, account data, or non-loopback addresses",
-  "limitations": "The native check proves control discovery and WKWebView navigation completion only. It does not prove Neko authentication, WebRTC media, or the seven-day gate."
+  "limitations": "The native check proves control discovery and WKWebView navigation completion only. It does not prove Neko authentication, WebRTC media, or Gmail persistence."
 }

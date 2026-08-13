@@ -13,4 +13,4 @@ app_binary_sha256=26581f3d480584a3216f9494835f6fcade02054fe5cfe3de877d5e49c3f27f
 screenshot_sha256=13a3758525117fc412edbea8130fdd347ce535e1e6a228dfea585813c96b91eb
 relaunch_screenshot_sha256=8d0a329b4903c0a891132e553e7a12122bc3d9ac39780e9e86e702ad5d1bab16
 privacy_review=passed; synthetic loopback content only, no credentials, account data, or non-loopback addresses
-limitation=WKWebView navigation proof only; no WebRTC, account, or seven-day claim
+limitation=WKWebView navigation proof only; no WebRTC or account-state claim

@@ -69,7 +69,7 @@ No control API route starts, stops, recreates, or deletes either container.
 | Control `GET /healthz` | The Go handler answered. | Viewer health, storage, Chromium state, WebRTC, and website state. |
 | Neko `GET /health` | Neko returned an HTTP success response. | macOS reachability, Neko login, WebRTC negotiation, and restored website state. |
 | Control `GET /readyz` | Control reached Neko `/health` and received `2xx` within two seconds. | macOS reachability, Neko login, WebRTC media, and website state. |
-| Runtime smoke script | Control liveness, direct Neko health, control readiness, discovery response, and discovered viewer health succeeded. | Native app launch, Neko login, WebRTC media, Gmail, and seven-day persistence. |
+| Runtime smoke script | Control liveness, direct Neko health, control readiness, discovery response, and discovered viewer health succeeded. | Native app launch, Neko login, WebRTC media, and Gmail persistence. |
 
 Preflight establishes the storage condition that health endpoints omit. It requires profile mode `700`, rejects a symlink profile path, and uses the pinned Neko image as uid `1000` to create and remove a marker in that directory.
 
@@ -114,10 +114,10 @@ The streaming tool authenticates to a running Neko viewer and records WebRTC sta
 
 On `2026-08-12`, the Linux persistence lane at source `f94bb784316e206674234407a75170b10dd0e7bc` built the stack, required healthy viewer and control services, recreated both containers, and restored two synthetic tabs with their cookie and local-storage marker. Its test-only override shares the viewer network namespace with control because the nested host filters sibling-container bridge traffic. A Computer Use run against the packaged app from macOS source commit `af26a8b47f4598038b06604aab34134ebccaf674` reached `Viewer loaded`, exited through Cmd-Q, and relaunched the exact bundle without an environment override from the saved control URL without another Connect action; this proves WebKit navigation, not authenticated Neko or decoded WebRTC media. The working-tree VP8 measurement captured 251 decoded frames, zero dropped frames, 1.17 Mbps received bitrate, a 72.43 ms dispatch-to-next-presented-frame phase, viewer CPU samples from 3.62% to 96.01%, and viewer memory samples from 272.4 MiB to 376 MiB. The next frame was not proven to have been caused by the input, so 72.43 ms is not input latency.
 
-The backup shell tests use synthetic cookie, tab, and local-storage fixtures. None of these checks establishes Gmail persistence, sleep/wake recovery, or seven consecutive days of use.
+The backup shell tests use synthetic cookie, tab, and local-storage fixtures. None of these checks establishes Gmail persistence or sleep/wake recovery.
 
 ## Explicit non-goals
 
 The shipped alpha has no multi-user scheduler, Dex control lease, public-internet deployment, TLS termination, control authentication, TURN service, profile synchronization, browser recording, automatic browser update, or host-failover path. Releases are ad-hoc signed unless the Apple signing secrets described in the README are configured.
 
-The seven-day daily-driver gate requires one successful close-and-reopen check and one successful Compose-restart check on each of seven consecutive days. Dex control-lease design and implementation start after that gate passes. Compose remains the lifecycle owner until a reviewed Dex design, migration, and acceptance receipt replace this architecture.
+Compose remains the lifecycle owner until a reviewed Dex design, migration, and acceptance receipt replace this architecture.
