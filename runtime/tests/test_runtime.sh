@@ -56,7 +56,7 @@ for path in \
 done
 assert_file "$REPO_DIR/macos/package-app.sh"
 
-assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/evalops/ghostlight-viewer@sha256:5ab745d2fc8972eab3ba2ddcaf109079d8bec45be51b9f9e28f61c3c8ae2ec8c'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'context: ../control'
 # This is a literal Compose interpolation expression, not a shell expansion.
 # shellcheck disable=SC2016
@@ -150,7 +150,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"${FAKE_DOCKER_LOG:?}"' \
   'if [[ "$*" == *"config --format json"* ]]; then' \
   '  cat <<'\''JSON'\''' \
-  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_CAPTURE_VIDEO_CODEC":"h264","NEKO_CAPTURE_VIDEO_PIPELINE":"ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"1","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
+  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:5ab745d2fc8972eab3ba2ddcaf109079d8bec45be51b9f9e28f61c3c8ae2ec8c","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_CAPTURE_VIDEO_CODEC":"h264","NEKO_CAPTURE_VIDEO_PIPELINE":"ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"1","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
   'JSON' \
   '  exit 0' \
   'fi' \
