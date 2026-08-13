@@ -21,7 +21,7 @@ const REMOTE = process.env.GHOSTLIGHT_PERFORMANCE_REMOTE_HOST ?? "developer@192.
 const REMOTE_HOST = process.env.GHOSTLIGHT_PERFORMANCE_REMOTE_ADDRESS ?? "192.168.4.113";
 const BIND_ADDRESS = process.env.GHOSTLIGHT_PERFORMANCE_BIND_ADDRESS ?? REMOTE_HOST;
 const PORT_BASE = Number(process.env.GHOSTLIGHT_PERFORMANCE_PORT_BASE ?? 55000);
-const USE_SSH_TUNNEL = process.env.GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL !== "false";
+const USE_SSH_TUNNEL = process.env.GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL === "true";
 const TARGET_FPS = Number(process.env.GHOSTLIGHT_PERFORMANCE_TARGET_FPS ?? 25);
 const WIDTH = Number(process.env.GHOSTLIGHT_PERFORMANCE_WIDTH ?? 1920);
 const HEIGHT = Number(process.env.GHOSTLIGHT_PERFORMANCE_HEIGHT ?? 1080);
@@ -1444,6 +1444,43 @@ function buildGates(aggregate, control) {
   };
 }
 
+function buildRequiredEvidenceGates({ source, useSshTunnel, phases }) {
+  const exactSource = source?.sourceTree === "clean" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(source?.sourceSha ?? "");
+  const fourPhases = Array.isArray(phases) && phases.length === 4;
+  const directSelectedUDP = !useSshTunnel && fourPhases && phases.every((phase) =>
+    phase.selected_ice_pair?.protocol?.toLowerCase() === "udp" && phase.udp_transport_selected !== false);
+  const causalX11ClientPixel = fourPhases && phases.every((phase) =>
+    phase.visual_event_attempts > 0
+      && phase.visual_event_successes === phase.visual_event_attempts
+      && phase.visual_event_success_rate === 1
+      && phase.frame_sample_count > 0
+      && Array.isArray(phase.input_to_present_receipts)
+      && phase.input_to_present_receipts.length === phase.visual_event_attempts
+      && phase.input_to_present_receipts.every((entry) => entry.success === true
+        && entry.input_driver === "x11-xdotool-persistent-ssh"
+        && Number.isFinite(entry.input_to_present_ms)
+        && entry.input_to_present_ms >= 0));
+  const webrtcDroppedFrames = fourPhases && phases.every((phase) => phase.active_media === 1
+    && Number.isFinite(phase.decoded_frames)
+    && phase.decoded_frames > 0
+    && Number.isFinite(phase.dropped_frames)
+    && Number.isFinite(phase.dropped_frame_ratio));
+  const processCpuMemory = fourPhases && phases.every((phase) => phase.resource_sample_count >= 5
+    && Number.isFinite(phase.viewer_cpu_median_pct)
+    && Number.isFinite(phase.viewer_memory_p95_mib)
+    && phase.process_cpu_attribution?.sample_count >= 5
+    && Number.isFinite(phase.process_cpu_attribution?.category_cpu_pct_median?.chromium)
+    && Number.isFinite(phase.process_cpu_attribution?.category_cpu_pct_median?.neko));
+  const gates = {
+    exact_source: exactSource,
+    direct_selected_udp: directSelectedUDP,
+    causal_x11_client_pixel: causalX11ClientPixel,
+    webrtc_dropped_frames: webrtcDroppedFrames,
+    process_cpu_memory: processCpuMemory,
+  };
+  return { ...gates, passed: Object.values(gates).every(Boolean) };
+}
+
 async function writeArtifactDigest(path) {
   const contents = await fs.readFile(path);
   const digest = createHash("sha256").update(contents).digest("hex");
@@ -1576,6 +1613,7 @@ async function main() {
           GHOSTLIGHT_NATIVE_PERFORMANCE_NEKO_PASSWORD: PASSWORD,
           GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC: CODEC,
           GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA: source.sourceSha,
+          GHOSTLIGHT_NATIVE_PERFORMANCE_TRANSPORT_MODE: USE_SSH_TUNNEL ? "ssh-tcp-smoke" : "direct-lan-udp-required",
           GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT_DIR: join(OUTPUT_DIR, "native"),
           GHOSTLIGHT_NATIVE_PERFORMANCE_PHASE_DIR: OUTPUT_DIR,
           GHOSTLIGHT_NATIVE_PERFORMANCE_STOP_FILE: nativeStopFile,
@@ -1648,7 +1686,15 @@ async function main() {
   }
   const aggregate = aggregatePhases(phaseResults);
   const control = await readControl(source.sourceSha).catch((error) => { failure ??= error; return null; });
-  const gates = buildGates(aggregate, control);
+  const qualityGates = buildGates(aggregate, control);
+  const requiredEvidenceGates = buildRequiredEvidenceGates({ source, useSshTunnel: USE_SSH_TUNNEL, phases: phaseResults });
+  const gates = {
+    ...qualityGates,
+    ...requiredEvidenceGates,
+    quality_passed: qualityGates.passed,
+    required_evidence_passed: requiredEvidenceGates.passed,
+    passed: qualityGates.passed && requiredEvidenceGates.passed,
+  };
   const result = {
     schema_version: 1,
     status: failure || !phaseResults.length || !gates.passed ? "blocked" : "measured",
@@ -1727,7 +1773,7 @@ async function main() {
       "The synthetic fixture is launched and driven through Chromium's real X11 input path with xdotool. CDP is disabled by default and optional diagnostics never gate a measurement.",
       "Viewer CPU is attributed to the exact pinned container through timestamped Docker stats sliced to each phase window; host-wide CPU is not substituted.",
       "Process CPU samples are captured at approximately 1 Hz from /proc utime+stime deltas. Chromium, Neko, X-related, and other categories are reported; the software encoder remains in-process within Neko/GStreamer and is not separately attributable.",
-      USE_SSH_TUNNEL ? "SSH TCP forwarding is smoke-only and is not used as the 1080p25 control transport; a direct-LAN run must set GHOSTLIGHT_PERFORMANCE_SSH_TUNNEL=false and prove selected candidatePair protocol=udp." : "This receipt requires a direct-LAN selected candidatePair protocol=udp in every phase.",
+      USE_SSH_TUNNEL ? "SSH TCP forwarding is smoke-only and always produces a blocked receipt; a measured run must use direct LAN and prove selected candidatePair protocol=udp." : "This receipt requires a direct-LAN selected candidatePair protocol=udp in every phase.",
       CODEC === "h264" ? "The current public pinned viewer image and its software x264 constrained-baseline pipeline were used; no VAAPI claim is made." : "The current public pinned viewer image and frozen software VP8 pipeline were used.",
     ],
     error: failure ? failure.message : null,
@@ -1821,6 +1867,35 @@ async function runSelfTests() {
     bridge: null,
     error: "diagnostic bridge unavailable",
   });
+
+  const requiredEvidencePhase = {
+    active_media: 1,
+    decoded_frames: 250,
+    dropped_frames: 0,
+    dropped_frame_ratio: 0,
+    selected_ice_pair: { protocol: "udp" },
+    visual_event_attempts: 3,
+    visual_event_successes: 3,
+    visual_event_success_rate: 1,
+    input_to_present_receipts: Array.from({ length: 3 }, () => ({ success: true, input_to_present_ms: 100, input_driver: "x11-xdotool-persistent-ssh" })),
+    frame_sample_count: 250,
+    resource_sample_count: 5,
+    viewer_cpu_median_pct: 100,
+    viewer_memory_p95_mib: 512,
+    process_cpu_attribution: { sample_count: 5, category_cpu_pct_median: { chromium: 10, neko: 90 } },
+  };
+  const requiredEvidenceInput = {
+    source: { sourceSha: "a".repeat(40), sourceTree: "clean" },
+    useSshTunnel: false,
+    phases: Array.from({ length: 4 }, () => structuredClone(requiredEvidencePhase)),
+  };
+  assert.equal(buildRequiredEvidenceGates(requiredEvidenceInput).passed, true);
+  assert.equal(buildRequiredEvidenceGates({ ...requiredEvidenceInput, useSshTunnel: true }).direct_selected_udp, false);
+  assert.equal(buildRequiredEvidenceGates({ ...requiredEvidenceInput, source: { ...requiredEvidenceInput.source, sourceTree: "dirty" } }).exact_source, false);
+  assert.equal(buildRequiredEvidenceGates({ ...requiredEvidenceInput, phases: requiredEvidenceInput.phases.map((phase, index) => index ? phase : { ...phase, selected_ice_pair: { protocol: "tcp" } }) }).direct_selected_udp, false);
+  assert.equal(buildRequiredEvidenceGates({ ...requiredEvidenceInput, phases: requiredEvidenceInput.phases.map((phase, index) => index ? phase : { ...phase, visual_event_success_rate: 0 }) }).causal_x11_client_pixel, false);
+  assert.equal(buildRequiredEvidenceGates({ ...requiredEvidenceInput, phases: requiredEvidenceInput.phases.map((phase, index) => index ? phase : { ...phase, dropped_frames: null }) }).webrtc_dropped_frames, false);
+  assert.equal(buildRequiredEvidenceGates({ ...requiredEvidenceInput, phases: requiredEvidenceInput.phases.map((phase, index) => index ? phase : { ...phase, process_cpu_attribution: { sample_count: 0 } }) }).process_cpu_memory, false);
 
   const samples = [
     { captured_at: "2026-08-12T00:00:00.000Z", cpu_pct: 10, memory_mib: 100 },

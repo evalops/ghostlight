@@ -13,7 +13,7 @@ const MIN_ACTUAL_TO_TARGET_FPS_RATIO = 0.9; // same floor as the full harness: a
 const MAX_DROPPED_FRAME_RATIO = 0.01; // the full harness gates drops against a paired control; a standalone run needs an absolute ceiling
 const MIN_BITRATE_BITS_PER_SECOND = 1; // decoded frames with zero received bytes means the stats are untrustworthy
 
-function evaluateGates({ activeMedia, decodedFrames, droppedFrames, bitrateBitsPerSecond, elapsedSeconds }) {
+function evaluateGates({ activeMedia, decodedFrames, droppedFrames, bitrateBitsPerSecond, elapsedSeconds, requiredEvidence = {} }) {
   const actualToTargetFpsRatio = elapsedSeconds > 0 && TARGET_FPS > 0
     ? decodedFrames / elapsedSeconds / TARGET_FPS
     : null;
@@ -33,12 +33,23 @@ function evaluateGates({ activeMedia, decodedFrames, droppedFrames, bitrateBitsP
   if (!(bitrateBitsPerSecond >= MIN_BITRATE_BITS_PER_SECOND)) {
     failures.push(`bitrate ${bitrateBitsPerSecond.toFixed(0)} bits/s is below the ${MIN_BITRATE_BITS_PER_SECOND} bits/s floor`);
   }
+  const evidence = {
+    exact_source: requiredEvidence.exact_source === true,
+    direct_selected_udp: requiredEvidence.direct_selected_udp === true,
+    causal_x11_client_pixel: requiredEvidence.causal_x11_client_pixel === true,
+    webrtc_dropped_frames: requiredEvidence.webrtc_dropped_frames === true,
+    process_cpu_memory: requiredEvidence.process_cpu_memory === true,
+  };
+  for (const [name, passed] of Object.entries(evidence)) {
+    if (!passed) failures.push(`required ${name.replaceAll("_", " ")} evidence is missing`);
+  }
   return {
     gates: {
       active_media: activeMedia,
       actual_to_target_fps_ratio: actualToTargetFpsRatio,
       dropped_frame_ratio: droppedFrameRatio,
       bitrate_bits_per_second: bitrateBitsPerSecond,
+      ...evidence,
       passed: failures.length === 0,
     },
     failures,
@@ -46,13 +57,22 @@ function evaluateGates({ activeMedia, decodedFrames, droppedFrames, bitrateBitsP
 }
 
 function runGateSelfTests() {
-  const passing = evaluateGates({ activeMedia: true, decodedFrames: 250, droppedFrames: 1, bitrateBitsPerSecond: 3_000_000, elapsedSeconds: 10 });
+  const evidence = {
+    exact_source: true,
+    direct_selected_udp: true,
+    causal_x11_client_pixel: true,
+    webrtc_dropped_frames: true,
+    process_cpu_memory: true,
+    cdp_available: false,
+  };
+  const passing = evaluateGates({ activeMedia: true, decodedFrames: 250, droppedFrames: 1, bitrateBitsPerSecond: 3_000_000, elapsedSeconds: 10, requiredEvidence: evidence });
   assert.equal(passing.gates.passed, true);
   assert.deepEqual(passing.failures, []);
-  assert.equal(evaluateGates({ activeMedia: false, decodedFrames: 0, droppedFrames: 0, bitrateBitsPerSecond: 0, elapsedSeconds: 10 }).gates.passed, false);
-  assert.equal(evaluateGates({ activeMedia: true, decodedFrames: 100, droppedFrames: 0, bitrateBitsPerSecond: 3_000_000, elapsedSeconds: 10 }).gates.passed, false);
-  assert.equal(evaluateGates({ activeMedia: true, decodedFrames: 250, droppedFrames: 30, bitrateBitsPerSecond: 3_000_000, elapsedSeconds: 10 }).gates.passed, false);
-  assert.equal(evaluateGates({ activeMedia: true, decodedFrames: 250, droppedFrames: 1, bitrateBitsPerSecond: 0, elapsedSeconds: 10 }).gates.passed, false);
+  assert.equal(evaluateGates({ activeMedia: false, decodedFrames: 0, droppedFrames: 0, bitrateBitsPerSecond: 0, elapsedSeconds: 10, requiredEvidence: evidence }).gates.passed, false);
+  assert.equal(evaluateGates({ activeMedia: true, decodedFrames: 100, droppedFrames: 0, bitrateBitsPerSecond: 3_000_000, elapsedSeconds: 10, requiredEvidence: evidence }).gates.passed, false);
+  assert.equal(evaluateGates({ activeMedia: true, decodedFrames: 250, droppedFrames: 30, bitrateBitsPerSecond: 3_000_000, elapsedSeconds: 10, requiredEvidence: evidence }).gates.passed, false);
+  assert.equal(evaluateGates({ activeMedia: true, decodedFrames: 250, droppedFrames: 1, bitrateBitsPerSecond: 0, elapsedSeconds: 10, requiredEvidence: evidence }).gates.passed, false);
+  assert.equal(evaluateGates({ activeMedia: true, decodedFrames: 250, droppedFrames: 1, bitrateBitsPerSecond: 3_000_000, elapsedSeconds: 10, requiredEvidence: { ...evidence, direct_selected_udp: false } }).gates.passed, false);
   console.log(JSON.stringify({ acceptance_performance_gates_self_test: "passed" }));
 }
 
@@ -196,9 +216,16 @@ const { gates, failures: gateFailures } = evaluateGates({
   droppedFrames,
   bitrateBitsPerSecond,
   elapsedSeconds,
+  requiredEvidence: {
+    exact_source: false,
+    direct_selected_udp: false,
+    causal_x11_client_pixel: false,
+    webrtc_dropped_frames: Number.isFinite(droppedFrames),
+    process_cpu_memory: false,
+  },
 });
 const result = {
-  status: activeMedia ? "measured" : "blocked",
+  status: gates.passed ? "measured" : "blocked",
   capturedAt: new Date().toISOString(),
   viewerEndpointSha256: createHash("sha256").update(viewerURL).digest("hex"),
   requestedCodec,
@@ -221,6 +248,8 @@ const result = {
     "The observed frame is not proven to have been caused by the keyboard event, so this phase metric is not input latency or an input-to-photon measurement.",
     "The H.264 run only changes codec preference when the browser advertises H.264 receiver capability; it does not change the server pipeline.",
     "The pass/fail gates are standalone thresholds without a paired control receipt; tools/measure-streaming-performance.mjs remains the non-regression authority.",
+    "This standalone browser smoke does not collect exact-source, direct selected-UDP, causal X11/client-pixel, or process CPU-memory evidence, so it fails closed and cannot publish a measured benchmark receipt.",
+    "CDP diagnostics are optional and absent from the required evidence gates.",
   ],
   decision: requestedCodec === "default"
     ? "The runtime default is H.264; pair this receipt with a native WKWebView run to confirm power-efficient VideoToolbox decode on the Mac."

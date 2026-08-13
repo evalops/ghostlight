@@ -7,6 +7,7 @@ VIEWER_URL="${GHOSTLIGHT_NATIVE_PERFORMANCE_VIEWER_URL:-}"
 PASSWORD="${GHOSTLIGHT_NATIVE_PERFORMANCE_NEKO_PASSWORD:-}"
 EXPECTED_CODEC="${GHOSTLIGHT_NATIVE_PERFORMANCE_EXPECTED_CODEC:-}"
 SOURCE_SHA="${GHOSTLIGHT_NATIVE_PERFORMANCE_SOURCE_SHA:-}"
+TRANSPORT_MODE="${GHOSTLIGHT_NATIVE_PERFORMANCE_TRANSPORT_MODE:-}"
 OUTPUT_DIR="${GHOSTLIGHT_NATIVE_PERFORMANCE_OUTPUT_DIR:-$ROOT_DIR/output/native-performance}"
 APP_PATH="${GHOSTLIGHT_APP_PATH:-$ROOT_DIR/macos/.build/Ghostlight.app}"
 STOP_FILE="${GHOSTLIGHT_NATIVE_PERFORMANCE_STOP_FILE:-}"
@@ -19,6 +20,8 @@ MAX_WAIT_SECONDS="${GHOSTLIGHT_NATIVE_PERFORMANCE_MAX_WAIT_SECONDS:-360}"
 [[ "$EXPECTED_CODEC" == vp8 || "$EXPECTED_CODEC" == h264 ]] || { printf 'expected codec must be vp8 or h264\n' >&2; exit 1; }
 [[ "$MAX_WAIT_SECONDS" =~ ^[0-9]+$ && "$MAX_WAIT_SECONDS" -ge 60 ]] || { printf 'native performance wait must be at least 60 seconds\n' >&2; exit 1; }
 [[ "$SOURCE_SHA" == "$(git -C "$ROOT_DIR" rev-parse HEAD)" ]] || { printf 'native source SHA must match HEAD\n' >&2; exit 1; }
+[[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] || { printf 'native performance requires an exact clean source tree\n' >&2; exit 1; }
+[[ "$TRANSPORT_MODE" == direct-lan-udp-required ]] || { printf 'native performance requires direct-LAN UDP transport evidence; SSH forwarding is smoke-only\n' >&2; exit 1; }
 [[ -x "$APP_PATH/Contents/MacOS/GhostlightApp" ]] || { printf 'package Ghostlight.app before native measurement\n' >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR"
