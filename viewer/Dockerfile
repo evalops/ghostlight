@@ -46,7 +46,21 @@ RUN set -eux; \
       -o /build/neko ./cmd/neko/main.go; \
     touch --date="@${SOURCE_DATE_EPOCH}" /build/neko
 
+COPY bridge /build/ghostlight-bridge
+
+RUN set -eux; \
+    cd /build/ghostlight-bridge; \
+    go mod download; \
+    go mod verify; \
+    go test -mod=readonly ./...; \
+    CGO_ENABLED=0 go build -mod=readonly -buildvcs=false -trimpath \
+      -ldflags "-buildid= -s -w" \
+      -o /build/ghostlight-native-host .; \
+    touch --date="@${SOURCE_DATE_EPOCH}" /build/ghostlight-native-host
+
 FROM ghcr.io/m1k1o/neko/chromium@sha256:a79093411aced75b3ed7110d50ec9082f9933afabd6592254f01c383678082e7
+
+ARG GHOSTLIGHT_REVISION=unknown
 
 USER root
 
@@ -87,11 +101,21 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
 COPY --from=neko-builder /build/neko /usr/bin/neko
+COPY --from=neko-builder /build/ghostlight-native-host /usr/local/bin/ghostlight-native-host
 COPY --from=neko-builder /build/source/LICENSE /usr/share/doc/neko/LICENSE
 COPY --from=neko-builder /build/SOURCE-PROVENANCE /usr/share/doc/neko/SOURCE-PROVENANCE
+COPY extension /opt/ghostlight/browser-agent
+COPY native-messaging-host.json /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json
+COPY chromium.conf /etc/neko/supervisord/chromium.conf
+
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/ghostlight-native-host; \
+    chmod -R a-w /opt/ghostlight/browser-agent; \
+    chmod 0644 /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json \
+      /etc/neko/supervisord/chromium.conf
 
 LABEL org.opencontainers.image.source="https://github.com/evalops/ghostlight" \
-      org.opencontainers.image.description="Ghostlight hardened Neko Chromium 3.1.5 viewer; Go modules and fixed Debian packages differ from upstream" \
+      org.opencontainers.image.description="Ghostlight hardened Neko Chromium 3.1.5 viewer with a native browser-session agent" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.version="neko-v3.1.5-ghostlight.2" \
-      org.opencontainers.image.revision="395ca1a6f62b7b0e270e654d366a2d57b8042efd"
+      org.opencontainers.image.version="neko-v3.1.5-ghostlight.3" \
+      org.opencontainers.image.revision="${GHOSTLIGHT_REVISION}"

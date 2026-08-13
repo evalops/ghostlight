@@ -133,6 +133,45 @@ jobs:
           go test -race ./...
           go vet ./...
 
+  browser-agent-tests:
+    name: Browser agent tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c
+        with:
+          go-version-file: viewer/bridge/go.mod
+          cache-dependency-path: viewer/bridge/go.mod
+
+      - name: Verify native messaging host
+        working-directory: viewer/bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'gofmt required for:\n%s\n' "$unformatted" >&2
+            exit 1
+          fi
+          go test ./...
+          go test -race ./...
+          go vet ./...
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+
+      - name: Verify Manifest V3 agent
+        working-directory: viewer/extension
+        run: |
+          npm test
+          node --check service-worker.js
+          node --check protocol.js
+
   swift-tests:
     name: Swift tests
     runs-on: macos-14

@@ -1,6 +1,6 @@
 # Linux runtime
 
-The runtime contains one [Apache-2.0-licensed Neko](https://github.com/m1k1o/neko/blob/master/LICENSE) Chromium viewer and one stateless Ghostlight control service. Docker Compose starts, restarts, and stops both containers. Chromium writes one profile to `runtime/data/chromium` by default.
+The runtime contains one [Apache-2.0-licensed Neko](https://github.com/m1k1o/neko/blob/master/LICENSE) Chromium viewer and one stateful Ghostlight control service. Docker Compose starts, restarts, and stops both containers. Chromium writes one profile to `runtime/data/chromium`; control and downloads use separate named volumes.
 
 ## Configure
 
@@ -9,9 +9,10 @@ cp runtime/.env.example runtime/.env
 chmod 600 runtime/.env
 ```
 
-Replace the three install markers in `runtime/.env`:
+Replace the five install markers in `runtime/.env`:
 
 - Generate different values for `NEKO_USER_PASSWORD` and `NEKO_ADMIN_PASSWORD`.
+- Generate different values for `GHOSTLIGHT_API_TOKEN` and `GHOSTLIGHT_BRIDGE_TOKEN`.
 - Set `NEKO_WEBRTC_NAT1TO1` to the Linux address reachable from the client.
 
 Set `GHOSTLIGHT_BIND_ADDRESS` to the loopback or private Linux address that should receive published ports. Set the host in `GHOSTLIGHT_VIEWER_URL` to the same value as `NEKO_WEBRTC_NAT1TO1`.
@@ -75,7 +76,7 @@ Each port publication uses `GHOSTLIGHT_BIND_ADDRESS`. Keep the host and containe
 
 The viewer healthcheck calls Neko `/health`. The control container healthcheck calls `GET /readyz`, which performs another viewer `/health` request through `GHOSTLIGHT_VIEWER_HEALTH_URL`. Compose defaults that value to the internal address `http://viewer:8080`; the client-facing `GHOSTLIGHT_VIEWER_URL` remains the value returned by discovery. `GET /healthz` checks only the Go process.
 
-`runtime/bin/smoke.sh` retries control liveness, direct viewer health, and control readiness up to 30 times by default. It then requests `GET /v1/viewer` once and checks `/health` through the returned viewer URL. Set `SMOKE_ATTEMPTS` to change the retry count.
+`runtime/bin/smoke.sh` retries control liveness, direct viewer health, and storage-aware control readiness up to 30 times by default. It then checks legacy viewer discovery, authenticated workspace discovery, bridge bootstrap, and `/health` through the returned viewer URL. Set `SMOKE_ATTEMPTS` to change the retry count.
 
 ## Chromium profile
 

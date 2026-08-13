@@ -1,0 +1,9 @@
+{
+  "name": "org.evalops.ghostlight.browser_agent",
+  "description": "Ghostlight browser agent bridge",
+  "path": "/usr/local/bin/ghostlight-native-host",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://okabifedphcnokaehflbkmpfphleoaha/"
+  ]
+}

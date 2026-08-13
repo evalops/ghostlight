@@ -2,9 +2,9 @@
 
 ## Alpha deployment boundary
 
-Ghostlight alpha services are intended for a private LAN. The alpha does not provide user authentication, authorization, TLS termination, public internet support, or protection against a compromised host kernel.
+Ghostlight alpha services are intended for a private LAN. Workspace and session routes require an operator bearer token; lease-protected mutations require an additional short-lived controller token; Chromium bridge routes use a separate bearer token. The alpha does not provide user accounts, TLS termination, public internet support, rate limiting, or protection against a compromised host kernel.
 
-The control service listens on TCP port `8080`. The viewer listens on TCP port `8081`. A `viewer_url` grants access to the selected viewer connection and must be treated as a bearer capability.
+The control service listens on TCP port `8080`. The viewer listens on TCP port `8081`. Legacy health, readiness, and viewer discovery are unauthenticated. Treat the API token, bridge token, lease tokens, Neko passwords, and any returned `viewer_url` as bearer capabilities.
 
 Do not expose either port to the public internet. Do not place cookies, profile archives, viewer URLs, or request bodies in issue reports or pull requests.
 

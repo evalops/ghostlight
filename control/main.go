@@ -37,10 +37,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
-	handler, err := newHandlerWithHealthURL(cfg.ViewerURL, cfg.ViewerHealthURL, &http.Client{Timeout: viewerHealthTimeout})
+	handler, err := newHandlerWithConfig(cfg, &http.Client{Timeout: viewerHealthTimeout}, time.Now)
 	if err != nil {
 		return fmt.Errorf("configure viewer health checks: %w", err)
 	}
+	defer handler.store.close()
 	server := newHTTPServer(handler)
 
 	// Register for signals before serving so a signal delivered during

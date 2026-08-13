@@ -56,7 +56,7 @@ for path in \
 done
 assert_file "$REPO_DIR/macos/package-app.sh"
 
-assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/evalops/ghostlight-viewer@sha256:5ab745d2fc8972eab3ba2ddcaf109079d8bec45be51b9f9e28f61c3c8ae2ec8c'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghcr.io/evalops/ghostlight-viewer@sha256:fe135f3553502c1f057fb707c8e9731220d7321376f2eff84b84b4f02a0f7280'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'context: ../control'
 # This is a literal Compose interpolation expression, not a shell expansion.
 # shellcheck disable=SC2016
@@ -65,10 +65,16 @@ assert_contains "$RUNTIME_DIR/docker-compose.yml" 'target: 8080'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'shm_size: "2gb"'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'restart: unless-stopped'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '/home/neko/.config/chromium'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghostlight-downloads:/home/neko/Downloads'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'hostname: ghostlight-chromium'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" '/etc/chromium/policies/managed/policies.json:ro'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_VIEWER_URL'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_VIEWER_HEALTH_URL'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_API_TOKEN'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_BRIDGE_TOKEN'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'GHOSTLIGHT_STATE_DIR: "/var/lib/ghostlight/state"'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghostlight-control-state:/var/lib/ghostlight/state'
+assert_contains "$RUNTIME_DIR/docker-compose.yml" 'ghostlight-control-attachments:/var/lib/ghostlight/attachments'
 assert_contains "$RUNTIME_DIR/docker-compose.yml" 'NEKO_SERVER_BIND: "0.0.0.0:8080"'
 # These are literal Compose interpolation expressions, not shell expansions.
 # shellcheck disable=SC2016
@@ -86,6 +92,8 @@ assert_contains "$RUNTIME_DIR/docker-compose.yml" 'http://127.0.0.1:8080/readyz'
 
 assert_contains "$RUNTIME_DIR/.env.example" '__GENERATE_AT_INSTALL__'
 assert_contains "$RUNTIME_DIR/.env.example" 'GHOSTLIGHT_VIEWER_HEALTH_URL=http://viewer:8080'
+assert_contains "$RUNTIME_DIR/.env.example" 'GHOSTLIGHT_API_TOKEN=__GENERATE_AT_INSTALL__'
+assert_contains "$RUNTIME_DIR/.env.example" 'GHOSTLIGHT_BRIDGE_TOKEN=__GENERATE_AT_INSTALL__'
 assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_CODEC=h264'
 assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_WEBRTC_ICELITE=1'
 assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_PIPELINE=ximagesrc display-name={display}'
@@ -98,7 +106,17 @@ with open(sys.argv[1], encoding="utf-8") as policy_file:
 
 assert policy.get("DefaultCookiesSetting") == 1
 assert policy.get("RestoreOnStartup") == 1
+assert policy.get("NativeMessagingBlocklist") == ["*"]
+assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browser_agent"]
+assert policy.get("NativeMessagingUserLevelHosts") is False
 PY
+assert_contains "$REPO_DIR/viewer/chromium.conf" '--load-extension=/opt/ghostlight/browser-agent'
+assert_contains "$REPO_DIR/viewer/native-messaging-host.json" 'chrome-extension://okabifedphcnokaehflbkmpfphleoaha/'
+assert_contains "$REPO_DIR/viewer/extension/manifest.json" '"nativeMessaging"'
+assert_contains "$REPO_DIR/viewer/extension/manifest.json" '"tabs"'
+if grep -Eq '"(debugger|scripting|webRequest|cookies)"' "$REPO_DIR/viewer/extension/manifest.json"; then
+  fail "browser agent requests a forbidden broad permission"
+fi
 assert_contains "$RUNTIME_DIR/README.md" 'Apache-2.0'
 assert_contains "$RUNTIME_DIR/README.md" 'UDP'
 assert_contains "$RUNTIME_DIR/README.md" 'TCP'
@@ -150,7 +168,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"${FAKE_DOCKER_LOG:?}"' \
   'if [[ "$*" == *"config --format json"* ]]; then' \
   '  cat <<'\''JSON'\''' \
-  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:5ab745d2fc8972eab3ba2ddcaf109079d8bec45be51b9f9e28f61c3c8ae2ec8c","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_CAPTURE_VIDEO_CODEC":"h264","NEKO_CAPTURE_VIDEO_PIPELINE":"ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"1","NEKO_WEBRTC_NAT1TO1":"127.0.0.1"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080"}}}}' \
+  '{"services":{"viewer":{"image":"ghcr.io/evalops/ghostlight-viewer@sha256:fe135f3553502c1f057fb707c8e9731220d7321376f2eff84b84b4f02a0f7280","ports":[{"host_ip":"127.0.0.1"}],"environment":{"NEKO_MEMBER_MULTIUSER_USER_PASSWORD":"test-user-password","NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD":"test-admin-password","NEKO_DESKTOP_SCREEN":"1920x1080@30","NEKO_CAPTURE_VIDEO_CODEC":"h264","NEKO_CAPTURE_VIDEO_PIPELINE":"ximagesrc display-name={display} show-pointer=false use-damage=false ! video/x-raw,framerate=30/1 ! videoconvert ! queue ! video/x-raw,format=NV12 ! x264enc name=encoder threads=4 bitrate=3072 key-int-max=60 vbv-buf-capacity=3072 byte-stream=true tune=zerolatency speed-preset=veryfast ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,profile=constrained-baseline ! appsink name=appsink","NEKO_WEBRTC_UDPMUX":"52000","NEKO_WEBRTC_TCPMUX":"52000","NEKO_WEBRTC_ICELITE":"1","NEKO_WEBRTC_NAT1TO1":"127.0.0.1","GHOSTLIGHT_BRIDGE_TOKEN":"bridge-test-secret"}},"control":{"ports":[{"host_ip":"127.0.0.1"}],"environment":{"GHOSTLIGHT_VIEWER_URL":"http://127.0.0.1:8081","GHOSTLIGHT_VIEWER_HEALTH_URL":"http://viewer:8080","GHOSTLIGHT_API_TOKEN":"api-test-secret","GHOSTLIGHT_BRIDGE_TOKEN":"bridge-test-secret"}}}}' \
   'JSON' \
   '  exit 0' \
   'fi' \
@@ -168,6 +186,8 @@ printf '%s\n' \
   '  http://192.168.50.20:8080/readyz) printf '\''{"viewer":"ready"}\n'\'' ;;' \
   '  http://192.168.50.20:8080/v1/viewer) printf '\''{"viewer_url":"http://192.168.50.20:8081/session?mode=control"}\n'\'' ;;' \
   '  http://192.168.50.20:8081/health) printf '\''{"status":"ok"}\n'\'' ;;' \
+  '  http://192.168.50.20:8080/v1/workspaces) printf '\''[{"id":"default"}]\n'\'' ;;' \
+  '  http://192.168.50.20:8080/v1/bridge/bootstrap) printf '\''{"session_id":"default"}\n'\'' ;;' \
   '  *) exit 22 ;;' \
   'esac' >"$fake_bin/curl"
 chmod 700 "$fake_bin/curl"
@@ -176,6 +196,8 @@ sed \
   -e 's|GHOSTLIGHT_VIEWER_URL=.*|GHOSTLIGHT_VIEWER_URL=http://127.0.0.1:8081|' \
   -e 's|NEKO_USER_PASSWORD=.*|NEKO_USER_PASSWORD=test-user-password|' \
   -e 's|NEKO_ADMIN_PASSWORD=.*|NEKO_ADMIN_PASSWORD=test-admin-password|' \
+  -e 's|GHOSTLIGHT_API_TOKEN=.*|GHOSTLIGHT_API_TOKEN=api-test-secret|' \
+  -e 's|GHOSTLIGHT_BRIDGE_TOKEN=.*|GHOSTLIGHT_BRIDGE_TOKEN=bridge-test-secret|' \
   -e 's|NEKO_WEBRTC_NAT1TO1=.*|NEKO_WEBRTC_NAT1TO1=127.0.0.1|' \
   "$RUNTIME_DIR/.env.example" >"$env_fixture"
 chmod 600 "$env_fixture"
@@ -218,6 +240,13 @@ expect_failure_contains "control-rejected health URL" "GHOSTLIGHT_VIEWER_HEALTH_
   env PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$invalid_health_env" CHROMIUM_PROFILE_DIR="$profile_fixture" \
   FAKE_DOCKER_LOG="$docker_log" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK=1 "$RUNTIME_DIR/bin/preflight.sh"
 
+equal_tokens_env="$root_compose_fixture/equal-tokens.env"
+sed 's|GHOSTLIGHT_BRIDGE_TOKEN=.*|GHOSTLIGHT_BRIDGE_TOKEN=api-test-secret|' "$env_fixture" >"$equal_tokens_env"
+chmod 600 "$equal_tokens_env"
+expect_failure_contains "equal control and bridge tokens" "GHOSTLIGHT_API_TOKEN and GHOSTLIGHT_BRIDGE_TOKEN must be different" \
+  env PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$equal_tokens_env" CHROMIUM_PROFILE_DIR="$profile_fixture" \
+  FAKE_DOCKER_LOG="$docker_log" GHOSTLIGHT_SKIP_PROFILE_RUNTIME_CHECK=1 "$RUNTIME_DIR/bin/preflight.sh"
+
 canonical_profile_fixture="$(cd -P -- "$profile_fixture" && pwd)"
 relative_profile_fixture="$(python3 - "$RUNTIME_DIR" "$canonical_profile_fixture" <<'PY'
 import os
@@ -247,7 +276,7 @@ chmod 600 "$smoke_env_fixture"
 PATH="$fake_bin:$PATH" GHOSTLIGHT_ENV_FILE="$smoke_env_fixture" FAKE_DOCKER_LOG="$docker_log" \
   FAKE_CURL_LOG="$curl_log" SMOKE_ATTEMPTS=1 "$RUNTIME_DIR/bin/smoke.sh" >/dev/null \
   || fail "smoke must probe the configured private bind and normalize discovered viewer health URLs"
-expected_smoke_requests=$'http://192.168.50.20:8080/healthz\nhttp://192.168.50.20:8081/health\nhttp://192.168.50.20:8080/readyz\nhttp://192.168.50.20:8080/v1/viewer\nhttp://192.168.50.20:8081/health'
+expected_smoke_requests=$'http://192.168.50.20:8080/healthz\nhttp://192.168.50.20:8081/health\nhttp://192.168.50.20:8080/readyz\nhttp://192.168.50.20:8080/v1/viewer\nhttp://192.168.50.20:8081/health\nhttp://192.168.50.20:8080/v1/workspaces\nhttp://192.168.50.20:8080/v1/bridge/bootstrap'
 [[ "$(<"$curl_log")" == "$expected_smoke_requests" ]] \
   || fail "smoke requested unexpected URLs: $(tr '\n' ' ' <"$curl_log")"
 
