@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 type Workspace struct {
 	ID        string    `json:"id"`
@@ -94,6 +94,40 @@ type WorkspacePreferences struct {
 	Shortcuts   []WorkspaceShortcut `json:"shortcuts"`
 	RecentURLs  []string            `json:"recent_urls"`
 	UpdatedAt   time.Time           `json:"updated_at"`
+}
+
+type ChromePairing struct {
+	PairingCode string    `json:"pairing_code,omitempty"`
+	WorkspaceID string    `json:"workspace_id"`
+	DeviceName  string    `json:"device_name"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+type ChromeDevice struct {
+	ID          string     `json:"id"`
+	WorkspaceID string     `json:"workspace_id"`
+	Name        string     `json:"name"`
+	Scope       string     `json:"scope"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastSeenAt  time.Time  `json:"last_seen_at"`
+	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
+}
+
+type ChromeDeviceCredential struct {
+	Device      ChromeDevice `json:"device"`
+	DeviceToken string       `json:"device_token"`
+}
+
+type ChromeHandoff struct {
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspace_id"`
+	DeviceID    string    `json:"device_id"`
+	DeviceName  string    `json:"device_name"`
+	Title       string    `json:"title,omitempty"`
+	URL         string    `json:"url"`
+	State       string    `json:"state"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Attachment struct {

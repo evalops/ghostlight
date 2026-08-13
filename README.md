@@ -8,6 +8,8 @@
 
 Ghostlight runs a persistent Chromium profile on Linux and streams the browser to a native macOS client over WebRTC.
 
+The optional [Chrome continuity companion](docs/chrome-sync.md) sends a user-selected local Chrome tab to Ghostlight without copying credentials, cookies, history, or the Chrome profile.
+
 ## Current scope
 
 Ghostlight supports one fixed Chromium profile, one Neko viewer, one macOS client, and a trusted private network. Docker Compose owns service startup, restart, and shutdown. The Go control service keeps a durable workspace, browser-session catalog, tab snapshots, controller leases, command queue, stream descriptors, and attachment metadata. A Chromium extension reports tab state and applies bounded navigation and tab commands through an authenticated native-messaging bridge. Neko carries browser media and input while the native macOS shell presents tabs, navigation, files, controller ownership, and stream readiness directly.
@@ -157,6 +159,7 @@ Inspect the restored profile before changing `CHROMIUM_PROFILE_DIR` in a reviewe
 (cd control && go test ./...)
 (cd control && go test -race ./...)
 (cd control && go vet ./...)
+(cd companion/chrome && npm test)
 swift test --package-path macos
 macos/package-app.sh
 runtime/tests/test_runtime.sh

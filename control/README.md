@@ -44,6 +44,11 @@ Startup applies the same validation to the viewer URL and an explicit health URL
 | `GET /v1/sessions/{id}/commands/{command}` | `200` | Returns queued or durable terminal command status and result. |
 | `POST /v1/sessions/{id}/stream` | `201` | Creates a short-lived descriptor for the current Neko stream. |
 | `GET, POST /v1/sessions/{id}/attachments` | `200, 201` | Lists metadata or stages a lease-authorized file up to 25 MiB. A session is capped at 100 files and 1 GiB. |
+| `POST /v1/workspaces/{id}/chrome-pairings` | `201` | Creates a one-use, 10-minute Chrome pairing capability. |
+| `POST /v1/chrome-pairings/redeem` | `201` | Exchanges that capability for a hashed, write-only device credential. |
+| `POST /v1/chrome-handoffs` | `201` | Accepts one idempotent safe-URL handoff from a paired Chrome device. |
+| `GET, PUT /v1/workspaces/{id}/chrome-handoffs[/{handoff}]` | `200` | Lists pending handoffs or marks one opened/dismissed. |
+| `GET, DELETE /v1/workspaces/{id}/chrome-devices[/{device}]` | `200, 204` | Lists paired devices or revokes one. |
 
 Readiness replaces the selected health base URL's path and query with `/health`. For example, `http://viewer:8080/login?next=1` produces the readiness target `http://viewer:8080/health`.
 
@@ -55,7 +60,7 @@ Viewer network failure, timeout, redirect, or a response outside `200` through `
 
 Unknown paths return `404`. A known path with a method other than `GET` returns `405`, an `Allow: GET` header, and a JSON error body. The service does not read request bodies.
 
-`GET /v1/viewer` remains a stateless compatibility route. Product routes require the API bearer token. Lease renewal, release, commands, and attachment upload also require the lease token returned only when a client acquires a lease. Bridge routes use the separate bridge bearer token. Request bodies reject unknown JSON fields; session ensure and command requests require `Idempotency-Key`. The bridge records command completion before acknowledging it, and control retains terminal status so a lost response retries the acknowledgment without replaying the browser action.
+`GET /v1/viewer` remains a stateless compatibility route. Product routes require the API bearer token. Lease renewal, release, commands, and attachment upload also require the lease token returned only when a client acquires a lease. Bridge routes use the separate bridge bearer token. Chrome pairing redemption uses a one-time capability; handoff writes use the resulting `handoff:write` device credential. Request bodies reject unknown JSON fields; session ensure, command, and Chrome handoff requests require `Idempotency-Key`. The bridge records command completion before acknowledging it, and control retains terminal status so a lost response retries the acknowledgment without replaying the browser action.
 
 ## Network boundary
 

@@ -86,6 +86,10 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var stream: StreamConnection?
     @Published private(set) var viewerBootstrap: ViewerBootstrap?
     @Published private(set) var workspacePreferences: WorkspacePreferences?
+    @Published private(set) var chromeHandoffs: [ChromeHandoff] = []
+    @Published private(set) var chromeDevices: [ChromeDevice] = []
+    @Published private(set) var chromePairing: ChromePairing?
+    @Published private(set) var chromeSyncError: String?
     @Published private(set) var preferencesError: String?
     @Published private(set) var commandError: String?
     @Published private(set) var commandStatus: CommandStatus = .idle
@@ -183,6 +187,10 @@ final class SessionViewModel: ObservableObject {
         surfaceState = .idle
         viewerBootstrap = nil
         workspacePreferences = nil
+        chromeHandoffs = []
+        chromeDevices = []
+        chromePairing = nil
+        chromeSyncError = nil
         preferencesError = nil
         commandError = nil
         clearCommandTracking()
@@ -211,6 +219,8 @@ final class SessionViewModel: ObservableObject {
                 defaults.set(browser.id, forKey: Self.sessionIDKey)
                 apply(browser)
                 await loadWorkspacePreferences(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
+                await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
+                await loadChromeDevices(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
                 guard owns(runID) else { return }
                 startEvents(at: origin, sessionID: browser.id, runID: runID)
 
@@ -263,6 +273,10 @@ final class SessionViewModel: ObservableObject {
         stream = nil
         viewerBootstrap = nil
         workspacePreferences = nil
+        chromeHandoffs = []
+        chromeDevices = []
+        chromePairing = nil
+        chromeSyncError = nil
         preferencesError = nil
         lease = nil
         addressDraft = ""
@@ -354,7 +368,11 @@ final class SessionViewModel: ObservableObject {
             attachmentID: failedCommand.attachmentID,
             expectedRevision: session?.revision ?? failedCommand.expectedRevision
         )
-        submit(CommandSubmission(idempotencyKey: UUID().uuidString.lowercased(), command: retry))
+        submit(CommandSubmission(
+            idempotencyKey: UUID().uuidString.lowercased(),
+            command: retry,
+            handoffID: failedSubmission.handoffID
+        ))
     }
 
     func navigate() {
@@ -368,6 +386,67 @@ final class SessionViewModel: ObservableObject {
         ) else { return }
         addressDraft = target
         send(.init(type: .navigate, tabID: activeTab?.id, url: target, expectedRevision: session?.revision ?? 0))
+    }
+
+    func createChromePairing(deviceName: String) async -> Bool {
+        let name = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 100, let session,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return false }
+        do {
+            chromePairing = try await client.createChromePairing(
+                at: origin,
+                apiToken: apiToken,
+                workspaceID: session.workspaceID,
+                deviceName: name
+            )
+            chromeSyncError = nil
+            return true
+        } catch {
+            chromeSyncError = error.localizedDescription
+            return false
+        }
+    }
+
+    func openChromeHandoff(_ handoff: ChromeHandoff) {
+        guard handoff.state == "pending",
+              WorkspacePreferences.safeRecentURL(handoff.url) != nil else { return }
+        let command = BrowserCommand(
+            type: .newTab,
+            url: handoff.url,
+            expectedRevision: session?.revision ?? 0
+        )
+        submit(CommandSubmission(
+            idempotencyKey: "chrome-handoff-\(handoff.id)",
+            command: command,
+            handoffID: handoff.id
+        ))
+    }
+
+    func dismissChromeHandoff(_ handoff: ChromeHandoff) {
+        resolveChromeHandoff(handoff.id, state: "dismissed")
+    }
+
+    func refreshChromeDevices() async {
+        guard let session,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
+        await loadChromeDevices(at: origin, apiToken: apiToken, workspaceID: session.workspaceID)
+    }
+
+    func revokeChromeDevice(_ device: ChromeDevice) async {
+        guard let session,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
+        do {
+            try await client.revokeChromeDevice(
+                at: origin,
+                apiToken: apiToken,
+                workspaceID: session.workspaceID,
+                deviceID: device.id
+            )
+            chromeDevices.removeAll { $0.id == device.id }
+            chromeSyncError = nil
+        } catch {
+            chromeSyncError = error.localizedDescription
+        }
     }
 
     nonisolated static func navigationTarget(
@@ -577,6 +656,9 @@ final class SessionViewModel: ObservableObject {
                let url = receipt.url ?? resolvedSubmission?.command.url {
                 recordRecentURL(url)
             }
+            if previousState != .applied, let handoffID = resolvedSubmission?.handoffID {
+                resolveChromeHandoff(handoffID, state: "opened")
+            }
         case .failed:
             failedSubmission = submission ?? submissionsByReceiptID[receipt.id]
             failedSubmissionIsTerminal = true
@@ -634,6 +716,65 @@ final class SessionViewModel: ObservableObject {
         } catch {
             guard session?.workspaceID == workspaceID else { return }
             preferencesError = error.localizedDescription
+        }
+    }
+
+    private func loadChromeHandoffs(at origin: URL, apiToken: String, workspaceID: String) async {
+        do {
+            let values = try await client.listChromeHandoffs(
+                at: origin,
+                apiToken: apiToken,
+                workspaceID: workspaceID
+            )
+            guard session?.workspaceID == workspaceID else { return }
+            chromeHandoffs = values
+            chromeSyncError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard session?.workspaceID == workspaceID else { return }
+            chromeSyncError = error.localizedDescription
+        }
+    }
+
+    private func loadChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async {
+        do {
+            let values = try await client.listChromeDevices(
+                at: origin,
+                apiToken: apiToken,
+                workspaceID: workspaceID
+            )
+            guard session?.workspaceID == workspaceID else { return }
+            chromeDevices = values.filter { $0.revokedAt == nil }
+            chromeSyncError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard session?.workspaceID == workspaceID else { return }
+            chromeSyncError = error.localizedDescription
+        }
+    }
+
+    private func resolveChromeHandoff(_ handoffID: String, state: String) {
+        guard let session,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await client.updateChromeHandoff(
+                    at: origin,
+                    apiToken: apiToken,
+                    workspaceID: session.workspaceID,
+                    handoffID: handoffID,
+                    state: state
+                )
+                chromeHandoffs.removeAll { $0.id == handoffID }
+                chromeSyncError = nil
+            } catch let error as SessionClientError where error.statusCode == 409 {
+                chromeHandoffs.removeAll { $0.id == handoffID }
+            } catch {
+                chromeSyncError = error.localizedDescription
+            }
         }
     }
 
@@ -699,6 +840,7 @@ final class SessionViewModel: ObservableObject {
         eventsTask?.cancel()
         eventsTask = Task { [weak self] in
             guard let self else { return }
+            var pollCount = 0
             while owns(runID), !Task.isCancelled {
                 do {
                     let revision = session?.revision ?? 0
@@ -709,6 +851,10 @@ final class SessionViewModel: ObservableObject {
                         afterRevision: revision
                     ) {
                         apply(updated)
+                    }
+                    pollCount += 1
+                    if pollCount.isMultiple(of: 8), let workspaceID = session?.workspaceID {
+                        await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: workspaceID)
                     }
                     try await Task.sleep(for: .milliseconds(250))
                 } catch is CancellationError {
@@ -783,4 +929,11 @@ final class SessionViewModel: ObservableObject {
 private struct CommandSubmission: Equatable {
     let idempotencyKey: String
     let command: BrowserCommand
+    let handoffID: String?
+
+    init(idempotencyKey: String, command: BrowserCommand, handoffID: String? = nil) {
+        self.idempotencyKey = idempotencyKey
+        self.command = command
+        self.handoffID = handoffID
+    }
 }

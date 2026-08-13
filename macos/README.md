@@ -30,6 +30,8 @@ The control and stream URLs must use HTTP or HTTPS, include a host, and contain 
 
 After the stream connects, the native Home view provides web search, app shortcuts, open tabs, file attachment, and connection settings. Home shortcuts and searches submit the same revision-fenced browser commands as the toolbar. **Show current page** returns to the live WebRTC viewer without disconnecting it.
 
+Home also lists pending tabs sent by a paired local Chrome. **Open** submits a deterministic, lease-protected `create_tab` command and resolves the inbox item only after the command applies. **Dismiss** resolves the item without changing Chromium. **Connect your Chrome** creates the one-use pairing capability described in [Chrome continuity](../docs/chrome-sync.md).
+
 ## Saved connection
 
 The client stores the control origin and durable session ID in `UserDefaults` after connection succeeds. `GHOSTLIGHT_CONTROL_URL` overrides the saved origin and `GHOSTLIGHT_API_TOKEN` supplies the memory-only token for unattended launch.

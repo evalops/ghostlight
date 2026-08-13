@@ -765,6 +765,118 @@ func TestStoreCommandAcceptsLeaseAfterHeartbeat(t *testing.T) {
 	}
 }
 
+func TestChromeHandoffPairingConsentSafetyAndRevocation(t *testing.T) {
+	clock := func() time.Time { return time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC) }
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), clock)
+
+	pairingResponse := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/chrome-pairings", "", "", strings.NewReader(`{"device_name":"Jonathan's Chrome"}`))
+	if pairingResponse.Code != http.StatusCreated {
+		t.Fatalf("pairing = %d %s", pairingResponse.Code, pairingResponse.Body.String())
+	}
+	var pairing ChromePairing
+	decodeRecorder(t, pairingResponse, &pairing)
+	if len(pairing.PairingCode) < 40 || pairing.ExpiresAt.Sub(clock()) != chromePairingTTL {
+		t.Fatalf("pairing = %#v", pairing)
+	}
+
+	redeemBody := fmt.Sprintf(`{"pairing_code":%q,"device_id":"chrome-device-1234","device_name":"Jonathan's Chrome"}`, pairing.PairingCode)
+	redeemed := doChromeRequest(h, http.MethodPost, "/v1/chrome-pairings/redeem", "", "", strings.NewReader(redeemBody))
+	if redeemed.Code != http.StatusCreated {
+		t.Fatalf("redeem = %d %s", redeemed.Code, redeemed.Body.String())
+	}
+	var credential ChromeDeviceCredential
+	decodeRecorder(t, redeemed, &credential)
+	if credential.Device.Scope != chromeDeviceScope || len(credential.DeviceToken) < 40 {
+		t.Fatalf("credential = %#v", credential)
+	}
+
+	reused := doChromeRequest(h, http.MethodPost, "/v1/chrome-pairings/redeem", "", "", strings.NewReader(redeemBody))
+	if reused.Code != http.StatusConflict {
+		t.Fatalf("reused pairing = %d %s", reused.Code, reused.Body.String())
+	}
+
+	safeBody := `{"title":"A useful page","url":"https://example.test/work?q=ghostlight"}`
+	created := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoffs", credential.DeviceToken, "handoff-1", strings.NewReader(safeBody))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("handoff = %d %s", created.Code, created.Body.String())
+	}
+	var handoff ChromeHandoff
+	decodeRecorder(t, created, &handoff)
+	if handoff.State != "pending" || handoff.DeviceName != "Jonathan's Chrome" {
+		t.Fatalf("handoff = %#v", handoff)
+	}
+
+	retried := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoffs", credential.DeviceToken, "handoff-1", strings.NewReader(safeBody))
+	var retry ChromeHandoff
+	decodeRecorder(t, retried, &retry)
+	if retried.Code != http.StatusCreated || retry.ID != handoff.ID {
+		t.Fatalf("retry = %d %#v", retried.Code, retry)
+	}
+
+	unsafe := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoffs", credential.DeviceToken, "handoff-2", strings.NewReader(`{"title":"Callback","url":"https://example.test/callback?access_token=secret"}`))
+	if unsafe.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe = %d %s", unsafe.Code, unsafe.Body.String())
+	}
+
+	listed := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/chrome-handoffs", "", "", nil)
+	var handoffs []ChromeHandoff
+	decodeRecorder(t, listed, &handoffs)
+	if len(handoffs) != 1 || handoffs[0].ID != handoff.ID {
+		t.Fatalf("listed = %#v", handoffs)
+	}
+
+	opened := doJSON(t, h, http.MethodPut, "/v1/workspaces/default/chrome-handoffs/"+handoff.ID, "", "", strings.NewReader(`{"state":"opened"}`))
+	if opened.Code != http.StatusOK {
+		t.Fatalf("opened = %d %s", opened.Code, opened.Body.String())
+	}
+	listed = doJSON(t, h, http.MethodGet, "/v1/workspaces/default/chrome-handoffs", "", "", nil)
+	decodeRecorder(t, listed, &handoffs)
+	if len(handoffs) != 0 {
+		t.Fatalf("pending after open = %#v", handoffs)
+	}
+	if _, err := h.store.db.Exec(`UPDATE chrome_devices SET scope='bookmarks:write' WHERE id=?`, credential.Device.ID); err != nil {
+		t.Fatal(err)
+	}
+	wrongScope := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoffs", credential.DeviceToken, "handoff-scope", strings.NewReader(safeBody))
+	if wrongScope.Code != http.StatusForbidden {
+		t.Fatalf("wrong scope = %d %s", wrongScope.Code, wrongScope.Body.String())
+	}
+	if _, err := h.store.db.Exec(`UPDATE chrome_devices SET scope=? WHERE id=?`, chromeDeviceScope, credential.Device.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked := doJSON(t, h, http.MethodDelete, "/v1/workspaces/default/chrome-devices/"+credential.Device.ID, "", "", nil)
+	if revoked.Code != http.StatusNoContent {
+		t.Fatalf("revoke = %d %s", revoked.Code, revoked.Body.String())
+	}
+	afterRevoke := doChromeRequest(h, http.MethodPost, "/v1/chrome-handoffs", credential.DeviceToken, "handoff-3", strings.NewReader(safeBody))
+	if afterRevoke.Code != http.StatusUnauthorized {
+		t.Fatalf("after revoke = %d %s", afterRevoke.Code, afterRevoke.Body.String())
+	}
+
+	database, err := os.ReadFile(filepath.Join(h.config.StateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(database, []byte(pairing.PairingCode)) || bytes.Contains(database, []byte(credential.DeviceToken)) {
+		t.Fatal("pairing or device bearer token was persisted in plaintext")
+	}
+}
+
+func TestChromePairingExpiresClosed(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	pairingResponse := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/chrome-pairings", "", "", strings.NewReader(`{"device_name":"Chrome"}`))
+	var pairing ChromePairing
+	decodeRecorder(t, pairingResponse, &pairing)
+	now = now.Add(chromePairingTTL)
+	body := fmt.Sprintf(`{"pairing_code":%q,"device_id":"chrome-device-1234","device_name":"Chrome"}`, pairing.PairingCode)
+	redeemed := doChromeRequest(h, http.MethodPost, "/v1/chrome-pairings/redeem", "", "", strings.NewReader(body))
+	if redeemed.Code != http.StatusUnauthorized || !strings.Contains(redeemed.Body.String(), "pairing_expired") {
+		t.Fatalf("expired pairing = %d %s", redeemed.Code, redeemed.Body.String())
+	}
+}
+
 func productTestConfig(root string) Config {
 	return Config{
 		ViewerURL:       "https://viewer.example.test",
@@ -810,6 +922,20 @@ func doJSONNoT(h http.Handler, method, path, idempotencyKey, token string, body 
 		if token != "" {
 			request.Header.Set("X-Ghostlight-Lease-Token", token)
 		}
+	}
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func doChromeRequest(h http.Handler, method, path, token, idempotencyKey string, body io.Reader) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "http://ghostlight.test"+path, body)
+	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	recorder := httptest.NewRecorder()
 	h.ServeHTTP(recorder, request)

@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Continue in Ghostlight",
+  "description": "Send the current Chrome tab to your Ghostlight inbox when you click the extension.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["activeTab", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Continue in Ghostlight"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "incognito": "not_allowed"
+}

@@ -129,6 +129,59 @@ public struct WorkspacePreferences: Codable, Equatable, Sendable {
     }
 }
 
+public struct ChromePairing: Codable, Equatable, Sendable {
+    public let pairingCode: String
+    public let workspaceID: String
+    public let deviceName: String
+    public let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case pairingCode = "pairing_code"
+        case workspaceID = "workspace_id"
+        case deviceName = "device_name"
+        case expiresAt = "expires_at"
+    }
+}
+
+public struct ChromeHandoff: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let workspaceID: String
+    public let deviceID: String
+    public let deviceName: String
+    public let title: String?
+    public let url: String
+    public let state: String
+    public let createdAt: Date
+    public let updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, url, state
+        case workspaceID = "workspace_id"
+        case deviceID = "device_id"
+        case deviceName = "device_name"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct ChromeDevice: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let workspaceID: String
+    public let name: String
+    public let scope: String
+    public let createdAt: Date
+    public let lastSeenAt: Date
+    public let revokedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, scope
+        case workspaceID = "workspace_id"
+        case createdAt = "created_at"
+        case lastSeenAt = "last_seen_at"
+        case revokedAt = "revoked_at"
+    }
+}
+
 public struct BrowserTab: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String?
