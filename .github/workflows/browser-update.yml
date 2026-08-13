@@ -16,6 +16,8 @@ name: Browser update safety
       - scripts/test-image-safety.sh
       - scripts/update-control-base-images.sh
       - scripts/update-neko-image.sh
+      - scripts/update-viewer-base.sh
+      - viewer/Dockerfile
       - compose.yaml
       - runtime/bin/**
       - tests/acceptance/**
@@ -35,7 +37,7 @@ jobs:
   candidate:
     name: Build, boot, persist, and scan candidate
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     outputs:
       neko-image: ${{ steps.refs.outputs.neko-image }}
       go-image: ${{ steps.refs.outputs.go-image }}
@@ -78,15 +80,20 @@ jobs:
           mkdir -p output/image-safety
           bash scripts/check-image-drift.sh |& tee output/image-safety/digest-drift.txt
 
-      - name: Resolve the candidate to an immutable digest
+      - name: Resolve the candidate image under test
         id: candidate
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == pull_request ]]; then
+            # Pull requests exercise the deployed pin: the published hardened viewer.
             resolved=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' runtime/.env.example)
           else
-            resolved=$(bash scripts/resolve-image-digest.sh "$CANDIDATE_REF")
+            # Schedule and dispatch runs test the hardened viewer rebuilt from
+            # the resolved upstream base, never raw upstream.
+            base=$(bash scripts/resolve-image-digest.sh "$CANDIDATE_REF")
+            printf 'base=%s\n' "$base" >>"$GITHUB_OUTPUT"
+            resolved="ghostlight-viewer:candidate-${{ github.sha }}"
           fi
           printf 'image=%s\n' "$resolved" >>"$GITHUB_OUTPUT"
           printf '%s\n' "$resolved" | tee candidate-image.txt
@@ -95,28 +102,37 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          bash scripts/update-neko-image.sh "${{ steps.candidate.outputs.image }}"
+          bash scripts/update-viewer-base.sh "${{ steps.candidate.outputs.base }}"
           bash scripts/update-control-base-images.sh
 
       - name: Verify the candidate-only diff and repository invariants
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/update-neko-image.sh --check "${{ steps.candidate.outputs.image }}"
+          if [[ "${{ github.event_name }}" == pull_request ]]; then
+            pinned=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' runtime/.env.example)
+            bash scripts/update-neko-image.sh --check "$pinned"
+          else
+            bash scripts/update-viewer-base.sh --check "${{ steps.candidate.outputs.base }}"
+          fi
           bash scripts/check-image-safety.sh
           git diff --check
           changed=$(git diff --name-only)
-          if [[ -n "$changed" ]] && grep -Ev '^(control/Dockerfile|runtime/\.env\.example|runtime/docker-compose\.yml|runtime/tests/test_runtime\.sh)$' <<<"$changed"; then
+          if [[ -n "$changed" ]] && grep -Ev '^(control/Dockerfile|viewer/Dockerfile)$' <<<"$changed"; then
             echo "candidate updater changed an unauthorized path" >&2
             exit 1
           fi
+
+      - name: Build the hardened viewer candidate
+        if: github.event_name != 'pull_request'
+        run: docker build --tag "ghostlight-viewer:candidate-${{ github.sha }}" viewer
 
       - name: Record the exact candidate references
         id: refs
         shell: bash
         run: |
           set -euo pipefail
-          neko_image=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' runtime/.env.example)
+          neko_image=$(awk '$1 == "FROM" && $2 ~ /^ghcr\.io\/m1k1o\/neko\/chromium@/ { print $2; exit }' viewer/Dockerfile)
           go_image=$(awk '$1 == "FROM" && $2 ~ /^golang:/ { print $2; exit }' control/Dockerfile)
           alpine_image=$(awk '$1 == "FROM" && $2 ~ /^alpine:/ { print $2; exit }' control/Dockerfile)
           {
@@ -212,7 +228,7 @@ jobs:
           set -euo pipefail
           go_digest=${GO_BASE_IMAGE#*@}
           alpine_digest=${ALPINE_BASE_IMAGE#*@}
-          bash scripts/update-neko-image.sh "$CANDIDATE_IMAGE"
+          bash scripts/update-viewer-base.sh "$CANDIDATE_IMAGE"
           GHOSTLIGHT_GO_BASE_RESOLVED_DIGEST="$go_digest" \
           GHOSTLIGHT_ALPINE_BASE_RESOLVED_DIGEST="$alpine_digest" \
             bash scripts/update-control-base-images.sh
@@ -238,8 +254,8 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git switch -c "$branch"
-          git add control/Dockerfile runtime/.env.example runtime/docker-compose.yml runtime/tests/test_runtime.sh
-          git commit -m "chore(runtime): update container image digests"
+          git add control/Dockerfile viewer/Dockerfile
+          git commit -m "chore(containers): update base image digests"
           tested_tree=$(git rev-parse 'HEAD^{tree}')
           remote_oid=$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 { print $1 }')
           if [[ -n "$remote_oid" ]]; then
@@ -286,5 +302,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --base main \
             --head "$branch" \
-            --title "chore(runtime): update container image digests" \
-            --body "Automated digest proposal for \`$CANDIDATE_IMAGE\`. The scheduled safety lane built the control image, booted and recreated the candidate stack, verified synthetic Chromium profile persistence, and scanned both images before opening this PR. Required protected checks must still pass before merge."
+            --title "chore(containers): update base image digests" \
+            --body "Automated digest proposal for \`$CANDIDATE_IMAGE\` as the hardened viewer base. The scheduled safety lane rebuilt the hardened viewer from this base, built the control image, booted and recreated the candidate stack, verified synthetic Chromium profile persistence, and scanned both images before opening this PR. After merge, the viewer-image workflow publishes the hardened rebuild; promoting the deployed NEKO_IMAGE pin to that published digest remains a separate reviewed step. Required protected checks must still pass before merge."

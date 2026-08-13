@@ -212,17 +212,24 @@ The upstream Neko 3.1.5 image is not eligible for the runtime pin under the repo
 
 The hardened viewer publish workflow builds `linux/amd64` and `linux/arm64` images with SBOM and provenance attestations. Publish run [`31632547870`](https://github.com/evalops/ghostlight/actions/runs/31632547870) built source `d6cba42d564e1cc8bb9fc3d3f6842915e9f221d5` and produced the public index `ghcr.io/evalops/ghostlight-viewer@sha256:2d609085752e66e56f867caf92a357b13fa393155d6d3acd2e1ab538ef593a44`, which is mirrored in the runtime configuration and tests. The earlier [main viewer security receipt](docs/security/2026-08-12-viewer-main/README.md) records the same build pipeline's child digests, attestations, version metadata, amd64 health check, and Trivy format. The release candidate workflow repeats live persistence and fixed-vulnerability checks against the promoted digest before merge. Both control base images, GitHub Actions, and Trivy also use immutable digests or commit SHAs. Repository checks reject mutable or inconsistent references.
 
-`.github/workflows/browser-update.yml` runs at `04:17 UTC` each Monday, accepts a manual upstream Neko candidate, and runs on pull requests that change its inputs. Schedule and manual runs resolve the selected Neko tag plus the Go and Alpine base tags to digests. The candidate job then builds control, runs runtime and backup checks, boots and recreates the synthetic Linux persistence stack, scans the viewer and control images with the pinned Trivy image, and retains `output/` receipts for 30 days.
+`.github/workflows/browser-update.yml` runs at `04:17 UTC` each Monday, accepts a manual upstream Neko candidate, and runs on pull requests that change its inputs. Schedule and manual runs resolve the selected Neko tag plus the Go and Alpine base tags to digests. The candidate job then rebuilds the hardened viewer from the resolved upstream base, builds control, runs runtime and backup checks, boots and recreates the synthetic Linux persistence stack with the hardened candidate, scans the viewer and control images with the pinned Trivy image, and retains `output/` receipts for 30 days. Pull requests exercise the deployed hardened pin from `runtime/.env.example` instead.
 
-After a green schedule or manual candidate job, a separate write-scoped job opens a pull request containing only `control/Dockerfile` and the three mirrored Neko references. It creates no pull request when those files already contain the resolved digests. Review, required checks, and merge remain manual. Dependabot also checks the Docker bases in `control/` each Monday at `04:47 UTC`.
+After a green schedule or manual candidate job, a separate write-scoped job opens a pull request containing only `control/Dockerfile` and `viewer/Dockerfile`. It creates no pull request when those files already contain the resolved digests. Merging that pull request triggers the hardened viewer publish workflow; promoting the deployed `NEKO_IMAGE` pin to the newly published digest remains a separate reviewed step. Review, required checks, and merge remain manual. Dependabot also checks the Docker bases in `control/` each Monday at `04:47 UTC`.
 
 Protected candidate run `31627739196` at source `00621732d38b9137e35fd459869ceb451d07862a` built control, passed the runtime and backup checks, recreated the synthetic Linux persistence stack with the final viewer digest, and passed the viewer and control scans. A failure in the candidate job prevents the proposal job from running.
 
-For a reviewed upstream Neko candidate:
+For a reviewed upstream Neko base candidate:
 
 ```sh
 candidate="$(scripts/resolve-image-digest.sh ghcr.io/m1k1o/neko/chromium:<tag>)"
-scripts/update-neko-image.sh "$candidate"
+scripts/update-viewer-base.sh "$candidate"
+scripts/check-image-safety.sh
+```
+
+After the merge publishes a fresh hardened viewer, promote the deployed pin to the published digest:
+
+```sh
+scripts/update-neko-image.sh "ghcr.io/evalops/ghostlight-viewer@sha256:<digest>"
 scripts/check-image-safety.sh
 ```
 

@@ -41,7 +41,10 @@ grep -Fq -- 'continue-on-error' "$workflow" && {
 }
 require_text 'GHOSTLIGHT_NEKO_CANDIDATE_IMAGE'
 require_text 'bash scripts/update-neko-image.sh'
+require_text 'bash scripts/update-viewer-base.sh'
 require_text 'bash scripts/update-control-base-images.sh'
+require_text "docker build --tag \"ghostlight-viewer:candidate-${dollar}{{ github.sha }}\" viewer"
+require_text "grep -Ev '^(control/Dockerfile|viewer/Dockerfile)$'"
 require_text 'needs: candidate'
 require_text "if: github.event_name != 'pull_request'"
 require_text "CANDIDATE_IMAGE: ${dollar}{{ needs.candidate.outputs.neko-image }}"

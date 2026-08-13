@@ -3,12 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-RUNTIME_DIR="$(cd -- "$SCRIPT_DIR/../runtime" && pwd)"
-CONTROL_DIR="$(cd -- "$SCRIPT_DIR/../control" && pwd)"
+ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+CONTROL_DIR="$ROOT_DIR/control"
 neko_candidate="${GHOSTLIGHT_NEKO_CANDIDATE_IMAGE:-ghcr.io/m1k1o/neko/chromium:latest}"
 go_candidate="${GHOSTLIGHT_GO_BASE_CANDIDATE:-golang:1.26.5-alpine}"
 alpine_candidate="${GHOSTLIGHT_ALPINE_BASE_CANDIDATE:-alpine:3.24}"
-neko_pinned="$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$RUNTIME_DIR/.env.example")"
+# The deployed NEKO_IMAGE pin tracks the hardened ghostlight-viewer rebuild, so
+# upstream drift is measured against the base the hardened viewer builds from.
+neko_pinned="$(awk '$1 == "FROM" && $2 ~ /^ghcr\.io\/m1k1o\/neko\/chromium@/ { image = $2; sub(/^[^@]*@/, "", image); print image; exit }' "$ROOT_DIR/viewer/Dockerfile")"
 go_pinned="$(awk '$1 == "FROM" && $2 ~ /golang/ { image = $2; sub(/^[^@]*@/, "", image); print image; exit }' "$CONTROL_DIR/Dockerfile")"
 alpine_pinned="$(awk '$1 == "FROM" && $2 ~ /^alpine/ { image = $2; sub(/^[^@]*@/, "", image); print image; exit }' "$CONTROL_DIR/Dockerfile")"
 
@@ -39,7 +41,7 @@ check_candidate() {
   fi
 }
 
-check_candidate "Neko" "$neko_candidate" "$neko_pinned"
+check_candidate "Neko viewer base" "$neko_candidate" "$neko_pinned"
 check_candidate "Go build base" "$go_candidate" "$go_pinned"
 check_candidate "Alpine runtime base" "$alpine_candidate" "$alpine_pinned"
 
