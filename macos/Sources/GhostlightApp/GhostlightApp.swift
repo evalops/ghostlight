@@ -64,6 +64,7 @@ struct ContentView: View {
     @State private var showingChromePairing = false
     @State private var showingHome = true
     @State private var homeQuery = ""
+    @State private var nativeClientName = Host.current().localizedName ?? "This Mac"
 
     var body: some View {
         ZStack {
@@ -99,6 +100,9 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.addressFocusRequest) { _, _ in
             addressFocused = true
+        }
+        .onChange(of: viewModel.controlOrigin) { _, _ in
+            viewModel.refreshPairingStatus()
         }
     }
 
@@ -147,7 +151,9 @@ struct ContentView: View {
             } else {
                 Text("Open your workspace")
                     .font(.title2.bold())
-                Text("Use the private address and API token from your Ghostlight host.")
+                Text(viewModel.hasPairedCredential
+                     ? "This Mac has a native client token in Keychain for this control address."
+                     : "Enter the control address and operator API token.")
                     .foregroundStyle(.secondary)
             }
 
@@ -161,17 +167,45 @@ struct ContentView: View {
                     .onSubmit(viewModel.connect)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("API TOKEN")
-                    .font(.caption2.weight(.semibold))
-                    .tracking(0.7)
-                    .foregroundStyle(.secondary)
-                SecureField("Required", text: $viewModel.apiToken)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(viewModel.connect)
-                Text("Held in memory for this app session. It is not written to preferences.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            if viewModel.hasPairedCredential {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "key.fill")
+                        .foregroundStyle(Color(red: 0.43, green: 0.24, blue: 0.92))
+                        .frame(width: 28, height: 28)
+                        .background(Color(red: 0.43, green: 0.24, blue: 0.92).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Paired")
+                            .font(.headline)
+                        Text("Future launches use the Keychain credential.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("API TOKEN")
+                        .font(.caption2.weight(.semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(.secondary)
+                    SecureField("Operator token", text: $viewModel.apiToken)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(viewModel.connectWithOperatorToken)
+                    Text("Pairing uses this token once. The app stores only the enrolled client token in Keychain.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("MAC NAME")
+                        .font(.caption2.weight(.semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(.secondary)
+                    TextField("This Mac", text: $nativeClientName)
+                        .textFieldStyle(.roundedBorder)
+                }
             }
 
             if case let .failed(message) = viewModel.controlState {
@@ -180,23 +214,67 @@ struct ContentView: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
-            Button(action: viewModel.connect) {
-                HStack {
-                    if case .connecting = viewModel.controlState {
-                        ProgressView().controlSize(.small)
-                    }
-                    Text(viewModel.controlState == .connecting ? "Connecting…" : "Open Ghostlight")
-                    Spacer()
-                    Image(systemName: "arrow.right")
-                }
-                .frame(maxWidth: .infinity)
+            if let message = viewModel.pairingError {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(Color(red: 0.43, green: 0.24, blue: 0.92))
-            .disabled(viewModel.controlState == .connecting)
-            .keyboardShortcut(.defaultAction)
+
+            if viewModel.hasPairedCredential {
+                Button(action: viewModel.connect) {
+                    HStack {
+                        if case .connecting = viewModel.controlState {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(viewModel.controlState == .connecting ? "Connecting…" : "Open Ghostlight")
+                        Spacer()
+                        Image(systemName: "arrow.right")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(Color(red: 0.43, green: 0.24, blue: 0.92))
+                .disabled(viewModel.forgettingPairingInProgress || viewModel.controlState == .connecting)
+                .keyboardShortcut(.defaultAction)
+
+                Button(role: .destructive) {
+                    Task { _ = await viewModel.forgetPairing() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.forgettingPairingInProgress {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(viewModel.forgettingPairingInProgress ? "Forgetting…" : "Forget Pairing")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .disabled(viewModel.forgettingPairingInProgress || viewModel.controlState == .connecting)
+            } else {
+                Button {
+                    Task { _ = await viewModel.pairThisMac(clientName: nativeClientName) }
+                } label: {
+                    HStack {
+                        if viewModel.pairingInProgress {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(viewModel.pairingInProgress ? "Pairing…" : "Pair This Mac")
+                        Spacer()
+                        Image(systemName: "key.fill")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(Color(red: 0.43, green: 0.24, blue: 0.92))
+                .disabled(viewModel.pairingInProgress || viewModel.controlState == .connecting)
+                .keyboardShortcut(.defaultAction)
+
+                Button("Open with API Token", action: viewModel.connectWithOperatorToken)
+                    .frame(maxWidth: .infinity)
+                    .disabled(viewModel.pairingInProgress || viewModel.controlState == .connecting)
+            }
         }
     }
 

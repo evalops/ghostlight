@@ -96,6 +96,10 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var commandError: String?
     @Published private(set) var commandStatus: CommandStatus = .idle
     @Published private(set) var addressFocusRequest = 0
+    @Published private(set) var hasPairedCredential = false
+    @Published private(set) var pairingInProgress = false
+    @Published private(set) var forgettingPairingInProgress = false
+    @Published private(set) var pairingError: String?
 
     static let originKey = "GhostlightControlOrigin"
     static let sessionIDKey = "GhostlightSessionID"
@@ -103,6 +107,7 @@ final class SessionViewModel: ObservableObject {
     static let legacyOriginKey = "GhostlightControlPlaneURL"
 
     private let client: any SessionServicing
+    private let credentialStore: any NativeClientCredentialStoring
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private let sleepUntil: @Sendable (Date) async throws -> Void
@@ -120,9 +125,12 @@ final class SessionViewModel: ObservableObject {
     private var failedSubmissionIsTerminal = false
     private var preferenceWriteTail: Task<WorkspacePreferences?, Never>?
     private var viewerProcessRecoveryBudget = ViewerProcessRecoveryBudget()
+    private var authorizationToken = ""
+    private var usesEnrolledCredential = false
 
     init(
         client: any SessionServicing = SessionClient(),
+        credentialStore: any NativeClientCredentialStoring = KeychainNativeClientCredentialStore(),
         defaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         now: @escaping @Sendable () -> Date = { Date() },
@@ -132,6 +140,7 @@ final class SessionViewModel: ObservableObject {
         autoConnect: Bool = true
     ) {
         self.client = client
+        self.credentialStore = credentialStore
         self.defaults = defaults
         self.now = now
         self.sleepUntil = sleepUntil
@@ -151,6 +160,10 @@ final class SessionViewModel: ObservableObject {
         let resolvedClientID = savedClientID ?? UUID().uuidString.lowercased()
         self.clientID = resolvedClientID
         defaults.set(resolvedClientID, forKey: Self.clientIDKey)
+
+        if let origin = try? ControlPlaneURLValidator.validate(controlOrigin) {
+            hasPairedCredential = (try? credentialStore.clientToken(for: origin, clientID: resolvedClientID)) != nil
+        }
 
         if autoConnect, environmentOrigin != nil || migrated != nil {
             connect()
@@ -182,6 +195,14 @@ final class SessionViewModel: ObservableObject {
     var recentURLs: [String] { workspacePreferences?.recentURLs ?? [] }
 
     func connect() {
+        connect(preferEnrolledCredential: true)
+    }
+
+    func connectWithOperatorToken() {
+        connect(preferEnrolledCredential: false)
+    }
+
+    private func connect(preferEnrolledCredential: Bool) {
         cancelLifecycle()
         let runID = UUID()
         lifecycleID = runID
@@ -190,6 +211,8 @@ final class SessionViewModel: ObservableObject {
         viewerBootstrap = nil
         workspacePreferences = nil
         chromeHandoffs = []
+        chromeBookmarks = []
+        chromeReadingList = []
         chromeDevices = []
         chromePairing = nil
         chromeSyncError = nil
@@ -205,30 +228,51 @@ final class SessionViewModel: ObservableObject {
             controlState = .failed(error.localizedDescription)
             return
         }
-        let apiToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !apiToken.isEmpty else {
+        let operatorToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        var selectedToken: String?
+        var selectedEnrolledCredential = false
+        if preferEnrolledCredential {
+            do {
+                if let enrolledToken = try credentialStore.clientToken(for: origin, clientID: clientID) {
+                    selectedToken = enrolledToken
+                    selectedEnrolledCredential = true
+                    hasPairedCredential = true
+                } else {
+                    hasPairedCredential = false
+                }
+            } catch {
+                controlState = .failed(error.localizedDescription)
+                return
+            }
+        }
+        if selectedToken == nil, !operatorToken.isEmpty {
+            selectedToken = operatorToken
+            self.apiToken = operatorToken
+        }
+        guard let authorizationToken = selectedToken else {
             controlState = .failed("Enter the control API token.")
             return
         }
-        self.apiToken = apiToken
+        self.authorizationToken = authorizationToken
+        usesEnrolledCredential = selectedEnrolledCredential
 
         lifecycleTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let browser = try await resumeOrCreate(at: origin, apiToken: apiToken)
+                let browser = try await resumeOrCreate(at: origin, apiToken: authorizationToken)
                 guard owns(runID) else { return }
                 defaults.set(origin.absoluteString, forKey: Self.originKey)
                 defaults.set(browser.id, forKey: Self.sessionIDKey)
                 apply(browser)
-                await loadWorkspacePreferences(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
-                await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
-                await loadChromeLibrary(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
-                await loadChromeDevices(at: origin, apiToken: apiToken, workspaceID: browser.workspaceID)
+                await loadWorkspacePreferences(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
+                await loadChromeHandoffs(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
+                await loadChromeLibrary(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
+                await loadChromeDevices(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 guard owns(runID) else { return }
-                startEvents(at: origin, sessionID: browser.id, runID: runID)
+                startEvents(at: origin, apiToken: authorizationToken, sessionID: browser.id, runID: runID)
 
                 do {
-                    let connection = try await client.createStream(at: origin, apiToken: apiToken, sessionID: browser.id, clientID: clientID)
+                    let connection = try await client.createStream(at: origin, apiToken: authorizationToken, sessionID: browser.id, clientID: clientID)
                     guard owns(runID) else { return }
                     let bootstrap = try await StreamHandoff.resolve(connection: connection) { capability in
                         try await self.client.redeemViewerCapability(
@@ -245,27 +289,160 @@ final class SessionViewModel: ObservableObject {
                     surfaceState = .loadingPage(bootstrap?.viewerURL ?? connection.url)
                 } catch {
                     guard owns(runID) else { return }
+                    if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                     surfaceState = .failed(error.localizedDescription)
                 }
 
                 do {
-                    let acquired = try await client.acquireLease(at: origin, apiToken: apiToken, sessionID: browser.id, clientID: clientID)
+                    let acquired = try await client.acquireLease(at: origin, apiToken: authorizationToken, sessionID: browser.id, clientID: clientID)
                     guard owns(runID) else { return }
                     installLease(acquired)
-                    startLeaseRenewal(at: origin, sessionID: browser.id, runID: runID)
+                    startLeaseRenewal(at: origin, apiToken: authorizationToken, sessionID: browser.id, runID: runID)
                 } catch let error as SessionClientError where error.statusCode == 409 || error.statusCode == 423 {
                     guard owns(runID) else { return }
                     becomeObserver()
                 } catch {
                     guard owns(runID) else { return }
+                    if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                     controlState = .failed(error.localizedDescription)
                 }
             } catch is CancellationError {
                 return
             } catch {
                 guard owns(runID) else { return }
+                if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                 controlState = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    func pairThisMac(clientName: String) async -> Bool {
+        let name = clientName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.unicodeScalars.count <= 100 else {
+            pairingError = "Enter a name of 100 characters or fewer."
+            return false
+        }
+        let origin: URL
+        do {
+            origin = try ControlPlaneURLValidator.validate(controlOrigin)
+        } catch {
+            pairingError = error.localizedDescription
+            return false
+        }
+        let operatorToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !operatorToken.isEmpty else {
+            pairingError = "Enter the control API token."
+            return false
+        }
+        apiToken = operatorToken
+        pairingInProgress = true
+        pairingError = nil
+        defer { pairingInProgress = false }
+        do {
+            let enrollment = try await client.createNativeClientEnrollment(
+                at: origin,
+                operatorToken: operatorToken,
+                clientName: name
+            )
+            guard enrollment.clientName == name, !enrollment.pairingCapability.isEmpty else {
+                throw SessionClientError.invalidResponse
+            }
+            let credential = try await client.redeemNativeClientEnrollment(
+                at: origin,
+                pairingCapability: enrollment.pairingCapability,
+                clientName: name
+            )
+            guard credential.client.name == name,
+                  credential.client.scope == "browser:use",
+                  credential.client.revokedAt == nil,
+                  !credential.clientToken.isEmpty else {
+                throw SessionClientError.invalidResponse
+            }
+            do {
+                try credentialStore.storeClientToken(credential.clientToken, for: origin, clientID: clientID)
+            } catch {
+                let storageError = error
+                try? await client.revokeNativeClient(
+                    at: origin,
+                    operatorToken: operatorToken,
+                    clientID: credential.client.id
+                )
+                throw storageError
+            }
+            defaults.set(origin.absoluteString, forKey: Self.originKey)
+            hasPairedCredential = true
+            apiToken = ""
+            connect()
+            return true
+        } catch {
+            pairingError = error.localizedDescription
+            return false
+        }
+    }
+
+    func refreshPairingStatus() {
+        guard let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else {
+            hasPairedCredential = false
+            return
+        }
+        do {
+            hasPairedCredential = try credentialStore.clientToken(for: origin, clientID: clientID) != nil
+            pairingError = nil
+        } catch {
+            hasPairedCredential = false
+            pairingError = error.localizedDescription
+        }
+    }
+
+    func forgetPairing() async -> Bool {
+        guard !forgettingPairingInProgress else { return false }
+        let origin: URL
+        do {
+            origin = try ControlPlaneURLValidator.validate(controlOrigin)
+        } catch {
+            pairingError = error.localizedDescription
+            return false
+        }
+        let clientToken: String
+        do {
+            guard let storedToken = try credentialStore.clientToken(for: origin, clientID: clientID) else {
+                hasPairedCredential = false
+                pairingError = nil
+                authorizationToken = ""
+                usesEnrolledCredential = false
+                resetSession()
+                return true
+            }
+            clientToken = storedToken
+            hasPairedCredential = true
+        } catch {
+            pairingError = error.localizedDescription
+            return false
+        }
+
+        forgettingPairingInProgress = true
+        pairingError = nil
+        defer { forgettingPairingInProgress = false }
+        do {
+            try await client.revokeCurrentNativeClient(at: origin, clientToken: clientToken)
+        } catch {
+            pairingError = error.localizedDescription
+            return false
+        }
+        do {
+            try credentialStore.removeClientToken(for: origin, clientID: clientID)
+            hasPairedCredential = false
+            pairingError = nil
+            authorizationToken = ""
+            usesEnrolledCredential = false
+            resetSession()
+            return true
+        } catch {
+            authorizationToken = ""
+            usesEnrolledCredential = false
+            resetSession()
+            pairingError = error.localizedDescription
+            return false
         }
     }
 
@@ -277,10 +454,13 @@ final class SessionViewModel: ObservableObject {
         viewerBootstrap = nil
         workspacePreferences = nil
         chromeHandoffs = []
+        chromeBookmarks = []
+        chromeReadingList = []
         chromeDevices = []
         chromePairing = nil
         chromeSyncError = nil
         preferencesError = nil
+        commandError = nil
         lease = nil
         addressDraft = ""
         controlState = .disconnected
@@ -398,13 +578,14 @@ final class SessionViewModel: ObservableObject {
         do {
             chromePairing = try await client.createChromePairing(
                 at: origin,
-                apiToken: apiToken,
+                apiToken: authorizationToken,
                 workspaceID: session.workspaceID,
                 deviceName: name
             )
             chromeSyncError = nil
             return true
         } catch {
+            if removeEnrolledCredentialIfRejected(error, at: origin) { return false }
             chromeSyncError = error.localizedDescription
             return false
         }
@@ -441,7 +622,7 @@ final class SessionViewModel: ObservableObject {
     func refreshChromeDevices() async {
         guard let session,
               let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
-        await loadChromeDevices(at: origin, apiToken: apiToken, workspaceID: session.workspaceID)
+        await loadChromeDevices(at: origin, apiToken: authorizationToken, workspaceID: session.workspaceID)
     }
 
     func revokeChromeDevice(_ device: ChromeDevice) async {
@@ -450,13 +631,14 @@ final class SessionViewModel: ObservableObject {
         do {
             try await client.revokeChromeDevice(
                 at: origin,
-                apiToken: apiToken,
+                apiToken: authorizationToken,
                 workspaceID: session.workspaceID,
                 deviceID: device.id
             )
             chromeDevices.removeAll { $0.id == device.id }
             chromeSyncError = nil
         } catch {
+            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
             chromeSyncError = error.localizedDescription
         }
     }
@@ -487,7 +669,7 @@ final class SessionViewModel: ObservableObject {
     func loadWorkspacePreferences() async {
         guard let session,
               let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
-        await loadWorkspacePreferences(at: origin, apiToken: apiToken, workspaceID: session.workspaceID)
+        await loadWorkspacePreferences(at: origin, apiToken: authorizationToken, workspaceID: session.workspaceID)
     }
 
     func replaceShortcuts(_ shortcuts: [WorkspaceShortcut]) async -> Bool {
@@ -525,6 +707,7 @@ final class SessionViewModel: ObservableObject {
                 )
                 send(.init(type: .attach, tabID: activeTab?.id, attachmentID: attachment.id, expectedRevision: session?.revision ?? 0))
             } catch {
+                if removeEnrolledCredentialIfRejected(error, at: context.origin) { return }
                 commandError = error.localizedDescription
             }
         }
@@ -571,7 +754,7 @@ final class SessionViewModel: ObservableObject {
             guard let self else { return }
             do {
                 let connection = try await client.createStream(
-                    at: origin, apiToken: apiToken, sessionID: session.id, clientID: clientID
+                    at: origin, apiToken: authorizationToken, sessionID: session.id, clientID: clientID
                 )
                 let bootstrap = try await StreamHandoff.resolve(connection: connection) { capability in
                     try await self.client.redeemViewerCapability(at: origin, capability: capability, clientID: self.clientID)
@@ -583,6 +766,7 @@ final class SessionViewModel: ObservableObject {
                 if bootstrap == nil { reload() }
             } catch {
                 guard owns(runID) else { return }
+                if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                 surfaceState = .failed("The viewer could not recover: \(error.localizedDescription)")
             }
         }
@@ -636,6 +820,7 @@ final class SessionViewModel: ObservableObject {
                 )
                 accept(receipt, submission: submission)
             } catch {
+                if removeEnrolledCredentialIfRejected(error, at: context.origin) { return }
                 submissionsByKey.removeValue(forKey: submission.idempotencyKey)
                 failedSubmission = submission
                 failedSubmissionIsTerminal = false
@@ -727,6 +912,7 @@ final class SessionViewModel: ObservableObject {
             return
         } catch {
             guard session?.workspaceID == workspaceID else { return }
+            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
             preferencesError = error.localizedDescription
         }
     }
@@ -745,6 +931,7 @@ final class SessionViewModel: ObservableObject {
             return
         } catch {
             guard session?.workspaceID == workspaceID else { return }
+            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
             chromeSyncError = error.localizedDescription
         }
     }
@@ -766,6 +953,7 @@ final class SessionViewModel: ObservableObject {
             return
         } catch {
             guard session?.workspaceID == workspaceID else { return }
+            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
             chromeSyncError = error.localizedDescription
         }
     }
@@ -784,6 +972,7 @@ final class SessionViewModel: ObservableObject {
             return
         } catch {
             guard session?.workspaceID == workspaceID else { return }
+            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
             chromeSyncError = error.localizedDescription
         }
     }
@@ -796,7 +985,7 @@ final class SessionViewModel: ObservableObject {
             do {
                 _ = try await client.updateChromeHandoff(
                     at: origin,
-                    apiToken: apiToken,
+                    apiToken: authorizationToken,
                     workspaceID: session.workspaceID,
                     handoffID: handoffID,
                     state: state
@@ -806,6 +995,7 @@ final class SessionViewModel: ObservableObject {
             } catch let error as SessionClientError where error.statusCode == 409 {
                 chromeHandoffs.removeAll { $0.id == handoffID }
             } catch {
+                if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                 chromeSyncError = error.localizedDescription
             }
         }
@@ -817,7 +1007,7 @@ final class SessionViewModel: ObservableObject {
         guard let session,
               session.workspaceID == preferences.workspaceID,
               let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return false }
-        let apiToken = apiToken
+        let apiToken = authorizationToken
         let workspaceID = session.workspaceID
         let previousWrite = preferenceWriteTail
         workspacePreferences = preferences
@@ -866,10 +1056,10 @@ final class SessionViewModel: ObservableObject {
               let session,
               let lease,
               let leaseToken = lease.token else { return nil }
-        return (origin, apiToken, session.id, leaseToken)
+        return (origin, authorizationToken, session.id, leaseToken)
     }
 
-    private func startEvents(at origin: URL, sessionID: String, runID: UUID) {
+    private func startEvents(at origin: URL, apiToken: String, sessionID: String, runID: UUID) {
         eventsTask?.cancel()
         eventsTask = Task { [weak self] in
             guard let self else { return }
@@ -896,13 +1086,14 @@ final class SessionViewModel: ObservableObject {
                 } catch is CancellationError {
                     return
                 } catch {
+                    if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                     try? await Task.sleep(for: .seconds(1))
                 }
             }
         }
     }
 
-    private func startLeaseRenewal(at origin: URL, sessionID: String, runID: UUID) {
+    private func startLeaseRenewal(at origin: URL, apiToken: String, sessionID: String, runID: UUID) {
         leaseTask?.cancel()
         leaseTask = Task { [weak self] in
             guard let self else { return }
@@ -926,6 +1117,7 @@ final class SessionViewModel: ObservableObject {
                     return
                 } catch {
                     guard owns(runID) else { return }
+                    if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                     if now() >= current.expiresAt {
                         lease = nil
                         controlState = .expired
@@ -943,6 +1135,29 @@ final class SessionViewModel: ObservableObject {
     }
 
     private func owns(_ id: UUID) -> Bool { lifecycleID == id && !Task.isCancelled }
+
+    @discardableResult
+    private func removeEnrolledCredentialIfRejected(_ error: Error, at origin: URL) -> Bool {
+        guard usesEnrolledCredential,
+              let error = error as? SessionClientError,
+              error.statusCode == 401,
+              error.apiCode == "unauthorized" else { return false }
+        var credentialRemovalError: Error?
+        do {
+            try credentialStore.removeClientToken(for: origin, clientID: clientID)
+        } catch {
+            credentialRemovalError = error
+        }
+        authorizationToken = ""
+        usesEnrolledCredential = false
+        hasPairedCredential = false
+        resetSession()
+        if let credentialRemovalError {
+            pairingError = credentialRemovalError.localizedDescription
+        }
+        controlState = .failed("This Mac is no longer authorized. Pair it again.")
+        return true
+    }
 
     private func cancelLifecycle() {
         lifecycleTask?.cancel()

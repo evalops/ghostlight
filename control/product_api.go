@@ -44,32 +44,87 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
-	if !authorized(r, h.config.APIToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "a valid API token is required")
+	principal, err := h.authenticateAPI(r)
+	if err != nil {
+		if errors.Is(err, errUnauthorized) {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "a valid API token is required")
+		} else {
+			writeStoreError(w, err)
+		}
 		return
 	}
 	parts := splitPath(r.URL.Path)
 	switch {
+	case len(parts) == 2 && parts[1] == "native-client":
+		if !requireNativeClientPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClient(w, r, principal.id)
+	case len(parts) == 2 && parts[1] == "native-client-enrollments":
+		if !requireOperatorPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClientEnrollments(w, r)
+	case len(parts) == 2 && parts[1] == "native-clients":
+		if !requireOperatorPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClients(w, r)
+	case len(parts) == 3 && parts[1] == "native-clients":
+		if !requireOperatorPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClient(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "workspaces":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaces(w, r)
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "preferences":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspacePreferences(w, r, parts[2])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-pairings":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleChromePairings(w, r, parts[2])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-devices":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleChromeDevices(w, r, parts[2])
 	case len(parts) == 5 && parts[1] == "workspaces" && parts[3] == "chrome-devices":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleChromeDevice(w, r, parts[2], parts[4])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-handoffs":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaceChromeHandoffs(w, r, parts[2], "")
 	case len(parts) == 5 && parts[1] == "workspaces" && parts[3] == "chrome-handoffs":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaceChromeHandoffs(w, r, parts[2], parts[4])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-library":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaceChromeLibrary(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "sessions":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleSessions(w, r)
 	case len(parts) >= 3 && parts[1] == "sessions":
-		h.handleSessionResource(w, r, parts[2], parts[3:])
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handleSessionResource(w, r, parts[2], parts[3:], principal)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
@@ -211,7 +266,7 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, sessionID string, tail []string) {
+func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, sessionID string, tail []string, principal apiPrincipal) {
 	if sessionID == "" {
 		writeError(w, http.StatusNotFound, "session_not_found", "session was not found")
 		return
@@ -257,7 +312,7 @@ func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, 
 	case len(tail) == 2 && tail[0] == "commands":
 		h.handleCommandStatus(w, r, sessionID, tail[1])
 	case len(tail) == 1 && tail[0] == "stream":
-		h.handleStream(w, r, sessionID)
+		h.handleStream(w, r, sessionID, principal)
 	case len(tail) == 1 && tail[0] == "attachments":
 		h.handleAttachments(w, r, sessionID)
 	case len(tail) == 2 && tail[0] == "attachments":
@@ -362,7 +417,7 @@ func (h *handler) handleCommand(w http.ResponseWriter, r *http.Request, sessionI
 	writeJSON(w, status, queued)
 }
 
-func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID string, principal apiPrincipal) {
 	if r.Method != http.MethodPost {
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
@@ -383,7 +438,11 @@ func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID
 		writeStoreError(w, err)
 		return
 	}
-	stream, err := h.store.createStream(r.Context(), sessionID, input.ClientID, h.viewerURL, defaultStreamTTL)
+	nativeClientID := ""
+	if !principal.isOperator() {
+		nativeClientID = principal.id
+	}
+	stream, err := h.store.createStream(r.Context(), sessionID, input.ClientID, nativeClientID, h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -409,7 +468,11 @@ func (h *handler) handleViewerCapabilityRedemption(w http.ResponseWriter, r *htt
 	}
 	stream, err := h.store.redeemViewerCapability(r.Context(), capability, input.ClientID)
 	if err != nil {
-		writeStoreError(w, err)
+		if errors.Is(err, errUnauthorized) {
+			writeError(w, http.StatusUnauthorized, "viewer_capability_invalid", "viewer capability is missing or invalid")
+		} else {
+			writeStoreError(w, err)
+		}
 		return
 	}
 	credential, err := h.createViewerCredential(r.Context(), stream)

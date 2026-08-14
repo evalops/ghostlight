@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 4
+const schemaVersion = 6
 
 type Workspace struct {
 	ID        string    `json:"id"`
@@ -94,6 +94,26 @@ type WorkspacePreferences struct {
 	Shortcuts   []WorkspaceShortcut `json:"shortcuts"`
 	RecentURLs  []string            `json:"recent_urls"`
 	UpdatedAt   time.Time           `json:"updated_at"`
+}
+
+type NativeClientEnrollment struct {
+	PairingCapability string    `json:"pairing_capability,omitempty"`
+	ClientName        string    `json:"client_name"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}
+
+type NativeClient struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Scope      string     `json:"scope"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastSeenAt time.Time  `json:"last_seen_at"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+}
+
+type NativeClientCredential struct {
+	Client      NativeClient `json:"client"`
+	ClientToken string       `json:"client_token"`
 }
 
 type ChromePairing struct {

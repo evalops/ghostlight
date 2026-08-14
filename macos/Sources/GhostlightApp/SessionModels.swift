@@ -37,6 +37,44 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
     public let name: String
 }
 
+public struct NativeClientEnrollment: Codable, Equatable, Sendable {
+    public let pairingCapability: String
+    public let clientName: String
+    public let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case pairingCapability = "pairing_capability"
+        case clientName = "client_name"
+        case expiresAt = "expires_at"
+    }
+}
+
+public struct NativeClient: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let scope: String
+    public let createdAt: Date
+    public let lastSeenAt: Date
+    public let revokedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, scope
+        case createdAt = "created_at"
+        case lastSeenAt = "last_seen_at"
+        case revokedAt = "revoked_at"
+    }
+}
+
+public struct NativeClientCredential: Codable, Equatable, Sendable {
+    public let client: NativeClient
+    public let clientToken: String
+
+    enum CodingKeys: String, CodingKey {
+        case client
+        case clientToken = "client_token"
+    }
+}
+
 public struct WorkspaceShortcut: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public var name: String

@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import XCTest
 @testable import GhostlightApp
 
@@ -96,6 +97,87 @@ final class NativeSessionTests: XCTestCase {
         )
 
         XCTAssertEqual(workspaces.map(\.id), ["default"])
+    }
+
+    func testNativeClientEnrollmentIssueAndRedemptionUseSeparateBearerCredentials() async throws {
+        var requests: [URLRequest] = []
+        NativeSessionURLProtocol.requestHandler = { request in
+            requests.append(request)
+            if request.url?.lastPathComponent == "redeem" {
+                return (Self.response(for: request, status: 201), Data(Self.nativeClientCredentialJSON.utf8))
+            }
+            return (Self.response(for: request, status: 201), Data(Self.nativeClientEnrollmentJSON.utf8))
+        }
+        let client = SessionClient(session: makeSession())
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+
+        let enrollment = try await client.createNativeClientEnrollment(
+            at: origin,
+            operatorToken: "operator-secret",
+            clientName: "Jonathan's Mac"
+        )
+        let credential = try await client.redeemNativeClientEnrollment(
+            at: origin,
+            pairingCapability: enrollment.pairingCapability,
+            clientName: enrollment.clientName
+        )
+
+        XCTAssertEqual(credential.client.id, "native-client-1")
+        XCTAssertEqual(credential.client.scope, "browser:use")
+        XCTAssertEqual(credential.clientToken, "native-client-token")
+        XCTAssertEqual(requests.map(\.httpMethod), ["POST", "POST"])
+        XCTAssertEqual(requests[0].url?.path, "/base/v1/native-client-enrollments")
+        XCTAssertEqual(requests[1].url?.path, "/base/v1/native-client-enrollments/redeem")
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer operator-secret")
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer pairing-secret")
+        for request in requests {
+            let body = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: try XCTUnwrap(Self.bodyData(from: request))) as? [String: Any]
+            )
+            XCTAssertEqual(body["client_name"] as? String, "Jonathan's Mac")
+            XCTAssertEqual(body.count, 1)
+        }
+    }
+
+    func testNativeClientRevocationEndpointsUseTheirRequiredBearerCredentials() async throws {
+        var requests: [URLRequest] = []
+        NativeSessionURLProtocol.requestHandler = { request in
+            requests.append(request)
+            return (Self.response(for: request, status: 204), Data())
+        }
+        let client = SessionClient(session: makeSession())
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+
+        try await client.revokeNativeClient(
+            at: origin,
+            operatorToken: "operator-secret",
+            clientID: "native-client-1"
+        )
+        try await client.revokeCurrentNativeClient(
+            at: origin,
+            clientToken: "native-client-token"
+        )
+
+        XCTAssertEqual(requests.map(\.httpMethod), ["DELETE", "DELETE"])
+        XCTAssertEqual(requests[0].url?.path, "/base/v1/native-clients/native-client-1")
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer operator-secret")
+        XCTAssertEqual(requests[1].url?.path, "/base/v1/native-client")
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer native-client-token")
+    }
+
+    func testServerErrorPreservesAPIErrorCodeStatusAndMessage() {
+        let error = SessionClientError.mapHTTPFailure(
+            statusCode: 401,
+            data: Data(#"{"error":{"code":"lease_invalid","message":"lease expired"}}"#.utf8)
+        )
+
+        XCTAssertEqual(
+            error,
+            .server(statusCode: 401, code: "lease_invalid", message: "lease expired")
+        )
+        XCTAssertEqual(error.statusCode, 401)
+        XCTAssertEqual(error.apiCode, "lease_invalid")
+        XCTAssertEqual(error.localizedDescription, "HTTP 401: lease expired")
     }
 
     func testWorkspacePreferencesLoadAndPersistThroughWorkspaceEndpoint() async throws {
@@ -332,6 +414,465 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: "GhostlightAPIToken"))
     }
 
+    func testNativeClientCredentialKeyIncludesValidatedOriginAndClientID() throws {
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test/base")
+
+        let key = NativeClientCredentialKey(origin: origin, clientID: "mac-client-1")
+
+        XCTAssertEqual(key.service, "org.evalops.Ghostlight.native-client")
+        XCTAssertEqual(key.account, "https://control.example.test/base\nmac-client-1")
+        XCTAssertNotEqual(key, NativeClientCredentialKey(origin: origin, clientID: "mac-client-2"))
+        XCTAssertNotEqual(
+            key,
+            NativeClientCredentialKey(
+                origin: try ControlPlaneURLValidator.validate("https://other.example.test/base"),
+                clientID: "mac-client-1"
+            )
+        )
+        XCTAssertEqual(
+            key,
+            NativeClientCredentialKey(
+                origin: try ControlPlaneURLValidator.validate("https://control.example.test:443/base/"),
+                clientID: "mac-client-1"
+            )
+        )
+        XCTAssertNotEqual(
+            key,
+            NativeClientCredentialKey(
+                origin: try ControlPlaneURLValidator.validate("https://control.example.test/base/other"),
+                clientID: "mac-client-1"
+            )
+        )
+        XCTAssertEqual(
+            NativeClientCredentialKey(
+                origin: try ControlPlaneURLValidator.validate("http://control.example.test:80"),
+                clientID: "mac-client-1"
+            ),
+            NativeClientCredentialKey(
+                origin: try ControlPlaneURLValidator.validate("http://control.example.test/"),
+                clientID: "mac-client-1"
+            )
+        )
+        XCTAssertThrowsError(
+            try ControlPlaneURLValidator.validate("https://user:secret@control.example.test/base")
+        ) { error in
+            XCTAssertEqual(error as? ControlPlaneURLError, .credentialsNotAllowed)
+        }
+    }
+
+    @MainActor
+    func testPairThisMacStoresOnlyNativeClientTokenAndClearsOperatorToken() async throws {
+        let suite = "Ghostlight.NativeSessionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("mac-client-1", forKey: "GhostlightClientID")
+        let store = InMemoryNativeClientCredentialStore()
+        let service = PairedSessionServiceStub(session: try Self.browserSession())
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+        viewModel.controlOrigin = "https://control.example.test/base"
+        viewModel.apiToken = "operator-secret"
+
+        let paired = await viewModel.pairThisMac(clientName: "Jonathan's Mac")
+
+        XCTAssertTrue(paired)
+        let origin = try ControlPlaneURLValidator.validate(viewModel.controlOrigin)
+        XCTAssertEqual(try store.clientToken(for: origin, clientID: "mac-client-1"), "native-client-token")
+        XCTAssertEqual(store.storedTokens, ["native-client-token"])
+        XCTAssertEqual(viewModel.apiToken, "")
+        XCTAssertTrue(viewModel.hasPairedCredential)
+        await Self.waitUntil { viewModel.controlState.isConnected }
+        let persistedValues = defaults.dictionaryRepresentation().values.compactMap { $0 as? String }
+        XCTAssertFalse(persistedValues.contains("operator-secret"))
+        XCTAssertFalse(persistedValues.contains("pairing-secret"))
+        XCTAssertFalse(persistedValues.contains("native-client-token"))
+        XCTAssertFalse(persistedValues.contains("lease-token"))
+        XCTAssertFalse(persistedValues.contains("viewer-capability-secret"))
+        XCTAssertFalse(persistedValues.contains("viewer-secret"))
+    }
+
+    @MainActor
+    func testPairingFailurePathsResetProgressAndCompensateOnlyAfterRedemption() async throws {
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let cases: [(SessionClientError?, SessionClientError?)] = [
+            (.server(statusCode: 500, code: "internal", message: "create failed"), nil),
+            (nil, .server(statusCode: 401, code: "enrollment_invalid", message: "redeem failed")),
+        ]
+        for (enrollmentError, redemptionError) in cases {
+            let store = InMemoryNativeClientCredentialStore()
+            let service = PairedSessionServiceStub(
+                session: try Self.browserSession(),
+                enrollmentError: enrollmentError,
+                redemptionError: redemptionError
+            )
+            let viewModel = SessionViewModel(
+                client: service,
+                credentialStore: store,
+                defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+                autoConnect: false
+            )
+            viewModel.controlOrigin = origin.absoluteString
+            viewModel.apiToken = "operator-secret"
+
+            let paired = await viewModel.pairThisMac(clientName: "Failure Mac")
+            XCTAssertFalse(paired)
+            XCTAssertFalse(viewModel.pairingInProgress)
+            XCTAssertTrue(service.compensatedClientIDs.isEmpty)
+            XCTAssertNil(try store.clientToken(for: origin, clientID: viewModel.clientID))
+        }
+    }
+
+    @MainActor
+    func testKeychainStoreFailureRevokesRedeemedClientBeforeReportingStoreError() async throws {
+        let store = InMemoryNativeClientCredentialStore(storeError: .keychain(errSecNotAvailable))
+        let service = PairedSessionServiceStub(session: try Self.browserSession())
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            autoConnect: false
+        )
+        viewModel.controlOrigin = "https://control.example.test"
+        viewModel.apiToken = "operator-secret"
+
+        let paired = await viewModel.pairThisMac(clientName: "Compensated Mac")
+        XCTAssertFalse(paired)
+
+        XCTAssertEqual(service.compensatedClientIDs, ["native-client-1"])
+        XCTAssertEqual(viewModel.pairingError, NativeClientCredentialStoreError.keychain(errSecNotAvailable).localizedDescription)
+        XCTAssertFalse(viewModel.pairingInProgress)
+        XCTAssertFalse(viewModel.hasPairedCredential)
+    }
+
+    @MainActor
+    func testKeychainStoreFailureKeepsOriginalErrorWhenCompensationFails() async throws {
+        let store = InMemoryNativeClientCredentialStore(storeError: .keychain(errSecNotAvailable))
+        let service = PairedSessionServiceStub(
+            session: try Self.browserSession(),
+            compensationError: .server(statusCode: 503, code: "unavailable", message: "try later")
+        )
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            autoConnect: false
+        )
+        viewModel.controlOrigin = "https://control.example.test"
+        viewModel.apiToken = "operator-secret"
+
+        let paired = await viewModel.pairThisMac(clientName: "Compensation Failure Mac")
+        XCTAssertFalse(paired)
+
+        XCTAssertEqual(service.compensatedClientIDs, ["native-client-1"])
+        XCTAssertEqual(viewModel.pairingError, NativeClientCredentialStoreError.keychain(errSecNotAvailable).localizedDescription)
+        XCTAssertFalse(viewModel.pairingInProgress)
+    }
+
+    @MainActor
+    func testPairingNameLimitUsesUnicodeScalarCount() async throws {
+        let viewModel = SessionViewModel(
+            client: PairedSessionServiceStub(session: try Self.browserSession()),
+            credentialStore: InMemoryNativeClientCredentialStore(),
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            autoConnect: false
+        )
+        viewModel.controlOrigin = "https://control.example.test"
+        viewModel.apiToken = "operator-secret"
+
+        let oneHundredScalars = String(repeating: "e\u{301}", count: 50)
+        XCTAssertEqual(oneHundredScalars.unicodeScalars.count, 100)
+        let accepted = await viewModel.pairThisMac(clientName: oneHundredScalars)
+        XCTAssertTrue(accepted)
+
+        let secondViewModel = SessionViewModel(
+            client: PairedSessionServiceStub(session: try Self.browserSession()),
+            credentialStore: InMemoryNativeClientCredentialStore(),
+            defaults: try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString)),
+            autoConnect: false
+        )
+        secondViewModel.controlOrigin = "https://control.example.test"
+        secondViewModel.apiToken = "operator-secret"
+        let oneHundredOneScalars = oneHundredScalars + "x"
+        let rejected = await secondViewModel.pairThisMac(clientName: oneHundredOneScalars)
+        XCTAssertFalse(rejected)
+        XCTAssertEqual(secondViewModel.pairingError, "Enter a name of 100 characters or fewer.")
+    }
+
+    @MainActor
+    func testSavedOriginAutomaticallyReconnectsWithEnrolledClientToken() async throws {
+        let suite = "Ghostlight.NativeSessionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("https://control.example.test", forKey: "GhostlightControlOrigin")
+        defaults.set("mac-client-1", forKey: "GhostlightClientID")
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore()
+        try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(session: try Self.browserSession())
+
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: true
+        )
+        await Self.waitUntil { viewModel.controlState.isConnected }
+
+        XCTAssertTrue(viewModel.hasPairedCredential)
+        XCTAssertEqual(viewModel.apiToken, "")
+        XCTAssertFalse(service.apiTokens.isEmpty)
+        XCTAssertTrue(service.apiTokens.allSatisfy { $0 == "native-client-token" })
+    }
+
+    @MainActor
+    func testAuthenticationRejectionDeletesEnrolledCredential() async throws {
+        let suite = "Ghostlight.NativeSessionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("https://control.example.test", forKey: "GhostlightControlOrigin")
+        defaults.set("mac-client-1", forKey: "GhostlightClientID")
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore()
+        try store.storeClientToken("revoked-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(
+            session: try Self.browserSession(),
+            connectionError: SessionClientError.server(statusCode: 401, code: "unauthorized", message: "unauthorized")
+        )
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: true
+        )
+
+        await Self.waitUntil {
+            viewModel.controlState == ControlState.failed("This Mac is no longer authorized. Pair it again.")
+        }
+
+        XCTAssertNil(try store.clientToken(for: origin, clientID: "mac-client-1"))
+        XCTAssertFalse(viewModel.hasPairedCredential)
+    }
+
+    @MainActor
+    func testGenuineAuthRejectionTearsDownPreviouslyConnectedViewerAndPreservesRepairMessage() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        defaults.set("mac-client-1", forKey: SessionViewModel.clientIDKey)
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore()
+        try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(
+            session: try Self.browserSession(),
+            commandError: .server(statusCode: 401, code: "unauthorized", message: "a valid API token is required")
+        )
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+        viewModel.controlOrigin = origin.absoluteString
+        viewModel.connect()
+        await Self.waitUntil { viewModel.controlState.isConnected && viewModel.stream != nil }
+        XCTAssertNotNil(viewModel.session)
+        XCTAssertNotNil(viewModel.viewerBootstrap)
+        XCTAssertNotNil(viewModel.workspacePreferences)
+
+        viewModel.perform(.reload)
+        await Self.waitUntil {
+            viewModel.controlState == ControlState.failed("This Mac is no longer authorized. Pair it again.")
+        }
+
+        XCTAssertNil(try store.clientToken(for: origin, clientID: "mac-client-1"))
+        XCTAssertNil(viewModel.session)
+        XCTAssertNil(viewModel.stream)
+        XCTAssertNil(viewModel.viewerBootstrap)
+        XCTAssertNil(viewModel.workspacePreferences)
+        XCTAssertTrue(viewModel.chromeHandoffs.isEmpty)
+        XCTAssertTrue(viewModel.chromeBookmarks.isEmpty)
+        XCTAssertTrue(viewModel.chromeReadingList.isEmpty)
+        XCTAssertTrue(viewModel.chromeDevices.isEmpty)
+        XCTAssertNil(viewModel.chromePairing)
+        XCTAssertEqual(viewModel.surfaceState, SurfaceState.idle)
+        XCTAssertEqual(
+            viewModel.controlState,
+            ControlState.failed("This Mac is no longer authorized. Pair it again.")
+        )
+        XCTAssertNil(defaults.object(forKey: SessionViewModel.sessionIDKey))
+    }
+
+    @MainActor
+    func testLeaseAndViewerCapability401sDoNotDeleteEnrolledCredential() async throws {
+        for error in [
+            SessionClientError.server(statusCode: 401, code: "lease_invalid", message: "lease invalid"),
+            SessionClientError.server(statusCode: 401, code: "viewer_capability_invalid", message: "capability invalid"),
+            SessionClientError.server(statusCode: 401, code: nil, message: "unknown unauthorized response"),
+        ] {
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+            defaults.set("mac-client-1", forKey: SessionViewModel.clientIDKey)
+            let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+            let store = InMemoryNativeClientCredentialStore()
+            try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+            let service = PairedSessionServiceStub(session: try Self.browserSession(), streamError: error)
+            let viewModel = SessionViewModel(
+                client: service,
+                credentialStore: store,
+                defaults: defaults,
+                autoConnect: false
+            )
+            viewModel.controlOrigin = origin.absoluteString
+
+            viewModel.connect()
+            await Self.waitUntil { viewModel.controlState.isConnected }
+
+            XCTAssertEqual(try store.clientToken(for: origin, clientID: "mac-client-1"), "native-client-token")
+            XCTAssertTrue(viewModel.hasPairedCredential)
+            XCTAssertNotNil(viewModel.session)
+        }
+    }
+
+    @MainActor
+    func testLeaseInvalidCommandFailureDoesNotDeleteEnrolledCredential() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        defaults.set("mac-client-1", forKey: SessionViewModel.clientIDKey)
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore()
+        try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(
+            session: try Self.browserSession(),
+            commandError: .server(statusCode: 401, code: "lease_invalid", message: "lease invalid")
+        )
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+        viewModel.controlOrigin = origin.absoluteString
+        viewModel.connect()
+        await Self.waitUntil { viewModel.controlState.isConnected }
+
+        viewModel.perform(.reload)
+        await Self.waitUntil {
+            viewModel.commandStatus == CommandStatus.failed(
+                code: "request_failed",
+                message: "HTTP 401: lease invalid"
+            )
+        }
+
+        XCTAssertEqual(try store.clientToken(for: origin, clientID: "mac-client-1"), "native-client-token")
+        XCTAssertTrue(viewModel.hasPairedCredential)
+        XCTAssertNotNil(viewModel.session)
+    }
+
+    @MainActor
+    func testForgetPairingRevokesRemotelyThenRemovesCredentialAndDisconnects() async throws {
+        let suite = "Ghostlight.NativeSessionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("https://control.example.test", forKey: "GhostlightControlOrigin")
+        defaults.set("mac-client-1", forKey: "GhostlightClientID")
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore()
+        try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(session: try Self.browserSession())
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+
+        let forgotten = await viewModel.forgetPairing()
+
+        XCTAssertTrue(forgotten)
+        XCTAssertEqual(service.selfRevokeTokens, ["native-client-token"])
+        XCTAssertNil(try store.clientToken(for: origin, clientID: "mac-client-1"))
+        XCTAssertFalse(viewModel.hasPairedCredential)
+        XCTAssertEqual(viewModel.controlState, .disconnected)
+        XCTAssertFalse(viewModel.forgettingPairingInProgress)
+    }
+
+    @MainActor
+    func testForgetPairingRemoteFailureKeepsLocalCredentialForRetryAndResetsProgress() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        defaults.set("mac-client-1", forKey: SessionViewModel.clientIDKey)
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore()
+        try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(
+            session: try Self.browserSession(),
+            selfRevokeError: .server(statusCode: 503, code: "unavailable", message: "try later")
+        )
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+        viewModel.controlOrigin = origin.absoluteString
+
+        let forgotten = await viewModel.forgetPairing()
+
+        XCTAssertFalse(forgotten)
+        XCTAssertEqual(service.selfRevokeTokens, ["native-client-token"])
+        XCTAssertEqual(try store.clientToken(for: origin, clientID: "mac-client-1"), "native-client-token")
+        XCTAssertTrue(viewModel.hasPairedCredential)
+        XCTAssertEqual(viewModel.pairingError, "HTTP 503: try later")
+        XCTAssertFalse(viewModel.forgettingPairingInProgress)
+    }
+
+    @MainActor
+    func testForgetPairingLocalDeleteFailureStillDisconnectsRevokedCredential() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        defaults.set("mac-client-1", forKey: SessionViewModel.clientIDKey)
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore(removeError: .keychain(errSecNotAvailable))
+        try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(session: try Self.browserSession())
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+        viewModel.controlOrigin = origin.absoluteString
+
+        let forgotten = await viewModel.forgetPairing()
+
+        XCTAssertFalse(forgotten)
+        XCTAssertEqual(service.selfRevokeTokens, ["native-client-token"])
+        XCTAssertEqual(viewModel.controlState, .disconnected)
+        XCTAssertEqual(viewModel.pairingError, NativeClientCredentialStoreError.keychain(errSecNotAvailable).localizedDescription)
+        XCTAssertFalse(viewModel.forgettingPairingInProgress)
+    }
+
+    @MainActor
+    func testConnectFallsBackToExplicitOperatorTokenWithoutEnrollment() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        let store = InMemoryNativeClientCredentialStore()
+        let service = PairedSessionServiceStub(session: try Self.browserSession())
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+        viewModel.controlOrigin = "https://control.example.test"
+        viewModel.apiToken = "  operator-secret\n"
+
+        viewModel.connect()
+        await Self.waitUntil { viewModel.controlState.isConnected }
+
+        XCTAssertEqual(viewModel.apiToken, "operator-secret")
+        XCTAssertFalse(viewModel.hasPairedCredential)
+        XCTAssertFalse(service.apiTokens.isEmpty)
+        XCTAssertTrue(service.apiTokens.allSatisfy { $0 == "operator-secret" })
+    }
+
     @MainActor
     func testConnectFailsClosedWithoutAPIToken() throws {
         let viewModel = SessionViewModel(
@@ -543,7 +1084,7 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(resolved, bootstrap)
 
         let rollingFallback = try await StreamHandoff.resolve(connection: connection) { _ in
-            throw SessionClientError.server(statusCode: 404, message: nil)
+            throw SessionClientError.server(statusCode: 404, code: "not_found", message: nil)
         }
         XCTAssertNil(rollingFallback)
         let oldShapeFallback = try await StreamHandoff.resolve(connection: connection) { _ in
@@ -844,6 +1385,39 @@ final class NativeSessionTests: XCTestCase {
     }
     """#
 
+    private static let nativeClientEnrollmentJSON = #"""
+    {
+      "pairing_capability":"pairing-secret","client_name":"Jonathan's Mac",
+      "expires_at":"2026-08-13T12:10:00Z"
+    }
+    """#
+
+    private static let nativeClientCredentialJSON = #"""
+    {
+      "client":{
+        "id":"native-client-1","name":"Jonathan's Mac","scope":"browser:use",
+        "created_at":"2026-08-13T12:00:00Z","last_seen_at":"2026-08-13T12:00:00Z"
+      },
+      "client_token":"native-client-token"
+    }
+    """#
+
+    private static func browserSession() throws -> BrowserSession {
+        try SessionJSON.decoder.decode(BrowserSession.self, from: Data(sessionJSON.utf8))
+    }
+
+    @MainActor
+    private static func waitUntil(
+        timeout: Duration = .seconds(2),
+        _ condition: @escaping @MainActor () -> Bool
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition(), clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     private static let queuedReceipt = receipt(id: "command-1", type: .reload, state: .queued)
     private static let appliedReceipt = receipt(id: "command-1", type: .reload, state: .applied)
     private static let failedReceipt = receipt(
@@ -903,6 +1477,364 @@ private extension NativeBrowserAction {
     }
 }
 
+private extension ControlState {
+    var isConnected: Bool {
+        switch self {
+        case .controller, .observer: true
+        default: false
+        }
+    }
+}
+
+private final class InMemoryNativeClientCredentialStore: NativeClientCredentialStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var tokens: [NativeClientCredentialKey: String] = [:]
+    private let storeError: NativeClientCredentialStoreError?
+    private let removeError: NativeClientCredentialStoreError?
+
+    init(
+        storeError: NativeClientCredentialStoreError? = nil,
+        removeError: NativeClientCredentialStoreError? = nil
+    ) {
+        self.storeError = storeError
+        self.removeError = removeError
+    }
+
+    var storedTokens: [String] {
+        lock.withLock { Array(tokens.values) }
+    }
+
+    func clientToken(for origin: URL, clientID: String) throws -> String? {
+        lock.withLock { tokens[NativeClientCredentialKey(origin: origin, clientID: clientID)] }
+    }
+
+    func storeClientToken(_ token: String, for origin: URL, clientID: String) throws {
+        if let storeError { throw storeError }
+        lock.withLock { tokens[NativeClientCredentialKey(origin: origin, clientID: clientID)] = token }
+    }
+
+    func removeClientToken(for origin: URL, clientID: String) throws {
+        if let removeError { throw removeError }
+        _ = lock.withLock { tokens.removeValue(forKey: NativeClientCredentialKey(origin: origin, clientID: clientID)) }
+    }
+}
+
+private final class PairedSessionServiceStub: SessionServicing, @unchecked Sendable {
+    private let lock = NSLock()
+    private let browserSession: BrowserSession
+    private let connectionError: SessionClientError?
+    private let enrollmentError: SessionClientError?
+    private let redemptionError: SessionClientError?
+    private let compensationError: SessionClientError?
+    private let selfRevokeError: SessionClientError?
+    private let streamError: SessionClientError?
+    private let commandError: SessionClientError?
+    private var capturedAPITokens: [String] = []
+    private var capturedCompensatedClientIDs: [String] = []
+    private var capturedSelfRevokeTokens: [String] = []
+
+    init(
+        session: BrowserSession,
+        connectionError: SessionClientError? = nil,
+        enrollmentError: SessionClientError? = nil,
+        redemptionError: SessionClientError? = nil,
+        compensationError: SessionClientError? = nil,
+        selfRevokeError: SessionClientError? = nil,
+        streamError: SessionClientError? = nil,
+        commandError: SessionClientError? = nil
+    ) {
+        browserSession = session
+        self.connectionError = connectionError
+        self.enrollmentError = enrollmentError
+        self.redemptionError = redemptionError
+        self.compensationError = compensationError
+        self.selfRevokeError = selfRevokeError
+        self.streamError = streamError
+        self.commandError = commandError
+    }
+
+    var apiTokens: [String] {
+        lock.withLock { capturedAPITokens }
+    }
+
+    var compensatedClientIDs: [String] {
+        lock.withLock { capturedCompensatedClientIDs }
+    }
+
+    var selfRevokeTokens: [String] {
+        lock.withLock { capturedSelfRevokeTokens }
+    }
+
+    private func record(_ token: String) throws {
+        lock.withLock { capturedAPITokens.append(token) }
+        if let connectionError { throw connectionError }
+    }
+
+    func createNativeClientEnrollment(
+        at origin: URL,
+        operatorToken: String,
+        clientName: String
+    ) async throws -> NativeClientEnrollment {
+        XCTAssertEqual(operatorToken, "operator-secret")
+        if let enrollmentError { throw enrollmentError }
+        return NativeClientEnrollment(
+            pairingCapability: "pairing-secret",
+            clientName: clientName,
+            expiresAt: Date(timeIntervalSince1970: 1_000)
+        )
+    }
+
+    func redeemNativeClientEnrollment(
+        at origin: URL,
+        pairingCapability: String,
+        clientName: String
+    ) async throws -> NativeClientCredential {
+        XCTAssertEqual(pairingCapability, "pairing-secret")
+        if let redemptionError { throw redemptionError }
+        return NativeClientCredential(
+            client: NativeClient(
+                id: "native-client-1",
+                name: clientName,
+                scope: "browser:use",
+                createdAt: Date(timeIntervalSince1970: 1_000),
+                lastSeenAt: Date(timeIntervalSince1970: 1_000),
+                revokedAt: nil
+            ),
+            clientToken: "native-client-token"
+        )
+    }
+
+    func revokeNativeClient(
+        at origin: URL,
+        operatorToken: String,
+        clientID: String
+    ) async throws {
+        XCTAssertEqual(operatorToken, "operator-secret")
+        lock.withLock { capturedCompensatedClientIDs.append(clientID) }
+        if let compensationError { throw compensationError }
+    }
+
+    func revokeCurrentNativeClient(at origin: URL, clientToken: String) async throws {
+        lock.withLock { capturedSelfRevokeTokens.append(clientToken) }
+        if let selfRevokeError { throw selfRevokeError }
+    }
+
+    func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession {
+        try record(apiToken)
+        return browserSession
+    }
+
+    func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession {
+        try record(apiToken)
+        return browserSession
+    }
+
+    func sessionEvents(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        afterRevision: Int
+    ) async throws -> BrowserSession? {
+        try record(apiToken)
+        return nil
+    }
+
+    func acquireLease(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        clientID: String
+    ) async throws -> ControllerLease {
+        try record(apiToken)
+        return ControllerLease(
+            id: "lease-1",
+            sessionID: sessionID,
+            clientID: clientID,
+            token: "lease-token",
+            epoch: 1,
+            expiresAt: Date(timeIntervalSinceNow: 60),
+            renewAfter: Date(timeIntervalSinceNow: 30)
+        )
+    }
+
+    func renewLease(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        leaseID: String,
+        token: String
+    ) async throws -> ControllerLease {
+        try record(apiToken)
+        return ControllerLease(
+            id: leaseID,
+            sessionID: sessionID,
+            clientID: "mac-client-1",
+            token: token,
+            epoch: 1,
+            expiresAt: Date(timeIntervalSinceNow: 60),
+            renewAfter: Date(timeIntervalSinceNow: 30)
+        )
+    }
+
+    func releaseLease(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        leaseID: String,
+        token: String
+    ) async throws {
+        try record(apiToken)
+    }
+
+    func createStream(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        clientID: String
+    ) async throws -> StreamConnection {
+        try record(apiToken)
+        if let streamError { throw streamError }
+        return StreamConnection(
+            id: "stream-1",
+            url: URL(string: "https://viewer.example.test")!,
+            state: "ready",
+            expiresAt: Date(timeIntervalSinceNow: 60),
+            capability: "viewer-capability-secret"
+        )
+    }
+
+    func getWorkspacePreferences(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String
+    ) async throws -> WorkspacePreferences {
+        try record(apiToken)
+        return WorkspacePreferences(
+            workspaceID: workspaceID,
+            searchURL: WorkspacePreferences.defaultSearchURL,
+            shortcuts: [],
+            recentURLs: [],
+            updatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+    }
+
+    func listChromeHandoffs(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeHandoff] {
+        try record(apiToken)
+        return []
+    }
+
+    func listChromeLibrary(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        kind: String
+    ) async throws -> [ChromeLibraryItem] {
+        try record(apiToken)
+        return []
+    }
+
+    func listChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeDevice] {
+        try record(apiToken)
+        return []
+    }
+
+    func putWorkspacePreferences(
+        _ preferences: WorkspacePreferences,
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String
+    ) async throws -> WorkspacePreferences {
+        try record(apiToken)
+        return preferences
+    }
+
+    func sendCommand(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        token: String,
+        idempotencyKey: String,
+        command: BrowserCommand
+    ) async throws -> CommandReceipt {
+        try record(apiToken)
+        if let commandError { throw commandError }
+        return CommandReceipt(
+            id: "command-stub",
+            sequence: 1,
+            sessionID: sessionID,
+            type: command.type,
+            url: command.url,
+            tabID: command.tabID,
+            attachmentID: command.attachmentID,
+            expectedRevision: command.expectedRevision,
+            leaseEpoch: 1,
+            state: .queued,
+            errorCode: nil,
+            error: nil,
+            result: nil,
+            resultingRevision: nil,
+            acknowledgedAt: nil,
+            completedAt: nil,
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+    }
+
+    func uploadAttachment(
+        at origin: URL,
+        apiToken: String,
+        sessionID: String,
+        token: String,
+        fileURL: URL
+    ) async throws -> Attachment {
+        fatalError()
+    }
+
+    func redeemViewerCapability(at origin: URL, capability: String, clientID: String) async throws -> ViewerBootstrap {
+        XCTAssertEqual(capability, "viewer-capability-secret")
+        return ViewerBootstrap(
+            streamID: "stream-1",
+            viewerURL: URL(string: "https://viewer.example.test")!,
+            viewerCredential: ViewerCredential(
+                type: "cookie",
+                name: "viewer",
+                value: "viewer-secret",
+                path: "/",
+                secure: true,
+                httpOnly: true,
+                sameSite: "strict",
+                expiresAt: Date(timeIntervalSinceNow: 60)
+            ),
+            expiresAt: Date(timeIntervalSinceNow: 60)
+        )
+    }
+
+    func createChromePairing(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        deviceName: String
+    ) async throws -> ChromePairing {
+        fatalError()
+    }
+
+    func updateChromeHandoff(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        handoffID: String,
+        state: String
+    ) async throws -> ChromeHandoff {
+        fatalError()
+    }
+
+    func revokeChromeDevice(
+        at origin: URL,
+        apiToken: String,
+        workspaceID: String,
+        deviceID: String
+    ) async throws {}
+}
+
 private final class NativeSessionServiceStub: SessionServicing, @unchecked Sendable {
     struct Submission {
         let idempotencyKey: String
@@ -957,6 +1889,10 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
         }
     }
 
+    func createNativeClientEnrollment(at origin: URL, operatorToken: String, clientName: String) async throws -> NativeClientEnrollment { fatalError() }
+    func redeemNativeClientEnrollment(at origin: URL, pairingCapability: String, clientName: String) async throws -> NativeClientCredential { fatalError() }
+    func revokeNativeClient(at origin: URL, operatorToken: String, clientID: String) async throws { fatalError() }
+    func revokeCurrentNativeClient(at origin: URL, clientToken: String) async throws { fatalError() }
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession { fatalError() }
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession { fatalError() }
     func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int) async throws -> BrowserSession? { nil }
