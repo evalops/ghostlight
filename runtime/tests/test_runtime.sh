@@ -178,9 +178,16 @@ source = {
 assert packaged == source, "signed browser-agent CRX must exactly match viewer/extension"
 PY
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent.crx /opt/ghostlight/browser-agent.crx'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY extension/manifest.json /opt/ghostlight/browser-agent-manifest.json'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-updates.xml /opt/ghostlight/browser-agent-updates.xml'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-update-server.conf /etc/neko/supervisord/ghostlight-browser-agent-update-server.conf'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY chromium-launch.sh /usr/local/bin/ghostlight-chromium'
+assert_contains "$REPO_DIR/viewer/chromium.conf" 'command=/usr/local/bin/ghostlight-chromium'
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '--extensions-update-frequency=30'
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '/opt/ghostlight/browser-agent.version'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '${expected_version}_*'
 assert_contains "$REPO_DIR/viewer/Dockerfile" '16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'rm /etc/chromium.d/extensions'
 python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-external.json" "$REPO_DIR/viewer/browser-agent-updates.xml" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-policy.json" <<'PY'
@@ -250,6 +257,7 @@ echo "74c3b8320852f203ad6d725ded2270b7b70940f438264d95d5538f9df42e7742  $REPO_DI
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
   "$RUNTIME_DIR/config/chromium-gpu.conf"; do
+  assert_contains "$chromium_config" 'command=/usr/local/bin/ghostlight-chromium'
   assert_contains "$chromium_config" '--enable-remote-extensions'
   assert_not_contains "$chromium_config" '--load-extension='
 done

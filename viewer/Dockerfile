@@ -108,15 +108,21 @@ COPY --from=neko-builder /build/ghostlight-native-host /usr/local/bin/ghostlight
 COPY --from=neko-builder /build/source/LICENSE /usr/share/doc/neko/LICENSE
 COPY --from=neko-builder /build/SOURCE-PROVENANCE /usr/share/doc/neko/SOURCE-PROVENANCE
 COPY browser-agent.crx /opt/ghostlight/browser-agent.crx
+COPY extension/manifest.json /opt/ghostlight/browser-agent-manifest.json
 COPY browser-agent-updates.xml /opt/ghostlight/browser-agent-updates.xml
 COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json
 COPY native-messaging-host.json /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json
 COPY browser-agent-update-server.conf /etc/neko/supervisord/ghostlight-browser-agent-update-server.conf
+COPY chromium-launch.sh /usr/local/bin/ghostlight-chromium
 COPY chromium.conf /etc/neko/supervisord/chromium.conf
 
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/ghostlight-native-host; \
+    python3 -c 'import json; print(json.load(open("/opt/ghostlight/browser-agent-manifest.json", encoding="utf-8"))["version"])' \
+      > /opt/ghostlight/browser-agent.version; \
+    chmod 0755 /usr/local/bin/ghostlight-native-host /usr/local/bin/ghostlight-chromium; \
     chmod 0444 /opt/ghostlight/browser-agent.crx \
+      /opt/ghostlight/browser-agent-manifest.json \
+      /opt/ghostlight/browser-agent.version \
       /opt/ghostlight/browser-agent-updates.xml \
       /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json; \
     chmod 0644 /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json \
