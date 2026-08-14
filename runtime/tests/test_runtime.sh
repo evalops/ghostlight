@@ -187,6 +187,12 @@ assert_contains "$REPO_DIR/viewer/chromium.conf" 'command=/usr/local/bin/ghostli
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '--extensions-update-frequency=30'
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '/opt/ghostlight/browser-agent.version'
 # shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'if [ "$chromium_running" -eq 0 ]'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'rm -f -- "$profile_root/SingletonCookie" "$profile_root/SingletonLock" "$profile_root/SingletonSocket"'
+# shellcheck disable=SC2016
+assert_not_contains "$REPO_DIR/viewer/chromium-launch.sh" 'rm -rf -- "$profile_root"'
+# shellcheck disable=SC2016
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '${expected_version}_*'
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'find "$extension_root" -mindepth 1 -maxdepth 1 -type d ! -name "${expected_version}_*" -exec rm -rf -- {} +'
