@@ -65,7 +65,7 @@ protocol SessionServicing: Sendable {
     func revokeChromeDevice(at origin: URL, apiToken: String, workspaceID: String, deviceID: String) async throws
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession
-    func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int) async throws -> BrowserSession?
+    func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int, waitMilliseconds: Int) async throws -> BrowserSession?
     func acquireLease(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> ControllerLease
     func renewLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws -> ControllerLease
     func releaseLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws
@@ -277,13 +277,17 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
         at origin: URL,
         apiToken: String,
         sessionID: String,
-        afterRevision: Int
+        afterRevision: Int,
+        waitMilliseconds: Int
     ) async throws -> BrowserSession? {
         try await sendOptional(
             .get,
             origin: origin,
             path: ["v1", "sessions", sessionID, "events"],
-            queryItems: [URLQueryItem(name: "after_revision", value: String(afterRevision))],
+            queryItems: [
+                URLQueryItem(name: "after_revision", value: String(afterRevision)),
+                URLQueryItem(name: "wait_ms", value: String(waitMilliseconds)),
+            ],
             headers: Self.apiBearer(apiToken)
         )
     }

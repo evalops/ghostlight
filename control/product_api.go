@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -293,16 +294,41 @@ func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusBadRequest, "invalid_request", "after_revision must be a non-negative integer")
 			return
 		}
-		session, err := h.store.getSession(r.Context(), sessionID)
-		if err != nil {
-			writeStoreError(w, err)
-			return
+		waitMilliseconds := int64(0)
+		if raw := r.URL.Query().Get("wait_ms"); raw != "" {
+			waitMilliseconds, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil || waitMilliseconds < 0 || waitMilliseconds > 10000 {
+				writeError(w, http.StatusBadRequest, "invalid_request", "wait_ms must be an integer between 0 and 10000")
+				return
+			}
 		}
-		if session.Revision <= after {
-			w.WriteHeader(http.StatusNoContent)
-			return
+		deadline := time.NewTimer(time.Duration(waitMilliseconds) * time.Millisecond)
+		defer deadline.Stop()
+		poll := time.NewTicker(50 * time.Millisecond)
+		defer poll.Stop()
+		for {
+			session, err := h.store.getSession(r.Context(), sessionID)
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			if session.Revision > after {
+				writeJSON(w, http.StatusOK, session)
+				return
+			}
+			if waitMilliseconds == 0 {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-deadline.C:
+				w.WriteHeader(http.StatusNoContent)
+				return
+			case <-poll.C:
+			}
 		}
-		writeJSON(w, http.StatusOK, session)
 	case len(tail) == 1 && tail[0] == "leases":
 		h.handleLeaseAcquire(w, r, sessionID)
 	case len(tail) == 2 && tail[0] == "leases":
