@@ -13,7 +13,7 @@ def fail(message):
     raise RuntimeError(message)
 
 
-def request_json(base_url, api_token, method, path, body=None, headers=None):
+def request_json(base_url, api_token, method, path, body=None, headers=None, allowed_http_errors=()):
     payload = None if body is None else json.dumps(body).encode("utf-8")
     request_headers = {
         "Authorization": f"Bearer {api_token}",
@@ -32,7 +32,40 @@ def request_json(base_url, api_token, method, path, body=None, headers=None):
             return response.status, json.loads(data) if data else None
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
+        if error.code in allowed_http_errors:
+            try:
+                return error.code, json.loads(detail)
+            except json.JSONDecodeError:
+                return error.code, detail
         fail(f"{method} {path} returned HTTP {error.code}: {detail}")
+
+
+def queue_navigation(control_url, api_token, lease_token, phase, suffix, url, current, get_session):
+    headers = {
+        "Idempotency-Key": f"acceptance-native-bridge-{phase}-{suffix}",
+        "X-Ghostlight-Lease-Token": lease_token,
+    }
+    for _attempt in range(3):
+        status, queued = request_json(
+            control_url,
+            api_token,
+            "POST",
+            "/v1/sessions/default/commands",
+            {
+                "type": "navigate",
+                "tab_id": current["active_tab_id"],
+                "url": url,
+                "expected_revision": current["revision"],
+            },
+            headers,
+            allowed_http_errors=(409,),
+        )
+        if status != 409:
+            return queued, current
+        if not isinstance(queued, dict) or queued.get("error", {}).get("code") != "stale_revision":
+            fail(f"navigation command returned unexpected conflict: {queued!r}")
+        current = get_session()
+    fail("navigation command revision remained stale after 3 attempts")
 
 
 def wait_for(description, load, accept, timeout_seconds=90):
@@ -85,21 +118,15 @@ def main():
     lease_token = lease["token"]
     try:
         def submit_navigation(url, current, suffix):
-            _, queued = request_json(
+            queued, current = queue_navigation(
                 control_url,
                 api_token,
-                "POST",
-                "/v1/sessions/default/commands",
-                {
-                    "type": "navigate",
-                    "tab_id": current["active_tab_id"],
-                    "url": url,
-                    "expected_revision": current["revision"],
-                },
-                {
-                    "Idempotency-Key": f"acceptance-native-bridge-{phase}-{suffix}",
-                    "X-Ghostlight-Lease-Token": lease_token,
-                },
+                lease_token,
+                phase,
+                suffix,
+                url,
+                current,
+                get_session,
             )
 
             def get_command():
