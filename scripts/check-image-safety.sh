@@ -121,6 +121,18 @@ if (( dockerfile_count == 0 )); then
   failures=$((failures + 1))
 fi
 
+viewer_dockerfile="$repo_root/viewer/Dockerfile"
+if [[ -f "$viewer_dockerfile" ]]; then
+  if grep -Eq '^FROM[[:space:]]+golang:1\.25\.12-trixie@' "$viewer_dockerfile"; then
+    printf 'viewer/Dockerfile uses Go 1.25.12, which contains fixed HIGH stdlib vulnerabilities\n' >&2
+    failures=$((failures + 1))
+  fi
+  if grep -Eq 'chromium(-common|-sandbox)?=151\.0\.7922\.108-1~deb13u1' "$viewer_dockerfile"; then
+    printf 'viewer/Dockerfile uses Chromium 151.0.7922.108, which contains fixed HIGH vulnerabilities\n' >&2
+    failures=$((failures + 1))
+  fi
+fi
+
 if (( failures > 0 )); then
   printf 'image safety check failed with %d issue(s)\n' "$failures" >&2
   exit 1

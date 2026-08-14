@@ -22,7 +22,7 @@ expect_failure() {
 }
 
 fixture="$scratch_dir/repository"
-mkdir -p "$fixture/.github/workflows" "$fixture/control" "$fixture/runtime/tests" "$fixture/tests/acceptance"
+mkdir -p "$fixture/.github/workflows" "$fixture/control" "$fixture/runtime/tests" "$fixture/tests/acceptance" "$fixture/viewer"
 
 old_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 new_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -40,6 +40,8 @@ printf '%s\n' \
   >"$fixture/.github/workflows/ci.yml"
 printf 'FROM golang:1.26.5-alpine@sha256:%s AS build\nFROM alpine:3.24@sha256:%s\n' \
   "$old_digest" "$old_digest" >"$fixture/control/Dockerfile"
+printf 'FROM golang:1.26.6-trixie@sha256:%s AS build\nRUN apt-get install chromium=151.0.7922.137-1~deb13u1\n' \
+  "$old_digest" >"$fixture/viewer/Dockerfile"
 printf 'NEKO_IMAGE=%s\n' "$old_image" >"$fixture/runtime/.env.example"
 printf '%s\n' \
   'services:' \
@@ -83,6 +85,17 @@ printf 'FROM golang:1.26.5-alpine@sha256:%s AS build\nFROM alpine:3.24\n' \
   "$old_digest" >"$fixture/control/Dockerfile"
 expect_failure 'mutable Docker base image' "$checker" "$fixture"
 cp "$scratch_dir/Dockerfile" "$fixture/control/Dockerfile"
+
+cp "$fixture/viewer/Dockerfile" "$scratch_dir/viewer-Dockerfile"
+sed -i.bak 's/golang:1\.26\.6-trixie/golang:1.25.12-trixie/' "$fixture/viewer/Dockerfile"
+rm "$fixture/viewer/Dockerfile.bak"
+expect_failure 'viewer Go stdlib vulnerability regression' "$checker" "$fixture"
+cp "$scratch_dir/viewer-Dockerfile" "$fixture/viewer/Dockerfile"
+
+sed -i.bak 's/151\.0\.7922\.137/151.0.7922.108/' "$fixture/viewer/Dockerfile"
+rm "$fixture/viewer/Dockerfile.bak"
+expect_failure 'viewer Chromium vulnerability regression' "$checker" "$fixture"
+cp "$scratch_dir/viewer-Dockerfile" "$fixture/viewer/Dockerfile"
 
 printf '%s\n' \
   'services:' \
