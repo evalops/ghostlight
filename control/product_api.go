@@ -55,6 +55,11 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	parts := splitPath(r.URL.Path)
 	switch {
+	case len(parts) == 2 && parts[1] == "native-client":
+		if !requireNativeClientPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClient(w, r, principal.id)
 	case len(parts) == 2 && parts[1] == "native-client-enrollments":
 		if !requireOperatorPrincipal(w, principal) {
 			return
@@ -119,7 +124,7 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 		if !requirePrincipalScope(w, principal, nativeClientScope) {
 			return
 		}
-		h.handleSessionResource(w, r, parts[2], parts[3:])
+		h.handleSessionResource(w, r, parts[2], parts[3:], principal)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
@@ -261,7 +266,7 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, sessionID string, tail []string) {
+func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, sessionID string, tail []string, principal apiPrincipal) {
 	if sessionID == "" {
 		writeError(w, http.StatusNotFound, "session_not_found", "session was not found")
 		return
@@ -307,7 +312,7 @@ func (h *handler) handleSessionResource(w http.ResponseWriter, r *http.Request, 
 	case len(tail) == 2 && tail[0] == "commands":
 		h.handleCommandStatus(w, r, sessionID, tail[1])
 	case len(tail) == 1 && tail[0] == "stream":
-		h.handleStream(w, r, sessionID)
+		h.handleStream(w, r, sessionID, principal)
 	case len(tail) == 1 && tail[0] == "attachments":
 		h.handleAttachments(w, r, sessionID)
 	case len(tail) == 2 && tail[0] == "attachments":
@@ -412,7 +417,7 @@ func (h *handler) handleCommand(w http.ResponseWriter, r *http.Request, sessionI
 	writeJSON(w, status, queued)
 }
 
-func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID string, principal apiPrincipal) {
 	if r.Method != http.MethodPost {
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
@@ -433,7 +438,11 @@ func (h *handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID
 		writeStoreError(w, err)
 		return
 	}
-	stream, err := h.store.createStream(r.Context(), sessionID, input.ClientID, h.viewerURL, defaultStreamTTL)
+	nativeClientID := ""
+	if !principal.isOperator() {
+		nativeClientID = principal.id
+	}
+	stream, err := h.store.createStream(r.Context(), sessionID, input.ClientID, nativeClientID, h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -459,7 +468,11 @@ func (h *handler) handleViewerCapabilityRedemption(w http.ResponseWriter, r *htt
 	}
 	stream, err := h.store.redeemViewerCapability(r.Context(), capability, input.ClientID)
 	if err != nil {
-		writeStoreError(w, err)
+		if errors.Is(err, errUnauthorized) {
+			writeError(w, http.StatusUnauthorized, "viewer_capability_invalid", "viewer capability is missing or invalid")
+		} else {
+			writeStoreError(w, err)
+		}
 		return
 	}
 	credential, err := h.createViewerCredential(r.Context(), stream)

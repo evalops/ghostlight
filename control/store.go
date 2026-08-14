@@ -110,7 +110,7 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS session_idempotency (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id))`,
 		`CREATE TABLE IF NOT EXISTS commands (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, type TEXT NOT NULL, url TEXT NOT NULL, tab_id TEXT NOT NULL, attachment_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, lease_epoch INTEGER NOT NULL, state TEXT NOT NULL, error_code TEXT NOT NULL, error TEXT NOT NULL, result_json TEXT NOT NULL, resulting_revision INTEGER, acknowledged_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, UNIQUE(session_id, idempotency_key))`,
 		`CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, filename TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS viewer_capabilities (token_hash TEXT PRIMARY KEY, stream_id TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, client_id TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS viewer_capabilities (token_hash TEXT PRIMARY KEY, stream_id TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, client_id TEXT NOT NULL, native_client_id TEXT REFERENCES native_clients(id), expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS workspace_preferences (workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE, search_url TEXT NOT NULL, shortcuts_json TEXT NOT NULL, recent_urls_json TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS native_client_enrollments (token_hash TEXT PRIMARY KEY, client_name TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS native_clients (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, scope TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT)`,
@@ -160,6 +160,15 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 				if _, err := tx.ExecContext(ctx, migration.statement); err != nil {
 					return fmt.Errorf("migrate Chrome handoffs: %w", err)
 				}
+			}
+		}
+		viewerCapabilityColumns, err := tableColumns(ctx, tx, "viewer_capabilities")
+		if err != nil {
+			return fmt.Errorf("inspect viewer capability migration: %w", err)
+		}
+		if !viewerCapabilityColumns["native_client_id"] {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE viewer_capabilities ADD COLUMN native_client_id TEXT REFERENCES native_clients(id)`); err != nil {
+				return fmt.Errorf("migrate viewer capabilities: %w", err)
 			}
 		}
 	}
@@ -579,7 +588,7 @@ func (s *sqliteStore) releaseLease(ctx context.Context, sessionID, leaseID, toke
 	return tx.Commit()
 }
 
-func (s *sqliteStore) createStream(ctx context.Context, sessionID, clientID, url string, ttl time.Duration) (StreamConnection, error) {
+func (s *sqliteStore) createStream(ctx context.Context, sessionID, clientID, nativeClientID, url string, ttl time.Duration) (StreamConnection, error) {
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -628,7 +637,8 @@ func (s *sqliteStore) createStream(ctx context.Context, sessionID, clientID, url
 		if capabilityExpiry.After(now.Add(time.Minute)) {
 			capabilityExpiry = now.Add(time.Minute)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO viewer_capabilities(token_hash,stream_id,session_id,client_id,expires_at,created_at) VALUES(?,?,?,?,?,?)`, hashSecret(capability), stream.ID, sessionID, clientID, formatTime(capabilityExpiry), formatTime(now)); err != nil {
+		boundNativeClientID := sql.NullString{String: nativeClientID, Valid: nativeClientID != ""}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO viewer_capabilities(token_hash,stream_id,session_id,client_id,native_client_id,expires_at,created_at) VALUES(?,?,?,?,?,?,?)`, hashSecret(capability), stream.ID, sessionID, clientID, boundNativeClientID, formatTime(capabilityExpiry), formatTime(now)); err != nil {
 			return StreamConnection{}, err
 		}
 	}
@@ -646,8 +656,8 @@ func (s *sqliteStore) redeemViewerCapability(ctx context.Context, capability, cl
 	}
 	defer tx.Rollback()
 	var streamID, sessionID, expectedClient, expires string
-	var redeemed sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT stream_id,session_id,client_id,expires_at,redeemed_at FROM viewer_capabilities WHERE token_hash=?`, hashSecret(capability)).Scan(&streamID, &sessionID, &expectedClient, &expires, &redeemed)
+	var redeemed, nativeClientID, boundClientID, revoked sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT vc.stream_id,vc.session_id,vc.client_id,vc.expires_at,vc.redeemed_at,vc.native_client_id,nc.id,nc.revoked_at FROM viewer_capabilities vc LEFT JOIN native_clients nc ON nc.id=vc.native_client_id WHERE vc.token_hash=?`, hashSecret(capability)).Scan(&streamID, &sessionID, &expectedClient, &expires, &redeemed, &nativeClientID, &boundClientID, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StreamConnection{}, errUnauthorized
 	}
@@ -657,6 +667,9 @@ func (s *sqliteStore) redeemViewerCapability(ctx context.Context, capability, cl
 	if subtle.ConstantTimeCompare([]byte(expectedClient), []byte(clientID)) != 1 {
 		return StreamConnection{}, errUnauthorized
 	}
+	if nativeClientID.Valid && (!boundClientID.Valid || revoked.Valid) {
+		return StreamConnection{}, errUnauthorized
+	}
 	if redeemed.Valid {
 		return StreamConnection{}, errCapabilityUsed
 	}
@@ -664,7 +677,7 @@ func (s *sqliteStore) redeemViewerCapability(ctx context.Context, capability, cl
 	if err != nil || !expiresAt.After(now) {
 		return StreamConnection{}, errCapabilityExpired
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE viewer_capabilities SET redeemed_at=? WHERE token_hash=? AND redeemed_at IS NULL`, formatTime(now), hashSecret(capability))
+	result, err := tx.ExecContext(ctx, `UPDATE viewer_capabilities SET redeemed_at=? WHERE token_hash=? AND redeemed_at IS NULL AND (native_client_id IS NULL OR EXISTS (SELECT 1 FROM native_clients WHERE id=native_client_id AND revoked_at IS NULL))`, formatTime(now), hashSecret(capability))
 	if err != nil {
 		return StreamConnection{}, err
 	}

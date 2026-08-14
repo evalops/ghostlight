@@ -5,7 +5,7 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
     case networkUnavailable
     case requestTimedOut
     case transportFailure
-    case server(statusCode: Int, message: String?)
+    case server(statusCode: Int, code: String?, message: String?)
     case invalidResponse
     case responseDecodingFailed
 
@@ -15,7 +15,7 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
         case .networkUnavailable: "The control plane could not be reached."
         case .requestTimedOut: "The control-plane request timed out."
         case .transportFailure: "The control-plane request failed."
-        case let .server(statusCode, message):
+        case let .server(statusCode, _, message):
             message.map { "HTTP \(statusCode): \($0)" } ?? "HTTP \(statusCode)."
         case .invalidResponse: "The control plane returned an invalid response."
         case .responseDecodingFailed: "The control plane returned an unsupported response."
@@ -23,13 +23,18 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
     }
 
     public var statusCode: Int? {
-        guard case let .server(statusCode, _) = self else { return nil }
+        guard case let .server(statusCode, _, _) = self else { return nil }
         return statusCode
+    }
+
+    public var apiCode: String? {
+        guard case let .server(_, code, _) = self else { return nil }
+        return code
     }
 
     static func mapHTTPFailure(statusCode: Int, data: Data) -> SessionClientError {
         let payload = try? SessionJSON.decoder.decode(APIErrorPayload.self, from: data)
-        return .server(statusCode: statusCode, message: payload?.bestMessage)
+        return .server(statusCode: statusCode, code: payload?.error?.code, message: payload?.bestMessage)
     }
 
     static func mapTransportError(_ error: Error) throws -> SessionClientError {
@@ -46,6 +51,10 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
 }
 
 protocol SessionServicing: Sendable {
+    func createNativeClientEnrollment(at origin: URL, operatorToken: String, clientName: String) async throws -> NativeClientEnrollment
+    func redeemNativeClientEnrollment(at origin: URL, pairingCapability: String, clientName: String) async throws -> NativeClientCredential
+    func revokeNativeClient(at origin: URL, operatorToken: String, clientID: String) async throws
+    func revokeCurrentNativeClient(at origin: URL, clientToken: String) async throws
     func getWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences
     func putWorkspacePreferences(_ preferences: WorkspacePreferences, at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences
     func createChromePairing(at origin: URL, apiToken: String, workspaceID: String, deviceName: String) async throws -> ChromePairing
@@ -88,6 +97,56 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
 
     public func listWorkspaces(at origin: URL, apiToken: String) async throws -> [Workspace] {
         try await send(.get, origin: origin, path: ["v1", "workspaces"], headers: Self.apiBearer(apiToken))
+    }
+
+    public func createNativeClientEnrollment(
+        at origin: URL,
+        operatorToken: String,
+        clientName: String
+    ) async throws -> NativeClientEnrollment {
+        try await send(
+            .post,
+            origin: origin,
+            path: ["v1", "native-client-enrollments"],
+            headers: Self.apiBearer(operatorToken),
+            body: try SessionJSON.encoder.encode(NativeClientEnrollmentRequest(clientName: clientName))
+        )
+    }
+
+    public func redeemNativeClientEnrollment(
+        at origin: URL,
+        pairingCapability: String,
+        clientName: String
+    ) async throws -> NativeClientCredential {
+        try await send(
+            .post,
+            origin: origin,
+            path: ["v1", "native-client-enrollments", "redeem"],
+            headers: Self.apiBearer(pairingCapability),
+            body: try SessionJSON.encoder.encode(NativeClientEnrollmentRequest(clientName: clientName))
+        )
+    }
+
+    public func revokeNativeClient(
+        at origin: URL,
+        operatorToken: String,
+        clientID: String
+    ) async throws {
+        let _: EmptyResponse? = try await sendOptional(
+            .delete,
+            origin: origin,
+            path: ["v1", "native-clients", clientID],
+            headers: Self.apiBearer(operatorToken)
+        )
+    }
+
+    public func revokeCurrentNativeClient(at origin: URL, clientToken: String) async throws {
+        let _: EmptyResponse? = try await sendOptional(
+            .delete,
+            origin: origin,
+            path: ["v1", "native-client"],
+            headers: Self.apiBearer(clientToken)
+        )
     }
 
     public func getWorkspacePreferences(at origin: URL, apiToken: String, workspaceID: String) async throws -> WorkspacePreferences {
@@ -426,6 +485,10 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
 }
 
 private enum HTTPMethod: String { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
+private struct NativeClientEnrollmentRequest: Encodable {
+    let clientName: String
+    enum CodingKeys: String, CodingKey { case clientName = "client_name" }
+}
 private struct CreateSessionRequest: Encodable { let workspaceID: String; enum CodingKeys: String, CodingKey { case workspaceID = "workspace_id" } }
 private struct AcquireLeaseRequest: Encodable { let clientID: String; enum CodingKeys: String, CodingKey { case clientID = "client_id" } }
 private struct ChromePairingRequest: Encodable { let deviceName: String; enum CodingKeys: String, CodingKey { case deviceName = "device_name" } }

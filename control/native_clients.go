@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	nativeClientEnrollmentTTL = 10 * time.Minute
-	nativeClientScope         = "browser:use"
-	maxNativeClientName       = 100
+	nativeClientEnrollmentTTL   = 10 * time.Minute
+	nativeClientLastSeenCadence = time.Minute
+	nativeClientTokenPrefix     = "glnc_"
+	nativeClientScope           = "browser:use"
+	maxNativeClientName         = 100
 )
 
 var (
@@ -51,6 +53,14 @@ func requireOperatorPrincipal(w http.ResponseWriter, principal apiPrincipal) boo
 	return false
 }
 
+func requireNativeClientPrincipal(w http.ResponseWriter, principal apiPrincipal) bool {
+	if principal.kind == "native_client" {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "scope_denied", "native client credentials are required")
+	return false
+}
+
 func requirePrincipalScope(w http.ResponseWriter, principal apiPrincipal, scope string) bool {
 	if principal.allows(scope) {
 		return true
@@ -63,6 +73,9 @@ func (h *handler) authenticateAPI(r *http.Request) (apiPrincipal, error) {
 	token := bearerToken(r)
 	if h.config.APIToken != "" && len(token) == len(h.config.APIToken) && subtle.ConstantTimeCompare([]byte(token), []byte(h.config.APIToken)) == 1 {
 		return apiPrincipal{kind: "operator", name: "operator"}, nil
+	}
+	if !strings.HasPrefix(token, nativeClientTokenPrefix) {
+		return apiPrincipal{}, errUnauthorized
 	}
 	client, err := h.store.nativeClientForToken(r.Context(), token)
 	if err != nil {
@@ -111,10 +124,11 @@ func (s *sqliteStore) redeemNativeClientEnrollment(ctx context.Context, capabili
 	if subtle.ConstantTimeCompare([]byte(expectedName), []byte(clientName)) != 1 {
 		return NativeClientCredential{}, errUnauthorized
 	}
-	token, err := randomID(32)
+	tokenSecret, err := randomID(32)
 	if err != nil {
 		return NativeClientCredential{}, err
 	}
+	token := nativeClientTokenPrefix + tokenSecret
 	result, err := tx.ExecContext(ctx, `UPDATE native_client_enrollments SET redeemed_at=? WHERE token_hash=? AND redeemed_at IS NULL`, formatTime(now), hashSecret(capability))
 	if err != nil {
 		return NativeClientCredential{}, err
@@ -156,13 +170,14 @@ func (s *sqliteStore) redeemNativeClientEnrollment(ctx context.Context, capabili
 }
 
 func (s *sqliteStore) nativeClientForToken(ctx context.Context, token string) (NativeClient, error) {
-	if token == "" {
+	if !strings.HasPrefix(token, nativeClientTokenPrefix) {
 		return NativeClient{}, errUnauthorized
 	}
+	tokenHash := hashSecret(token)
 	var client NativeClient
 	var created, lastSeen string
 	var revoked sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,scope,created_at,last_seen_at,revoked_at FROM native_clients WHERE token_hash=?`, hashSecret(token)).Scan(&client.ID, &client.Name, &client.Scope, &created, &lastSeen, &revoked)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,scope,created_at,last_seen_at,revoked_at FROM native_clients WHERE token_hash=?`, tokenHash).Scan(&client.ID, &client.Name, &client.Scope, &created, &lastSeen, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NativeClient{}, errUnauthorized
 	}
@@ -175,10 +190,22 @@ func (s *sqliteStore) nativeClientForToken(ctx context.Context, token string) (N
 		return NativeClient{}, errNativeClientRevoked
 	}
 	now := s.now().UTC()
-	if _, err := s.db.ExecContext(ctx, `UPDATE native_clients SET last_seen_at=? WHERE id=? AND revoked_at IS NULL`, formatTime(now), client.ID); err != nil {
+	if !client.LastSeenAt.Add(nativeClientLastSeenCadence).After(now) {
+		result, err := s.db.ExecContext(ctx, `UPDATE native_clients SET last_seen_at=? WHERE id=? AND token_hash=? AND revoked_at IS NULL`, formatTime(now), client.ID, tokenHash)
+		if err != nil {
+			return NativeClient{}, err
+		}
+		if rows, _ := result.RowsAffected(); rows != 1 {
+			return NativeClient{}, errNativeClientRevoked
+		}
+		client.LastSeenAt = now
+	}
+	var active int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM native_clients WHERE id=? AND token_hash=? AND revoked_at IS NULL`, client.ID, tokenHash).Scan(&active); errors.Is(err, sql.ErrNoRows) {
+		return NativeClient{}, errNativeClientRevoked
+	} else if err != nil {
 		return NativeClient{}, err
 	}
-	client.LastSeenAt = now
 	return client, nil
 }
 

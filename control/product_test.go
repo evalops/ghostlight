@@ -167,8 +167,117 @@ func TestSchemaFourMigratesNativeClientEnrollment(t *testing.T) {
 		}
 	}
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
-		t.Fatalf("migrated version = %d, %v; want 5", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 6 {
+		t.Fatalf("migrated version = %d, %v; want 6", version, err)
+	}
+}
+
+func TestSchemaFiveMigratesViewerCapabilityNativeClientBinding(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(stateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO metadata(key,value) VALUES('schema_version','5')`,
+		`CREATE TABLE viewer_capabilities (token_hash TEXT PRIMARY KEY, stream_id TEXT NOT NULL, session_id TEXT NOT NULL, client_id TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
+		`INSERT INTO viewer_capabilities(token_hash,stream_id,session_id,client_id,expires_at,created_at) VALUES('hash','stream','default','legacy-mac','2026-08-13T13:00:00Z','2026-08-13T12:00:00Z')`,
+		`PRAGMA user_version = 5`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("migrate schema five: %v", err)
+	}
+	defer store.close()
+	columns := tableColumnNames(t, store.db, "viewer_capabilities")
+	if !columns["native_client_id"] {
+		t.Fatalf("migrated viewer capability columns = %#v", columns)
+	}
+	var nativeClientID sql.NullString
+	if err := store.db.QueryRow(`SELECT native_client_id FROM viewer_capabilities WHERE token_hash='hash'`).Scan(&nativeClientID); err != nil || nativeClientID.Valid {
+		t.Fatalf("migrated legacy native_client_id = %#v, %v; want NULL", nativeClientID, err)
+	}
+	var userVersion int
+	var recordedVersion string
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT value FROM metadata WHERE key='schema_version'`).Scan(&recordedVersion); err != nil {
+		t.Fatal(err)
+	}
+	if userVersion != 6 || recordedVersion != "6" {
+		t.Fatalf("migrated versions = %d/%q, want 6/6", userVersion, recordedVersion)
+	}
+}
+
+func TestSchemaFiveMigrationRollsBackNativeClientBinding(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(stateDir, databaseFileName)
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO metadata(key,value) VALUES('schema_version','5')`,
+		`CREATE TRIGGER reject_schema_six BEFORE UPDATE ON metadata BEGIN SELECT RAISE(ABORT, 'stop schema six'); END`,
+		`CREATE TABLE viewer_capabilities (token_hash TEXT PRIMARY KEY, stream_id TEXT NOT NULL, session_id TEXT NOT NULL, client_id TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
+		`PRAGMA user_version = 5`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := openSQLiteStore(stateDir, attachments, time.Now); err == nil || !strings.Contains(err.Error(), "stop schema six") {
+		t.Fatalf("failed schema five migration error = %v, want injected failure", err)
+	}
+	db, err = sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if columns := tableColumnNames(t, db, "viewer_capabilities"); columns["native_client_id"] {
+		t.Fatalf("failed migration left native_client_id behind: %#v", columns)
+	}
+	var userVersion int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil || userVersion != 5 {
+		t.Fatalf("failed migration version = %d, %v; want 5", userVersion, err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER reject_schema_six`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("restart after schema five rollback: %v", err)
+	}
+	defer store.close()
+	if columns := tableColumnNames(t, store.db, "viewer_capabilities"); !columns["native_client_id"] {
+		t.Fatalf("successful restart is missing native_client_id: %#v", columns)
 	}
 }
 
@@ -465,7 +574,7 @@ func TestStreamRevisionAndAttachmentLeaseRevalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := h.store.createStream(t.Context(), "default", "test-client", h.viewerURL, defaultStreamTTL)
+	stream, err := h.store.createStream(t.Context(), "default", "test-client", "", h.viewerURL, defaultStreamTTL)
 	if err != nil || stream.ID == "" {
 		t.Fatalf("createStream() = %#v, %v", stream, err)
 	}
@@ -491,7 +600,7 @@ func TestStreamRevisionAndAttachmentLeaseRevalidation(t *testing.T) {
 
 func TestViewerCapabilityIsScopedSingleUseAndHashOnly(t *testing.T) {
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
-	stream, err := h.store.createStream(t.Context(), "default", "mac-client", h.viewerURL, defaultStreamTTL)
+	stream, err := h.store.createStream(t.Context(), "default", "mac-client", "", h.viewerURL, defaultStreamTTL)
 	if err != nil || stream.Capability == "" {
 		t.Fatalf("createStream() = %#v, %v", stream, err)
 	}
@@ -520,7 +629,7 @@ func TestConcurrentViewerHandoffsKeepBothCapabilitiesRedeemable(t *testing.T) {
 	results := make(chan handoff, 2)
 	for _, client := range []string{"first-client", "second-client"} {
 		go func() {
-			stream, err := h.store.createStream(context.Background(), "default", client, h.viewerURL, defaultStreamTTL)
+			stream, err := h.store.createStream(context.Background(), "default", client, "", h.viewerURL, defaultStreamTTL)
 			results <- handoff{client: client, stream: stream, err: err}
 		}()
 	}
@@ -542,12 +651,12 @@ func TestConcurrentViewerHandoffsKeepBothCapabilitiesRedeemable(t *testing.T) {
 func TestNewHandoffRefreshesActiveStreamLifetimeWithoutChangingItsID(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
-	first, err := h.store.createStream(t.Context(), "default", "first-client", h.viewerURL, defaultStreamTTL)
+	first, err := h.store.createStream(t.Context(), "default", "first-client", "", h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(defaultStreamTTL - time.Second)
-	second, err := h.store.createStream(t.Context(), "default", "second-client", h.viewerURL, defaultStreamTTL)
+	second, err := h.store.createStream(t.Context(), "default", "second-client", "", h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +723,7 @@ func TestViewerCapabilityRedeemsToNekoSessionCredentialWithoutPassword(t *testin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.store.close() })
-	stream, err := h.store.createStream(t.Context(), "default", "mac-client", h.viewerURL, defaultStreamTTL)
+	stream, err := h.store.createStream(t.Context(), "default", "mac-client", "", h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +759,7 @@ func TestViewerCapabilityRedeemsToNekoSessionCredentialWithoutPassword(t *testin
 
 func TestViewerCapabilityCanRetryAfterViewerLoginFailure(t *testing.T) {
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
-	stream, err := h.store.createStream(t.Context(), "default", "mac-client", h.viewerURL, defaultStreamTTL)
+	stream, err := h.store.createStream(t.Context(), "default", "mac-client", "", h.viewerURL, defaultStreamTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +1003,7 @@ func TestNativeClientEnrollmentHappyPathAndPrincipalBoundary(t *testing.T) {
 		ClientToken string `json:"client_token"`
 	}
 	decodeRecorder(t, redeemed, &credential)
-	if len(credential.Client.ID) < 16 || credential.Client.Name != "Jonathan's Mac" || credential.Client.Scope != "browser:use" || len(credential.ClientToken) < 40 {
+	if len(credential.Client.ID) < 16 || credential.Client.Name != "Jonathan's Mac" || credential.Client.Scope != "browser:use" || !strings.HasPrefix(credential.ClientToken, "glnc_") || len(credential.ClientToken) < 40 {
 		t.Fatalf("credential = %#v", credential)
 	}
 	if strings.Contains(redeemed.Body.String(), enrollment.PairingCapability) || strings.Contains(redeemed.Body.String(), "pairing_capability") || strings.Contains(redeemed.Body.String(), "token_hash") {
@@ -1035,9 +1144,121 @@ func TestNativeClientAuthenticationReportsStorageFailure(t *testing.T) {
 	if err := h.store.close(); err != nil {
 		t.Fatal(err)
 	}
+	nonNative := doBearerRequest(h, http.MethodGet, "/v1/sessions", "arbitrary-bearer", nil)
+	if nonNative.Code != http.StatusUnauthorized {
+		t.Fatalf("non-native bearer with unavailable store = %d %s", nonNative.Code, nonNative.Body.String())
+	}
 	response := doBearerRequest(h, http.MethodGet, "/v1/sessions", credential.ClientToken, nil)
 	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "internal_error") {
 		t.Fatalf("storage failure = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestNativeClientAuthenticationThrottlesLastSeenWrites(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	credential := enrollNativeClient(t, h, "Polling Mac")
+	for _, statement := range []string{
+		`CREATE TABLE native_client_last_seen_writes (count INTEGER NOT NULL)`,
+		`INSERT INTO native_client_last_seen_writes(count) VALUES(0)`,
+		`CREATE TRIGGER count_native_client_last_seen AFTER UPDATE OF last_seen_at ON native_clients BEGIN UPDATE native_client_last_seen_writes SET count=count+1; END`,
+	} {
+		if _, err := h.store.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if response := doBearerRequest(h, http.MethodGet, "/v1/sessions", credential.ClientToken, nil); response.Code != http.StatusOK {
+			t.Fatalf("poll authentication = %d %s", response.Code, response.Body.String())
+		}
+	}
+	var writes int
+	if err := h.store.db.QueryRow(`SELECT count FROM native_client_last_seen_writes`).Scan(&writes); err != nil || writes != 0 {
+		t.Fatalf("poll last_seen writes = %d, %v; want 0", writes, err)
+	}
+	now = now.Add(time.Minute)
+	for range 2 {
+		if response := doBearerRequest(h, http.MethodGet, "/v1/sessions", credential.ClientToken, nil); response.Code != http.StatusOK {
+			t.Fatalf("cadence authentication = %d %s", response.Code, response.Body.String())
+		}
+	}
+	if err := h.store.db.QueryRow(`SELECT count FROM native_client_last_seen_writes`).Scan(&writes); err != nil || writes != 1 {
+		t.Fatalf("cadence last_seen writes = %d, %v; want 1", writes, err)
+	}
+}
+
+func TestNativeClientAuthenticationFailsClosedWhenRevokedDuringAcceptance(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	credential := enrollNativeClient(t, h, "Revoked During Auth Mac")
+	if _, err := h.store.db.Exec(fmt.Sprintf(`CREATE TRIGGER revoke_during_native_auth BEFORE UPDATE OF last_seen_at ON native_clients WHEN OLD.id=%q BEGIN UPDATE native_clients SET revoked_at='2026-08-13T12:00:30Z' WHERE id=OLD.id; END`, credential.Client.ID)); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	response := doBearerRequest(h, http.MethodGet, "/v1/sessions", credential.ClientToken, nil)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked during authentication = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestNativeClientSelfRevocation(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	credential := enrollNativeClient(t, h, "Forgettable Mac")
+	operator := doBearerRequest(h, http.MethodDelete, "/v1/native-client", h.config.APIToken, nil)
+	if operator.Code != http.StatusForbidden {
+		t.Fatalf("operator self-revoke = %d %s", operator.Code, operator.Body.String())
+	}
+	wrongMethod := doBearerRequest(h, http.MethodPost, "/v1/native-client", credential.ClientToken, nil)
+	if wrongMethod.Code != http.StatusMethodNotAllowed || wrongMethod.Header().Get("Allow") != http.MethodDelete {
+		t.Fatalf("self-revoke wrong method = %d Allow=%q %s", wrongMethod.Code, wrongMethod.Header().Get("Allow"), wrongMethod.Body.String())
+	}
+	revoked := doBearerRequest(h, http.MethodDelete, "/v1/native-client", credential.ClientToken, nil)
+	if revoked.Code != http.StatusNoContent {
+		t.Fatalf("self-revoke = %d %s", revoked.Code, revoked.Body.String())
+	}
+	if response := doBearerRequest(h, http.MethodGet, "/v1/sessions", credential.ClientToken, nil); response.Code != http.StatusUnauthorized {
+		t.Fatalf("self-revoked client authentication = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestNativeViewerCapabilityIsBoundToRevocablePrincipal(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	credential := enrollNativeClient(t, h, "Streaming Mac")
+	nativeResponse := doBearerRequest(h, http.MethodPost, "/v1/sessions/default/stream", credential.ClientToken, strings.NewReader(`{"client_id":"native-viewer"}`))
+	var nativeStream StreamConnection
+	decodeRecorder(t, nativeResponse, &nativeStream)
+	if nativeResponse.Code != http.StatusCreated || nativeStream.Capability == "" {
+		t.Fatalf("native stream = %d %#v %s", nativeResponse.Code, nativeStream, nativeResponse.Body.String())
+	}
+	var nativeClientID sql.NullString
+	if err := h.store.db.QueryRow(`SELECT native_client_id FROM viewer_capabilities WHERE token_hash=?`, hashSecret(nativeStream.Capability)).Scan(&nativeClientID); err != nil || nativeClientID.String != credential.Client.ID {
+		t.Fatalf("native capability binding = %#v, %v; want %q", nativeClientID, err, credential.Client.ID)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), nativeStream.Capability, "native-viewer"); err != nil {
+		t.Fatalf("active native capability redemption: %v", err)
+	}
+	if err := h.store.releaseViewerCapability(t.Context(), nativeStream.Capability); err != nil {
+		t.Fatalf("release active native capability: %v", err)
+	}
+	if response := doBearerRequest(h, http.MethodDelete, "/v1/native-clients/"+credential.Client.ID, h.config.APIToken, nil); response.Code != http.StatusNoContent {
+		t.Fatalf("operator revoke = %d %s", response.Code, response.Body.String())
+	}
+	revokedRedemption := doBearerRequest(h, http.MethodPost, "/v1/viewer-capabilities/redeem", nativeStream.Capability, strings.NewReader(`{"client_id":"native-viewer"}`))
+	if revokedRedemption.Code != http.StatusUnauthorized || !strings.Contains(revokedRedemption.Body.String(), "viewer_capability_invalid") {
+		t.Fatalf("revoked native capability redemption = %d %s", revokedRedemption.Code, revokedRedemption.Body.String())
+	}
+
+	operatorResponse := doBearerRequest(h, http.MethodPost, "/v1/sessions/default/stream", h.config.APIToken, strings.NewReader(`{"client_id":"operator-viewer"}`))
+	var operatorStream StreamConnection
+	decodeRecorder(t, operatorResponse, &operatorStream)
+	if operatorResponse.Code != http.StatusCreated || operatorStream.Capability == "" {
+		t.Fatalf("operator stream = %d %#v %s", operatorResponse.Code, operatorStream, operatorResponse.Body.String())
+	}
+	if err := h.store.db.QueryRow(`SELECT native_client_id FROM viewer_capabilities WHERE token_hash=?`, hashSecret(operatorStream.Capability)).Scan(&nativeClientID); err != nil || nativeClientID.Valid {
+		t.Fatalf("operator capability binding = %#v, %v; want NULL", nativeClientID, err)
+	}
+	if _, err := h.store.redeemViewerCapability(t.Context(), operatorStream.Capability, "operator-viewer"); err != nil {
+		t.Fatalf("operator capability redemption: %v", err)
 	}
 }
 
@@ -1349,6 +1570,27 @@ func redeemNativeClient(t *testing.T, h *handler, capability, name string) nativ
 		t.Fatalf("redeem = %d %s", response.Code, response.Body.String())
 	}
 	return credential
+}
+
+func tableColumnNames(t *testing.T, db *sql.DB, table string) map[string]bool {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
 }
 
 func productTestConfig(root string) Config {
