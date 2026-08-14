@@ -136,6 +136,9 @@ assert extension_id == "okabifedphcnokaehflbkmpfphleoaha"
 assert extension_id in policy.get("ExtensionInstallAllowlist", []), (
     f"packaged browser agent {extension_id} must be exempt from the extension blocklist"
 )
+assert f"{extension_id};{manifest['update_url']}" in policy.get("ExtensionInstallForcelist", []), (
+    f"packaged browser agent {extension_id} must be installed from its loopback update source"
+)
 extension_settings = policy.get("ExtensionSettings", {}).get(extension_id, {})
 assert extension_settings == {
     "installation_mode": "force_installed",

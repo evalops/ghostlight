@@ -29,7 +29,8 @@
   ],
   "ExtensionInstallForcelist": [
     "ddkjiahejlhfcafbddmgiahcphecmpfh;https://clients2.google.com/service/update2/crx",
-    "mnjggcdmjocbbbhaepdhchncahnbgone;https://clients2.google.com/service/update2/crx"
+    "mnjggcdmjocbbbhaepdhchncahnbgone;https://clients2.google.com/service/update2/crx",
+    "okabifedphcnokaehflbkmpfphleoaha;http://127.0.0.1:18084/browser-agent-updates.xml"
   ],
   "ExtensionInstallAllowlist": [
     "ddkjiahejlhfcafbddmgiahcphecmpfh",
