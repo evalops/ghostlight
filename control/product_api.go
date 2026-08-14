@@ -27,6 +27,7 @@ const (
 	maxSessionAttachments     = 100
 	maxSessionAttachmentBytes = 1 << 30
 	maxBridgeCommands         = 100
+	continuityIntentTTL       = 10 * time.Minute
 )
 
 var credentialBearingURLQueryKeys = map[string]bool{
@@ -91,6 +92,11 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleActivitySpaces(w, r, parts[2])
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "continuity":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handleContinuity(w, r, parts[2])
 	case len(parts) == 6 && parts[1] == "workspaces" && parts[3] == "spaces":
 		if !requirePrincipalScope(w, principal, nativeClientScope) {
 			return
@@ -139,6 +145,120 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (h *handler) handleContinuity(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if r.Method == http.MethodGet {
+		resume, err := h.store.listActivitySpaces(r.Context(), workspaceID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		bookmarks, err := h.store.listChromeLibrary(r.Context(), workspaceID, "bookmark")
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		readingList, err := h.store.listChromeLibrary(r.Context(), workspaceID, "reading_list")
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		send, err := h.store.listChromeHandoffs(r.Context(), workspaceID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ContinuityOverview{
+			Resume:      resume,
+			Browse:      ContinuityBrowse{Authority: "chrome_snapshot", Bookmarks: bookmarks, ReadingList: readingList},
+			Send:        send,
+			GeneratedAt: h.now().UTC(),
+		})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 200 || leaseToken(r) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Idempotency-Key and lease token are required")
+		return
+	}
+	var input struct {
+		Verb             string    `json:"verb"`
+		Adapter          string    `json:"adapter"`
+		SessionID        string    `json:"session_id"`
+		ExpectedRevision int64     `json:"expected_revision"`
+		ExpiresAt        time.Time `json:"expires_at"`
+		SpaceID          string    `json:"space_id,omitempty"`
+		URL              string    `json:"url,omitempty"`
+	}
+	body, err := decodeStrictJSON(r, &input)
+	input.Verb = strings.TrimSpace(input.Verb)
+	input.Adapter = strings.TrimSpace(input.Adapter)
+	now := h.now().UTC()
+	validAdapter := input.Adapter == "native_ui" || input.Adapter == "url_handler" || input.Adapter == "share" || input.Adapter == "chrome_extension"
+	if err != nil || (input.Verb != "resume" && input.Verb != "send") || !validAdapter || input.SessionID == "" || input.ExpectedRevision < 1 || !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(continuityIntentTTL)) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "verb, adapter, session_id, expected_revision, and an expiry within 10 minutes are required")
+		return
+	}
+	session, err := h.store.getSession(r.Context(), input.SessionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if session.WorkspaceID != workspaceID {
+		writeError(w, http.StatusNotFound, "not_found", "session was not found in this workspace")
+		return
+	}
+	command := BrowserCommand{
+		ExpectedRevision:  input.ExpectedRevision,
+		ContinuityVerb:    input.Verb,
+		ContinuityAdapter: input.Adapter,
+		ContinuityExpiry:  &input.ExpiresAt,
+	}
+	var space *ActivitySpace
+	switch input.Verb {
+	case "resume":
+		if input.SpaceID == "" || input.URL != "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "resume requires only space_id")
+			return
+		}
+		value, err := h.store.getActivitySpace(r.Context(), workspaceID, input.SpaceID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		destinations := make([]string, len(value.Tabs))
+		for index, tab := range value.Tabs {
+			destinations[index] = tab.URL
+		}
+		command.Type = "restore_space"
+		command.SpaceID = value.ID
+		command.Destinations = destinations
+		command.ActivePosition = value.ActivePosition
+		space = &value
+	case "send":
+		if input.SpaceID != "" || !validRecentURL(input.URL) {
+			writeError(w, http.StatusBadRequest, "unsafe_url", "send requires one credential-free HTTP or HTTPS destination")
+			return
+		}
+		command.Type = "create_tab"
+		command.URL = input.URL
+	}
+	digest := sha256.Sum256(append([]byte("continuity\x00"), body...))
+	queued, created, err := h.store.createCommand(r.Context(), input.SessionID, leaseToken(r), key, hex.EncodeToString(digest[:]), command)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, ContinuityIntentReceipt{Verb: input.Verb, Adapter: input.Adapter, Authority: "ghostlight_session", ExpiresAt: input.ExpiresAt, Space: space, Command: queued})
 }
 
 func (h *handler) handleActivitySpaces(w http.ResponseWriter, r *http.Request, workspaceID string) {
@@ -934,7 +1054,7 @@ func decodeStrictJSON(r *http.Request, target any) ([]byte, error) {
 }
 
 func validCommand(command BrowserCommand) bool {
-	if command.ExpectedRevision < 1 {
+	if command.ExpectedRevision < 1 || command.ContinuityVerb != "" || command.ContinuityAdapter != "" || command.ContinuityExpiry != nil {
 		return false
 	}
 	switch command.Type {

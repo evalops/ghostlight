@@ -67,6 +67,8 @@ protocol SessionServicing: Sendable {
     func createActivitySpace(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, name: String, expectedRevision: Int) async throws -> ActivitySpace
     func parkActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpace
     func activateActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpaceActivation
+    func getContinuity(at origin: URL, apiToken: String, workspaceID: String) async throws -> ContinuityOverview
+    func submitContinuity(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, verb: ContinuityVerb, adapter: ContinuityAdapter, expiresAt: Date, expectedRevision: Int, spaceID: String?, url: String?) async throws -> ContinuityIntentReceipt
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession
     func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int, waitMilliseconds: Int) async throws -> BrowserSession?
@@ -84,6 +86,31 @@ extension SessionServicing {
     func createActivitySpace(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, name: String, expectedRevision: Int) async throws -> ActivitySpace { throw SessionClientError.invalidResponse }
     func parkActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpace { throw SessionClientError.invalidResponse }
     func activateActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpaceActivation { throw SessionClientError.invalidResponse }
+    func getContinuity(at origin: URL, apiToken: String, workspaceID: String) async throws -> ContinuityOverview {
+        async let spaces = listActivitySpaces(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+        async let handoffs = listChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+        async let bookmarks = listChromeLibrary(at: origin, apiToken: apiToken, workspaceID: workspaceID, kind: "bookmark")
+        async let readingList = listChromeLibrary(at: origin, apiToken: apiToken, workspaceID: workspaceID, kind: "reading_list")
+        let (spaceValues, handoffValues, bookmarkValues, readingValues) = try await (spaces, handoffs, bookmarks, readingList)
+        return ContinuityOverview(
+            resume: spaceValues,
+            browse: ContinuityBrowse(authority: "chrome_snapshot", bookmarks: bookmarkValues, readingList: readingValues),
+            send: handoffValues,
+            generatedAt: Date()
+        )
+    }
+    func submitContinuity(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, verb: ContinuityVerb, adapter: ContinuityAdapter, expiresAt: Date, expectedRevision: Int, spaceID: String?, url: String?) async throws -> ContinuityIntentReceipt {
+        switch verb {
+        case .resume:
+            guard let spaceID else { throw SessionClientError.invalidResponse }
+            let activation = try await activateActivitySpace(at: origin, apiToken: apiToken, workspaceID: workspaceID, spaceID: spaceID, sessionID: sessionID, leaseToken: leaseToken, idempotencyKey: idempotencyKey, expectedRevision: expectedRevision)
+            return ContinuityIntentReceipt(verb: verb, adapter: adapter, authority: "ghostlight_session", expiresAt: expiresAt, space: activation.space, command: activation.command)
+        case .send:
+            guard let url else { throw SessionClientError.invalidResponse }
+            let command = try await sendCommand(at: origin, apiToken: apiToken, sessionID: sessionID, token: leaseToken, idempotencyKey: idempotencyKey, command: BrowserCommand(type: .newTab, url: url, expectedRevision: expectedRevision))
+            return ContinuityIntentReceipt(verb: verb, adapter: adapter, authority: "ghostlight_session", expiresAt: expiresAt, space: nil, command: command)
+        }
+    }
 }
 
 public final class SessionClient: SessionServicing, @unchecked Sendable {
@@ -309,6 +336,20 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             .post, origin: origin, path: ["v1", "workspaces", workspaceID, "spaces", spaceID, "activate"],
             headers: Self.spaceHeaders(apiToken: apiToken, leaseToken: leaseToken, idempotencyKey: idempotencyKey),
             body: try SessionJSON.encoder.encode(ActivitySpaceActionRequest(sessionID: sessionID, expectedRevision: expectedRevision))
+        )
+    }
+
+    public func getContinuity(at origin: URL, apiToken: String, workspaceID: String) async throws -> ContinuityOverview {
+        try await send(.get, origin: origin, path: ["v1", "workspaces", workspaceID, "continuity"], headers: Self.apiBearer(apiToken))
+    }
+
+    public func submitContinuity(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, verb: ContinuityVerb, adapter: ContinuityAdapter, expiresAt: Date, expectedRevision: Int, spaceID: String?, url: String?) async throws -> ContinuityIntentReceipt {
+        try await send(
+            .post,
+            origin: origin,
+            path: ["v1", "workspaces", workspaceID, "continuity"],
+            headers: Self.spaceHeaders(apiToken: apiToken, leaseToken: leaseToken, idempotencyKey: idempotencyKey),
+            body: try SessionJSON.encoder.encode(ContinuityIntentRequest(verb: verb, adapter: adapter, sessionID: sessionID, expectedRevision: expectedRevision, expiresAt: expiresAt, spaceID: spaceID, url: url))
         )
     }
 
@@ -547,6 +588,22 @@ private struct ActivitySpaceActionRequest: Encodable {
     let sessionID: String
     let expectedRevision: Int
     enum CodingKeys: String, CodingKey { case sessionID = "session_id"; case expectedRevision = "expected_revision" }
+}
+private struct ContinuityIntentRequest: Encodable {
+    let verb: ContinuityVerb
+    let adapter: ContinuityAdapter
+    let sessionID: String
+    let expectedRevision: Int
+    let expiresAt: Date
+    let spaceID: String?
+    let url: String?
+    enum CodingKeys: String, CodingKey {
+        case verb, adapter, url
+        case sessionID = "session_id"
+        case expectedRevision = "expected_revision"
+        case expiresAt = "expires_at"
+        case spaceID = "space_id"
+    }
 }
 private struct AcquireLeaseRequest: Encodable { let clientID: String; enum CodingKeys: String, CodingKey { case clientID = "client_id" } }
 private struct ChromePairingRequest: Encodable { let deviceName: String; enum CodingKeys: String, CodingKey { case deviceName = "device_name" } }

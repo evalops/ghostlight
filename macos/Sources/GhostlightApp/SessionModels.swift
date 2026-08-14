@@ -201,6 +201,55 @@ public struct ActivitySpaceActivation: Codable, Equatable, Sendable {
     public let command: CommandReceipt
 }
 
+public struct ContinuityBrowse: Codable, Equatable, Sendable {
+    public let authority: String
+    public let bookmarks: [ChromeLibraryItem]
+    public let readingList: [ChromeLibraryItem]
+
+    enum CodingKeys: String, CodingKey {
+        case authority, bookmarks
+        case readingList = "reading_list"
+    }
+}
+
+public struct ContinuityOverview: Codable, Equatable, Sendable {
+    public let resume: [ActivitySpace]
+    public let browse: ContinuityBrowse
+    public let send: [ChromeHandoff]
+    public let generatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case resume, browse, send
+        case generatedAt = "generated_at"
+    }
+}
+
+public enum ContinuityVerb: String, Codable, Sendable {
+    case resume
+    case send
+}
+
+public enum ContinuityAdapter: String, Codable, Sendable {
+    case nativeUI = "native_ui"
+    case urlHandler = "url_handler"
+    case share
+    case chromeExtension = "chrome_extension"
+}
+
+public struct ContinuityIntentReceipt: Codable, Equatable, Sendable {
+    public let verb: ContinuityVerb
+    public let adapter: ContinuityAdapter
+    public let authority: String
+    public let expiresAt: Date
+    public let space: ActivitySpace?
+    public let command: CommandReceipt
+
+    enum CodingKeys: String, CodingKey {
+        case verb, adapter, authority, space, command
+        case expiresAt = "expires_at"
+    }
+}
+
 public struct ChromePairing: Codable, Equatable, Sendable {
     public let pairingCode: String
     public let workspaceID: String
@@ -474,6 +523,9 @@ public struct CommandReceipt: Codable, Equatable, Sendable, Identifiable {
     public let url: String?
     public let tabID: String?
     public let attachmentID: String?
+    public let continuityVerb: ContinuityVerb?
+    public let continuityAdapter: ContinuityAdapter?
+    public let continuityExpiresAt: Date?
     public let expectedRevision: Int
     public let leaseEpoch: Int
     public let state: CommandReceiptState
@@ -493,6 +545,9 @@ public struct CommandReceipt: Codable, Equatable, Sendable, Identifiable {
         url: String?,
         tabID: String?,
         attachmentID: String?,
+        continuityVerb: ContinuityVerb? = nil,
+        continuityAdapter: ContinuityAdapter? = nil,
+        continuityExpiresAt: Date? = nil,
         expectedRevision: Int,
         leaseEpoch: Int,
         state: CommandReceiptState,
@@ -511,6 +566,9 @@ public struct CommandReceipt: Codable, Equatable, Sendable, Identifiable {
         self.url = url
         self.tabID = tabID
         self.attachmentID = attachmentID
+        self.continuityVerb = continuityVerb
+        self.continuityAdapter = continuityAdapter
+        self.continuityExpiresAt = continuityExpiresAt
         self.expectedRevision = expectedRevision
         self.leaseEpoch = leaseEpoch
         self.state = state
@@ -528,6 +586,9 @@ public struct CommandReceipt: Codable, Equatable, Sendable, Identifiable {
         case sessionID = "session_id"
         case tabID = "tab_id"
         case attachmentID = "attachment_id"
+        case continuityVerb = "continuity_verb"
+        case continuityAdapter = "continuity_adapter"
+        case continuityExpiresAt = "continuity_expires_at"
         case expectedRevision = "expected_revision"
         case leaseEpoch = "lease_epoch"
         case errorCode = "error_code"

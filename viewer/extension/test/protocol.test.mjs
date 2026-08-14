@@ -53,6 +53,27 @@ test("validateCommand accepts the bounded command enum", () => {
   assert.throws(() => protocol.validateCommand({ id: "command-1", type: "execute_script" }), /unsupported/);
 });
 
+test("validateCommand binds typed continuity metadata to its command", () => {
+  const expiry = "2030-08-13T12:05:00Z";
+  assert.equal(protocol.validateCommand({
+    id: "send-1", type: "create_tab", continuity_verb: "send",
+    continuity_adapter: "url_handler", continuity_expires_at: expiry,
+  }).continuity_verb, "send");
+  assert.equal(protocol.validateCommand({
+    id: "resume-1", type: "restore_space", space_id: "space-1",
+    destinations: ["https://example.test"], active_position: 0,
+    continuity_verb: "resume", continuity_adapter: "native_ui",
+    continuity_expires_at: expiry,
+  }).continuity_verb, "resume");
+  assert.throws(() => protocol.validateCommand({
+    id: "forged-1", type: "create_tab", continuity_verb: "resume",
+    continuity_adapter: "native_ui", continuity_expires_at: expiry,
+  }), /matching verb/);
+  assert.throws(() => protocol.validateCommand({
+    id: "partial-1", type: "create_tab", continuity_verb: "send",
+  }), /matching verb/);
+});
+
 test("restore space validation fails before browser mutation", () => {
   assert.throws(() => protocol.validateCommand({ id: "command-1", type: "restore_space", space_id: "space-1", destinations: ["chrome://settings"], active_position: 0 }), /HTTP or HTTPS/);
   assert.throws(() => protocol.validateCommand({ id: "command-1", type: "restore_space", space_id: "space-1", destinations: [], active_position: 0 }), /bounded/);

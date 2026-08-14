@@ -30,7 +30,9 @@ The control and stream URLs must use HTTP or HTTPS, include a host, and contain 
 
 After the stream connects, the native Home view provides web search, app shortcuts, open tabs, file attachment, and connection settings. Home shortcuts and searches submit the same revision-fenced browser commands as the toolbar. **Show current page** returns to the live WebRTC viewer without disconnecting it.
 
-Home also lists pending tabs sent by a paired local Chrome. **Open** submits a deterministic, lease-protected `create_tab` command and resolves the inbox item only after the command applies. **Dismiss** resolves the item without changing Chromium. **Connect your Chrome** creates the one-use pairing capability described in [Chrome continuity](../docs/chrome-sync.md).
+Home separates continuity by operation. **Resume** restores a Ghostlight Space. **Browse** reads Chrome-owned bookmarks and Reading List snapshots. **Send** lists destinations explicitly sent from Chrome. Selecting a Browse or Send item creates an expiring, lease-protected intent and resolves a Chrome inbox item only after its command applies. **Dismiss** resolves the item without changing Chromium. **Connect your Chrome** creates the one-use pairing capability described in [Chrome continuity](../docs/chrome-sync.md).
+
+The app registers `ghostlight://send?url=<encoded-http-or-https-url>`. URL handling rejects embedded credentials, fragments, and credential-bearing query keys before submitting the destination with `url_handler` provenance.
 
 ## Saved connection
 

@@ -16,8 +16,19 @@
     <string>Ghostlight</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>org.evalops.Ghostlight.continuity</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ghostlight</string>
+			</array>
+		</dict>
+	</array>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

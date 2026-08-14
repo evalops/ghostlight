@@ -1,6 +1,10 @@
 import { validateNavigationURL } from "./protocol.js";
 
-async function executeCommand(command, tabs, nativeRequest) {
+async function executeCommand(command, tabs, nativeRequest, now = () => Date.now()) {
+  if (command.continuity_expires_at !== undefined
+    && Date.parse(command.continuity_expires_at) <= now()) {
+    throw new Error("continuity intent expired before execution");
+  }
   switch (command.type) {
     case "navigate":
       if (command.tab_id) {
