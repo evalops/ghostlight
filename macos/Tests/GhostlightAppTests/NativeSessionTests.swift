@@ -4,6 +4,20 @@ import XCTest
 @testable import GhostlightApp
 
 final class NativeSessionTests: XCTestCase {
+    @MainActor
+    func testWorkspaceIdentityUsesTypedWorkspaceAndSessionContext() throws {
+        let viewModel = SessionViewModel()
+        viewModel.apply(try Self.browserSession())
+        viewModel.apply(Workspace(id: "default", name: "Jonathan Haas"))
+
+        XCTAssertEqual(viewModel.workspaceIdentityTitle, "Jonathan Haas")
+        XCTAssertEqual(viewModel.workspaceIdentitySubtitle, "Browser")
+        XCTAssertEqual(viewModel.workspaceIdentityInitials, "JH")
+
+        viewModel.apply(Workspace(id: "another", name: "Wrong workspace"))
+        XCTAssertEqual(viewModel.workspaceIdentityTitle, "Jonathan Haas")
+    }
+
     override func tearDown() {
         NativeSessionURLProtocol.requestHandler = nil
         super.tearDown()
@@ -1429,6 +1443,24 @@ final class NativeSessionTests: XCTestCase {
         viewModel.perform(.focusLocation)
         XCTAssertEqual(viewModel.addressFocusRequest, 1)
         XCTAssertEqual(service.commandSubmissions.count, Self.routableActions.count)
+    }
+
+    @MainActor
+    func testNativeOmniboxNavigatesTheActiveRemoteChromiumTab() async throws {
+        let service = NativeSessionServiceStub(receipts: [
+            Self.receipt(id: "navigate-omnibox", type: .navigate, state: .queued),
+        ])
+        let viewModel = try makeControllingViewModel(service: service)
+
+        viewModel.addressDraft = "docs.example.test/path"
+        viewModel.navigate()
+        await service.waitForCommandCount(1)
+
+        let command = try XCTUnwrap(service.commandSubmissions.first?.command)
+        XCTAssertEqual(command.type, .navigate)
+        XCTAssertEqual(command.tabID, "tab-1")
+        XCTAssertEqual(command.url, "https://docs.example.test/path")
+        XCTAssertEqual(command.expectedRevision, 7)
     }
 
     @MainActor

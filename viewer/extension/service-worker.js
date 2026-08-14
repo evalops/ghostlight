@@ -2,6 +2,7 @@ import { completeCommand } from "./command-completion.js";
 import { executeCommand } from "./command-executor.js";
 import { buildHeartbeat, validateCommand } from "./protocol.js";
 import { createSnapshotPublisher } from "./snapshot-coalescer.js";
+import { enforceContentOnlyWindow, enforceContentOnlyWindows } from "./window-chrome.js";
 
 const nativeHost = "org.evalops.ghostlight.browser_agent";
 const heartbeatAlarm = "ghostlight-heartbeat";
@@ -134,4 +135,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === heartbeatAlarm) publishSnapshot().catch(() => {});
 });
 chrome.alarms.create(heartbeatAlarm, { periodInMinutes: heartbeatMinutes });
+chrome.windows.onCreated.addListener((window) => {
+  enforceContentOnlyWindow(window, chrome.windows).catch(() => {});
+});
+enforceContentOnlyWindows(chrome.windows).catch(() => {});
 connect();

@@ -83,6 +83,7 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var controlState: ControlState = .disconnected
     @Published private(set) var surfaceState: SurfaceState = .idle
     @Published private(set) var session: BrowserSession?
+    @Published private(set) var workspace: Workspace?
     @Published private(set) var stream: StreamConnection?
     @Published private(set) var viewerBootstrap: ViewerBootstrap?
     @Published private(set) var workspacePreferences: WorkspacePreferences?
@@ -282,6 +283,7 @@ final class SessionViewModel: ObservableObject {
                 defaults.set(origin.absoluteString, forKey: Self.originKey)
                 defaults.set(browser.id, forKey: Self.sessionIDKey)
                 apply(browser)
+                await loadWorkspace(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 await loadWorkspacePreferences(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 await loadContinuity(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 await loadChromeDevices(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
@@ -535,6 +537,7 @@ final class SessionViewModel: ObservableObject {
         cancelLifecycle()
         defaults.removeObject(forKey: Self.sessionIDKey)
         session = nil
+        workspace = nil
         stream = nil
         viewerBootstrap = nil
         workspacePreferences = nil
@@ -562,6 +565,27 @@ final class SessionViewModel: ObservableObject {
         let activeTabChanged = session?.activeTabID != incoming.activeTabID
         session = incoming
         if activeTabChanged || !isAddressFocused { syncAddressDraft() }
+    }
+
+    func apply(_ incoming: Workspace) {
+        guard incoming.id == session?.workspaceID else { return }
+        workspace = incoming
+    }
+
+    var workspaceIdentityTitle: String? {
+        Self.nonempty(workspace?.name) ?? Self.nonempty(session?.name)
+    }
+
+    var workspaceIdentitySubtitle: String? {
+        guard let sessionName = Self.nonempty(session?.name), sessionName != workspaceIdentityTitle else { return nil }
+        return sessionName
+    }
+
+    var workspaceIdentityInitials: String? {
+        guard let title = workspaceIdentityTitle else { return nil }
+        let words = title.split(whereSeparator: { $0.isWhitespace })
+        let initials = words.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+        return initials.isEmpty ? nil : initials
     }
 
     func setAddressFocused(_ focused: Bool) {
@@ -1121,6 +1145,28 @@ final class SessionViewModel: ObservableObject {
             if removeEnrolledCredentialIfRejected(error, at: origin) { return }
             preferencesError = error.localizedDescription
         }
+    }
+
+    private func loadWorkspace(at origin: URL, apiToken: String, workspaceID: String) async {
+        do {
+            let workspaces = try await client.listWorkspaces(at: origin, apiToken: apiToken)
+            guard session?.workspaceID == workspaceID else { return }
+            if let matchingWorkspace = workspaces.first(where: { $0.id == workspaceID }) {
+                apply(matchingWorkspace)
+            } else {
+                workspace = nil
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard session?.workspaceID == workspaceID else { return }
+            workspace = nil
+        }
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
     }
 
     private func loadContinuity(at origin: URL, apiToken: String, workspaceID: String) async {

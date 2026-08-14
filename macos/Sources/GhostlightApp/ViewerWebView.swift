@@ -20,6 +20,9 @@ struct ViewerWebView: NSViewRepresentable {
     let onWebContentProcessTerminated: (@escaping () -> Void) -> Void
     let onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
     let onCapabilitiesChanged: (Capabilities) -> Void
+    let command: Command?
+    let onAudioStateChanged: (Bool) -> Void
+    let onStreamTelemetry: (StreamTelemetry) -> Void
     let authorizePeripheral: AuthorizePeripheral
 
     init(
@@ -38,6 +41,9 @@ struct ViewerWebView: NSViewRepresentable {
         onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void = { _ in },
         onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void = { _ in },
         onCapabilitiesChanged: @escaping (Capabilities) -> Void = { _ in },
+        command: Command? = nil,
+        onAudioStateChanged: @escaping (Bool) -> Void = { _ in },
+        onStreamTelemetry: @escaping (StreamTelemetry) -> Void = { _ in },
         authorizePeripheral: @escaping AuthorizePeripheral = { _, _ in false }
     ) {
         self.url = url
@@ -55,6 +61,9 @@ struct ViewerWebView: NSViewRepresentable {
         self.onWebContentProcessTerminated = onWebContentProcessTerminated
         self.onFullscreenStateChanged = onFullscreenStateChanged
         self.onCapabilitiesChanged = onCapabilitiesChanged
+        self.command = command
+        self.onAudioStateChanged = onAudioStateChanged
+        self.onStreamTelemetry = onStreamTelemetry
         self.authorizePeripheral = authorizePeripheral
     }
 
@@ -71,6 +80,8 @@ struct ViewerWebView: NSViewRepresentable {
             onWebContentProcessTerminated: onWebContentProcessTerminated,
             onFullscreenStateChanged: onFullscreenStateChanged,
             onCapabilitiesChanged: onCapabilitiesChanged,
+            onAudioStateChanged: onAudioStateChanged,
+            onStreamTelemetry: onStreamTelemetry,
             authorizePeripheral: authorizePeripheral
         )
     }
@@ -81,9 +92,11 @@ struct ViewerWebView: NSViewRepresentable {
         let capabilities = Capabilities.current
         configuration.preferences.isElementFullscreenEnabled = capabilities.elementFullscreen
         context.coordinator.configureMediaReadiness(configuration)
+        context.coordinator.configureEmbeddedExperience(configuration)
         context.coordinator.configureNativePerformance(configuration)
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        context.coordinator.loadedURL = url
+        let embeddedURL = Self.embeddedViewerURL(url)
+        context.coordinator.loadedURL = embeddedURL
         context.coordinator.reloadToken = reloadToken
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -91,8 +104,18 @@ struct ViewerWebView: NSViewRepresentable {
         context.coordinator.observeFullscreenState(of: webView)
         context.coordinator.onCapabilitiesChanged(capabilities)
         context.coordinator.performFind(findRequest, in: webView)
-        Self.load(url, credential: credential, in: webView)
+        context.coordinator.perform(command, in: webView)
+        Self.load(embeddedURL, credential: credential, in: webView)
         return webView
+    }
+
+    static func embeddedViewerURL(_ url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "embed" }
+        items.append(URLQueryItem(name: "embed", value: "1"))
+        components.queryItems = items
+        return components.url ?? url
     }
 
     static func load(_ url: URL, credential: ViewerCredential?, in webView: WKWebView) {
@@ -145,14 +168,81 @@ struct ViewerWebView: NSViewRepresentable {
             onWebContentProcessTerminated: onWebContentProcessTerminated,
             onFullscreenStateChanged: onFullscreenStateChanged,
             onCapabilitiesChanged: onCapabilitiesChanged,
+            onAudioStateChanged: onAudioStateChanged,
+            onStreamTelemetry: onStreamTelemetry,
             authorizePeripheral: authorizePeripheral
         )
         context.coordinator.onCapabilitiesChanged(.current)
         context.coordinator.performFind(findRequest, in: webView)
-        if context.coordinator.loadedURL != url || context.coordinator.reloadToken != reloadToken {
-            context.coordinator.loadedURL = url
+        context.coordinator.perform(command, in: webView)
+        let embeddedURL = Self.embeddedViewerURL(url)
+        if context.coordinator.loadedURL != embeddedURL || context.coordinator.reloadToken != reloadToken {
+            context.coordinator.loadedURL = embeddedURL
             context.coordinator.reloadToken = reloadToken
-            Self.load(url, credential: credential, in: webView)
+            Self.load(embeddedURL, credential: credential, in: webView)
+        }
+    }
+
+    struct Command: Equatable {
+        enum Kind: Equatable { case toggleAudio, focusKeyboard }
+        let kind: Kind
+        let sequence: Int
+
+        var javaScript: String {
+            switch kind {
+            case .toggleAudio: "window.__ghostlightBridge?.toggleAudio()"
+            case .focusKeyboard: "window.__ghostlightBridge?.focusKeyboard()"
+            }
+        }
+    }
+
+    struct StreamTelemetry: Equatable {
+        let connectionState: String
+        let framesDecoded: Int
+        let framesDropped: Int
+        let packetsReceived: Int
+        let packetsLost: Int
+        let roundTripTimeMilliseconds: Int?
+        let jitterMilliseconds: Int?
+        let frozen: Bool
+
+        var degradationReason: String? {
+            if connectionState != "connected" { return "Connection interrupted" }
+            if frozen { return "Video stopped updating" }
+            if let roundTripTimeMilliseconds, roundTripTimeMilliseconds >= 250 { return "High latency" }
+            let packets = packetsReceived + packetsLost
+            if packets > 0, Double(packetsLost) / Double(packets) >= 0.03 { return "Packet loss" }
+            let frames = framesDecoded + framesDropped
+            if frames > 0, Double(framesDropped) / Double(frames) >= 0.03 { return "Dropped frames" }
+            return nil
+        }
+
+        var isDegraded: Bool { degradationReason != nil }
+
+        static func decode(_ body: Any) -> StreamTelemetry? {
+            guard let payload = body as? [String: Any], payload["kind"] as? String == "telemetry",
+                  let connectionState = payload["connection_state"] as? String,
+                  let framesDecoded = payload["frames_decoded"] as? Int,
+                  let framesDropped = payload["frames_dropped"] as? Int,
+                  let packetsReceived = payload["packets_received"] as? Int,
+                  let packetsLost = payload["packets_lost"] as? Int,
+                  let frozen = payload["frozen"] as? Bool else { return nil }
+            return StreamTelemetry(
+                connectionState: connectionState,
+                framesDecoded: framesDecoded,
+                framesDropped: framesDropped,
+                packetsReceived: packetsReceived,
+                packetsLost: packetsLost,
+                roundTripTimeMilliseconds: payload["round_trip_time_ms"] as? Int,
+                jitterMilliseconds: payload["jitter_ms"] as? Int,
+                frozen: frozen
+            )
+        }
+    }
+
+    enum TelemetryVisibility {
+        static func isVisible(_ telemetry: StreamTelemetry?, inspected: Bool) -> Bool {
+            inspected || telemetry?.isDegraded == true
         }
     }
 
@@ -317,11 +407,14 @@ struct ViewerWebView: NSViewRepresentable {
         var onWebContentProcessTerminated: (@escaping () -> Void) -> Void
         var onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
         var onCapabilitiesChanged: (Capabilities) -> Void
+        var onAudioStateChanged: (Bool) -> Void
+        var onStreamTelemetry: (StreamTelemetry) -> Void
         var authorizePeripheral: AuthorizePeripheral
         private var nativePerformanceRecorder: NativePerformanceRecorder?
         private var findSequence: Int?
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
         private var fullscreenObservation: NSKeyValueObservation?
+        private var commandSequence: Int?
 
         init(
             onNavigationStarted: @escaping () -> Void,
@@ -335,6 +428,8 @@ struct ViewerWebView: NSViewRepresentable {
             onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
             onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
             onCapabilitiesChanged: @escaping (Capabilities) -> Void,
+            onAudioStateChanged: @escaping (Bool) -> Void,
+            onStreamTelemetry: @escaping (StreamTelemetry) -> Void,
             authorizePeripheral: @escaping AuthorizePeripheral
         ) {
             self.onNavigationStarted = onNavigationStarted
@@ -348,6 +443,8 @@ struct ViewerWebView: NSViewRepresentable {
             self.onWebContentProcessTerminated = onWebContentProcessTerminated
             self.onFullscreenStateChanged = onFullscreenStateChanged
             self.onCapabilitiesChanged = onCapabilitiesChanged
+            self.onAudioStateChanged = onAudioStateChanged
+            self.onStreamTelemetry = onStreamTelemetry
             self.authorizePeripheral = authorizePeripheral
         }
 
@@ -355,6 +452,13 @@ struct ViewerWebView: NSViewRepresentable {
             configuration.userContentController.add(self, name: MediaReadinessSignal.messageHandlerName)
             configuration.userContentController.addUserScript(
                 WKUserScript(source: MediaReadinessSignal.userScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+        }
+
+        func configureEmbeddedExperience(_ configuration: WKWebViewConfiguration) {
+            configuration.userContentController.add(self, name: EmbeddedViewerSignal.messageHandlerName)
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: EmbeddedViewerSignal.userScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
             )
         }
 
@@ -389,6 +493,8 @@ struct ViewerWebView: NSViewRepresentable {
             onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
             onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
             onCapabilitiesChanged: @escaping (Capabilities) -> Void,
+            onAudioStateChanged: @escaping (Bool) -> Void,
+            onStreamTelemetry: @escaping (StreamTelemetry) -> Void,
             authorizePeripheral: @escaping AuthorizePeripheral
         ) {
             self.onNavigationStarted = onNavigationStarted
@@ -402,13 +508,30 @@ struct ViewerWebView: NSViewRepresentable {
             self.onWebContentProcessTerminated = onWebContentProcessTerminated
             self.onFullscreenStateChanged = onFullscreenStateChanged
             self.onCapabilitiesChanged = onCapabilitiesChanged
+            self.onAudioStateChanged = onAudioStateChanged
+            self.onStreamTelemetry = onStreamTelemetry
             self.authorizePeripheral = authorizePeripheral
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == MediaReadinessSignal.messageHandlerName,
-                  (message.body as? String) == "mediaReady" else { return }
-            onMediaReady()
+            if message.name == MediaReadinessSignal.messageHandlerName,
+               (message.body as? String) == "mediaReady" {
+                onMediaReady()
+                return
+            }
+            guard message.name == EmbeddedViewerSignal.messageHandlerName,
+                  let payload = message.body as? [String: Any], let kind = payload["kind"] as? String else { return }
+            if kind == "audio", let muted = payload["muted"] as? Bool {
+                onAudioStateChanged(muted)
+            } else if let telemetry = StreamTelemetry.decode(payload) {
+                onStreamTelemetry(telemetry)
+            }
+        }
+
+        func perform(_ command: Command?, in webView: WKWebView) {
+            guard let command, command.sequence != commandSequence else { return }
+            commandSequence = command.sequence
+            webView.evaluateJavaScript(command.javaScript)
         }
 
         func observeFullscreenState(of webView: WKWebView) {
@@ -691,6 +814,114 @@ enum MediaReadinessSignal {
       new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
       const timer = setInterval(() => { scan(); if (sent) clearInterval(timer); }, 250);
       window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
+    })();
+    """#
+}
+
+enum EmbeddedViewerSignal {
+    static let messageHandlerName = "ghostlightViewer"
+
+    static let userScript = #"""
+    (() => {
+      if (window.__ghostlightViewerInstalled) return;
+      window.__ghostlightViewerInstalled = true;
+      const post = (payload) => window.webkit.messageHandlers.ghostlightViewer.postMessage(payload);
+      const peers = new Set();
+      const previous = new WeakMap();
+      const NativePeerConnection = window.RTCPeerConnection;
+      if (NativePeerConnection) {
+        const TrackedPeerConnection = function (...args) {
+          const peer = new NativePeerConnection(...args);
+          peers.add(peer);
+          peer.addEventListener("connectionstatechange", () => sample(peer));
+          return peer;
+        };
+        TrackedPeerConnection.prototype = NativePeerConnection.prototype;
+        Object.setPrototypeOf(TrackedPeerConnection, NativePeerConnection);
+        window.RTCPeerConnection = TrackedPeerConnection;
+      }
+
+      const videos = () => [...document.querySelectorAll("video")];
+      const publishAudio = () => {
+        const video = videos()[0];
+        if (video) post({ kind: "audio", muted: video.muted || video.volume === 0 });
+      };
+      const observeVideos = () => videos().forEach((video) => {
+        if (video.__ghostlightAudioObserved) return;
+        video.__ghostlightAudioObserved = true;
+        video.addEventListener("volumechange", publishAudio);
+        publishAudio();
+      });
+
+      window.__ghostlightBridge = {
+        toggleAudio() {
+          const video = videos()[0];
+          if (!video) return false;
+          video.muted = !video.muted;
+          publishAudio();
+          return true;
+        },
+        focusKeyboard() {
+          const overlay = document.querySelector("textarea.overlay");
+          if (!overlay) return false;
+          overlay.focus();
+          return document.activeElement === overlay;
+        },
+      };
+
+      const sample = async (peer) => {
+        try {
+          const reports = await peer.getStats();
+          let decoded = 0, dropped = 0, received = 0, lost = 0, rtt = null, jitter = null;
+          reports.forEach((report) => {
+            if (report.type === "inbound-rtp" && report.kind === "video" && !report.isRemote) {
+              decoded += Number(report.framesDecoded || 0);
+              dropped += Number(report.framesDropped || 0);
+              received += Number(report.packetsReceived || 0);
+              lost += Number(report.packetsLost || 0);
+              if (Number.isFinite(report.jitter)) jitter = Math.round(report.jitter * 1000);
+            }
+            if (report.type === "candidate-pair" && report.state === "succeeded" && (report.nominated || report.selected) && Number.isFinite(report.currentRoundTripTime)) {
+              rtt = Math.round(report.currentRoundTripTime * 1000);
+            }
+          });
+          const prior = previous.get(peer);
+          previous.set(peer, { decoded, dropped, received, lost });
+          if (!prior) return;
+          const delta = {
+            decoded: Math.max(0, decoded - prior.decoded),
+            dropped: Math.max(0, dropped - prior.dropped),
+            received: Math.max(0, received - prior.received),
+            lost: Math.max(0, lost - prior.lost),
+          };
+          post({
+            kind: "telemetry",
+            connection_state: peer.connectionState,
+            frames_decoded: delta.decoded,
+            frames_dropped: delta.dropped,
+            packets_received: delta.received,
+            packets_lost: delta.lost,
+            round_trip_time_ms: rtt,
+            jitter_ms: jitter,
+            frozen: peer.connectionState === "connected" && received > 0 && delta.decoded === 0,
+          });
+        } catch {}
+      };
+
+      const style = document.createElement("style");
+      style.textContent = ".header-container,.room-container,.video-menu{display:none!important}";
+      (document.head || document.documentElement).appendChild(style);
+      const observer = new MutationObserver(observeVideos);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+      observeVideos();
+      const timer = setInterval(() => {
+        observeVideos();
+        peers.forEach(sample);
+      }, 2000);
+      window.addEventListener("pagehide", () => {
+        clearInterval(timer);
+        observer.disconnect();
+      }, { once: true });
     })();
     """#
 }
