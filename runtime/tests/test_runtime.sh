@@ -136,6 +136,8 @@ assert extension_id == "okabifedphcnokaehflbkmpfphleoaha"
 assert extension_id in policy.get("ExtensionInstallAllowlist", []), (
     f"packaged browser agent {extension_id} must be exempt from the extension blocklist"
 )
+assert not any(item.startswith(f"{extension_id};") for item in policy.get("ExtensionInstallForcelist", []))
+assert "ExtensionSettings" not in policy
 assert policy.get("NativeMessagingBlocklist") == ["*"]
 assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browser_agent"]
 assert policy.get("NativeMessagingUserLevelHosts") is False
@@ -168,10 +170,59 @@ source = {
 assert packaged == source, "signed browser-agent CRX must exactly match viewer/extension"
 PY
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent.crx /opt/ghostlight/browser-agent.crx'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY extension/manifest.json /opt/ghostlight/browser-agent-manifest.json'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-updates.xml /opt/ghostlight/browser-agent-updates.xml'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-update-server.conf /etc/neko/supervisord/ghostlight-browser-agent-update-server.conf'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY chromium-launch.sh /usr/local/bin/ghostlight-chromium'
+assert_contains "$REPO_DIR/viewer/chromium.conf" 'command=/usr/local/bin/ghostlight-chromium'
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '--extensions-update-frequency=30'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'if [ "$migration_needed" -eq 1 ]'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'kill -INT "$browser_pid"'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '-path "*/${expected_version}_*/manifest.json"'
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '/opt/ghostlight/browser-agent.version'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'if [ "$chromium_running" -eq 0 ]'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'rm -f -- "$profile_root/SingletonCookie" "$profile_root/SingletonLock" "$profile_root/SingletonSocket"'
+# shellcheck disable=SC2016
+assert_not_contains "$REPO_DIR/viewer/chromium-launch.sh" 'rm -rf -- "$profile_root"'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '${expected_version}_*'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'find "$extension_root" -mindepth 1 -maxdepth 1 -type d ! -name "${expected_version}_*" -exec rm -rf -- {} +'
+assert_not_contains "$REPO_DIR/viewer/chromium-launch.sh" '/home/neko/.config/chromium/Default/Extensions -mindepth'
 assert_contains "$REPO_DIR/viewer/Dockerfile" '16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'rm /etc/chromium.d/extensions'
-assert_contains "$REPO_DIR/viewer/browser-agent-external.json" '"external_crx": "/opt/ghostlight/browser-agent.crx"'
+python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-external.json" "$REPO_DIR/viewer/browser-agent-updates.xml" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-policy.json" <<'PY'
+import json
+import sys
+import xml.etree.ElementTree as ET
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+external = json.load(open(sys.argv[2], encoding="utf-8"))
+update = ET.parse(sys.argv[3]).getroot().find("{http://www.google.com/update2/response}app/{http://www.google.com/update2/response}updatecheck")
+upgrade_source = json.load(open(sys.argv[4], encoding="utf-8"))
+upgrade_policy = json.load(open(sys.argv[5], encoding="utf-8"))
+assert manifest["version"] == "0.1.1"
+assert manifest["update_url"] == "http://127.0.0.1:18084/browser-agent-updates.xml"
+assert external == {
+    "external_crx": "/opt/ghostlight/browser-agent.crx",
+    "external_version": manifest["version"],
+}
+assert update.attrib == {
+    "codebase": "http://127.0.0.1:18084/browser-agent.crx",
+    "version": manifest["version"],
+}
+assert upgrade_source["external_version"] == "0.1.0"
+assert upgrade_policy["ExtensionInstallBlocklist"] == ["*"]
+assert "ExtensionSettings" not in upgrade_policy
+PY
+assert_contains "$REPO_DIR/viewer/browser-agent-update-server.conf" '--bind 127.0.0.1'
+assert_contains "$REPO_DIR/viewer/browser-agent-update-server.conf" '--directory /opt/ghostlight'
 assert_not_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'fixtures/chromium.conf:/etc/neko/supervisord/chromium.conf'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'chromium-cdp-flags:/etc/chromium.d/zz-ghostlight-acceptance:ro'
 assert_contains "$REPO_DIR/tests/acceptance/fixtures/chromium-cdp-flags" '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*'
@@ -183,10 +234,42 @@ assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '${phase}-
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '${phase}-browser-agent-installation.txt'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'test ! -e /etc/chromium.d/extensions'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'verify_browser_agent_bridge before'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'verify_browser_agent_bridge after'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation upgrade-source 0.1.0'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation before 0.1.1'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation after 0.1.1'
+# The managed update can restart Chromium. Do not probe CDP until the exact
+# extension version is committed to the persistent profile.
+python3 - "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+for phase in ("before", "after"):
+    installation = source.index(f"record_browser_agent_installation {phase} 0.1.1")
+    cdp = source.index(f"wait_for_cdp {phase}")
+    assert installation < cdp
+assert 'value.get("webSocketDebuggerUrl")' in source
+assert '${phase}-cdp-version.json' in source
+PY
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'browser-agent-0.1.0-policy.json:/etc/chromium/policies/managed/policies.json:ro'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'http://127.0.0.1:18084/browser-agent-updates.xml'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '/usr/local/bin/ghostlight-native-host'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'failure-diagnostics.txt'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'ghostlight-browser-agent-update-server.log'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'parse_time(value["last_heartbeat"]) > phase_started'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("state") == "applied"'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("acknowledged_at")'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("completed_at")'
+assert_contains "$REPO_DIR/viewer/extension/service-worker.js" 'alarm.name === reconnectAlarm'
+assert_not_contains "$REPO_DIR/viewer/extension/service-worker.js" 'heartbeatAlarm && !nativePort'
+echo "74c3b8320852f203ad6d725ded2270b7b70940f438264d95d5538f9df42e7742  $REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0.crx" \
+  | shasum -a 256 --check --status
 [[ ! -e "$REPO_DIR/tests/acceptance/fixtures/chromium.conf" ]] || fail "acceptance must use the baked default Chromium Supervisor config"
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
   "$RUNTIME_DIR/config/chromium-gpu.conf"; do
+  assert_contains "$chromium_config" 'command=/usr/local/bin/ghostlight-chromium'
   assert_contains "$chromium_config" '--enable-remote-extensions'
   assert_not_contains "$chromium_config" '--load-extension='
 done

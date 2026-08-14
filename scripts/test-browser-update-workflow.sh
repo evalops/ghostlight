@@ -5,6 +5,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/.." && pwd)
 workflow="$repo_root/.github/workflows/browser-update.yml"
 ci_workflow="$repo_root/.github/workflows/ci.yml"
+buildkite_pipeline="$repo_root/.buildkite/pipeline.yml"
 acceptance="$repo_root/tests/acceptance/run-linux-persistence.sh"
 
 [[ -s "$workflow" ]] || {
@@ -13,6 +14,10 @@ acceptance="$repo_root/tests/acceptance/run-linux-persistence.sh"
 }
 [[ -s "$ci_workflow" ]] || {
   printf 'CI workflow is missing\n' >&2
+  exit 1
+}
+[[ -s "$buildkite_pipeline" ]] || {
+  printf 'Buildkite pipeline is missing\n' >&2
   exit 1
 }
 [[ -s "$acceptance" ]] || {
@@ -177,6 +182,14 @@ grep -Fq -- 'sudo apt-get install --yes tesseract-ocr' "$ci_workflow" || {
 }
 grep -Fq -- 'python3 tests/acceptance/test_audit_screenshots.py' "$ci_workflow" || {
   printf 'CI does not run the screenshot-audit regression suite\n' >&2
+  exit 1
+}
+grep -Fq -- 'sudo apt-get install --yes tesseract-ocr' "$buildkite_pipeline" || {
+  printf 'Buildkite does not install the fail-closed screenshot OCR dependency\n' >&2
+  exit 1
+}
+grep -Fq -- 'python3 tests/acceptance/test_audit_screenshots.py' "$buildkite_pipeline" || {
+  printf 'Buildkite does not run the screenshot-audit regression suite\n' >&2
   exit 1
 }
 
