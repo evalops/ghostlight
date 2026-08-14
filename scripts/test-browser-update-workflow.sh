@@ -201,6 +201,10 @@ grep -Fq -- 'queue: "hetzner-linux-heavy"' "$buildkite_pipeline" || {
   printf 'Buildkite Linux validation does not target the self-hosted heavy queue\n' >&2
   exit 1
 }
+grep -A5 -F -- 'key: "harnesses"' "$buildkite_pipeline" | grep -Fq -- 'queue: "hetzner-linux-medium"' || {
+  printf 'Buildkite OCR harness does not target the package-capable self-hosted medium queue\n' >&2
+  exit 1
+}
 grep -Fq -- 'build.env("GHOSTLIGHT_ENABLE_MACOS_CI") == "true"' "$buildkite_pipeline" || {
   printf 'Buildkite macOS validation lacks an explicit opt-in gate\n' >&2
   exit 1

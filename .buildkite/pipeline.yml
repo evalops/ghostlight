@@ -72,6 +72,9 @@ steps:
       - label: ":test_tube: Deterministic harnesses"
         key: "harnesses"
         timeout_in_minutes: 60
+        agents:
+          queue: "hetzner-linux-medium"
+          image: "evalops-platform-ci-v3"
         command: |
           set -euo pipefail
           sudo apt-get update
