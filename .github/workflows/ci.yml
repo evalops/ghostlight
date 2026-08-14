@@ -255,8 +255,8 @@ jobs:
           test "$(plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)" = "true"
           test -n "$(plutil -extract NSCameraUsageDescription raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)"
           test -n "$(plutil -extract NSMicrophoneUsageDescription raw -o - macos/.build/Ghostlight.app/Contents/Info.plist)"
-          test "$(plutil -extract com.apple.security.device.camera raw -o - macos/Resources/Ghostlight.entitlements)" = "true"
-          test "$(plutil -extract com.apple.security.device.audio-input raw -o - macos/Resources/Ghostlight.entitlements)" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' macos/Resources/Ghostlight.entitlements)" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' macos/Resources/Ghostlight.entitlements)" = "true"
           if plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent raw -o - macos/.build/Ghostlight.app/Contents/Info.plist >/dev/null 2>&1; then
             echo "NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent must not be set" >&2
             exit 1
