@@ -188,6 +188,9 @@ assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '--extensions-update-frequ
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '/opt/ghostlight/browser-agent.version'
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '${expected_version}_*'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'find "$extension_root" -mindepth 1 -maxdepth 1 -type d ! -name "${expected_version}_*" -exec rm -rf -- {} +'
+assert_not_contains "$REPO_DIR/viewer/chromium-launch.sh" '/home/neko/.config/chromium/Default/Extensions -mindepth'
 assert_contains "$REPO_DIR/viewer/Dockerfile" '16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'rm /etc/chromium.d/extensions'
 python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-external.json" "$REPO_DIR/viewer/browser-agent-updates.xml" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-policy.json" <<'PY'
