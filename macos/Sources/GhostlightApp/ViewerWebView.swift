@@ -94,6 +94,7 @@ struct ViewerWebView: NSViewRepresentable {
         context.coordinator.configureMediaReadiness(configuration)
         context.coordinator.configureEmbeddedExperience(configuration)
         context.coordinator.configureNativePerformance(configuration)
+        Self.configureViewerCredential(credential, in: configuration)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         let embeddedURL = Self.embeddedViewerURL(url)
         context.coordinator.loadedURL = embeddedURL
@@ -120,6 +121,10 @@ struct ViewerWebView: NSViewRepresentable {
 
     static func load(_ url: URL, credential: ViewerCredential?, in webView: WKWebView) {
         guard let credential else {
+            webView.load(URLRequest(url: url))
+            return
+        }
+        if credential.type == "neko_login" {
             webView.load(URLRequest(url: url))
             return
         }
@@ -153,6 +158,51 @@ struct ViewerWebView: NSViewRepresentable {
             properties[HTTPCookiePropertyKey("SameSite")] = sameSite.capitalized
         }
         return HTTPCookie(properties: properties)
+    }
+
+    static func configureViewerCredential(_ credential: ViewerCredential?, in configuration: WKWebViewConfiguration) {
+        guard let credential,
+              credential.type == "neko_login",
+              let username = credential.name,
+              !username.isEmpty,
+              !credential.value.isEmpty,
+              credential.expiresAt > Date() else { return }
+        let usernameLiteral = javascriptLiteral(username)
+        let tokenLiteral = javascriptLiteral(credential.value)
+        let source = #"""
+        (() => {
+          const setInput = (input, value) => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+            if (setter) setter.call(input, value); else input.value = value;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+          };
+          const connect = () => {
+            const inputs = [...document.querySelectorAll("input")];
+            const display = inputs.find((entry) => /display name/i.test(entry.placeholder || ""));
+            const password = inputs.find((entry) => /password/i.test(entry.placeholder || ""));
+            const button = [...document.querySelectorAll("button")].find((entry) => /connect/i.test(entry.textContent || ""));
+            if (!display || !password || !button) return false;
+            setInput(display, \#(usernameLiteral));
+            setInput(password, \#(tokenLiteral));
+            button.click();
+            return true;
+          };
+          const timer = setInterval(() => { if (connect()) clearInterval(timer); }, 250);
+          window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
+        })();
+        """#
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: source,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+    }
+
+    private static func javascriptLiteral(_ value: String) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: [value])
+        let array = String(decoding: data, as: UTF8.self)
+        return String(array.dropFirst().dropLast())
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
