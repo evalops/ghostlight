@@ -28,6 +28,16 @@ func main() {
 }
 
 func run() error {
+	// Register before startup work so signals delivered while configuration,
+	// storage, or the listener are being prepared still trigger shutdown.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	return runWithSignals(signals, nil)
+}
+
+func runWithSignals(signals <-chan os.Signal, ready chan<- struct{}) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -44,16 +54,13 @@ func run() error {
 	defer handler.store.close()
 	server := newHTTPServer(handler)
 
-	// Register for signals before serving so a signal delivered during
-	// startup still triggers a graceful shutdown.
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
 	serveErrors := make(chan error, 1)
 	go func() {
 		serveErrors <- server.Serve(listener)
 	}()
+	if ready != nil {
+		close(ready)
+	}
 
 	select {
 	case err := <-serveErrors:
