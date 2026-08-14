@@ -250,6 +250,85 @@ public struct ContinuityIntentReceipt: Codable, Equatable, Sendable {
     }
 }
 
+public enum PeripheralCapability: String, Codable, CaseIterable, Sendable {
+    case copy, paste, upload, download, camera, microphone, audio, notifications
+    case dragIn = "drag_in"
+    case dragOut = "drag_out"
+    case pointerLock = "pointer_lock"
+    case cursorControl = "cursor_control"
+
+    public var direction: PeripheralDirection {
+        switch self {
+        case .copy, .download, .dragOut, .audio, .notifications: .remoteToLocal
+        case .paste, .upload, .dragIn, .camera, .microphone, .pointerLock, .cursorControl: .localToRemote
+        }
+    }
+}
+
+public enum PeripheralDirection: String, Codable, Sendable {
+    case localToRemote = "local_to_remote"
+    case remoteToLocal = "remote_to_local"
+}
+
+public struct PeripheralGrant: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let workspaceID: String
+    public let sessionID: String
+    public let clientID: String
+    public let capability: PeripheralCapability
+    public let direction: PeripheralDirection
+    public let origin: String
+    public let state: String
+    public let expiresAt: Date
+    public let createdAt: Date
+    public let revokedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, capability, direction, origin, state
+        case workspaceID = "workspace_id"
+        case sessionID = "session_id"
+        case clientID = "client_id"
+        case expiresAt = "expires_at"
+        case createdAt = "created_at"
+        case revokedAt = "revoked_at"
+    }
+}
+
+public struct PeripheralAuditEvent: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let grantID: String?
+    public let workspaceID: String
+    public let sessionID: String
+    public let clientID: String
+    public let capability: PeripheralCapability
+    public let direction: PeripheralDirection
+    public let origin: String
+    public let action: String
+    public let outcome: String
+    public let occurredAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, capability, direction, origin, action, outcome
+        case grantID = "grant_id"
+        case workspaceID = "workspace_id"
+        case sessionID = "session_id"
+        case clientID = "client_id"
+        case occurredAt = "occurred_at"
+    }
+}
+
+public struct PeripheralAuthorization: Codable, Equatable, Sendable {
+    public let allowed: Bool
+    public let grantID: String?
+    public let expiresAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case allowed
+        case grantID = "grant_id"
+        case expiresAt = "expires_at"
+    }
+}
+
 public struct ChromePairing: Codable, Equatable, Sendable {
     public let pairingCode: String
     public let workspaceID: String

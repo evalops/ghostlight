@@ -156,6 +156,46 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(requestBody["url"] as? String, "https://example.test/sent")
     }
 
+    func testPeripheralAccessUsesDirectionalOriginBoundEndpoints() async throws {
+        var requests: [URLRequest] = []
+        let grantJSON = #"{"id":"grant-1","workspace_id":"default","session_id":"session-1","client_id":"native-1","capability":"download","direction":"remote_to_local","origin":"https://viewer.example.test","state":"active","expires_at":"2030-08-13T13:00:00Z","created_at":"2030-08-13T12:00:00Z"}"#
+        NativeSessionURLProtocol.requestHandler = { request in
+            requests.append(request)
+            if request.url?.path.hasSuffix("peripheral-authorizations") == true {
+                return (Self.response(for: request), Data(#"{"allowed":true,"grant_id":"grant-1","expires_at":"2030-08-13T13:00:00Z"}"#.utf8))
+            }
+            return (Self.response(for: request, status: request.httpMethod == "POST" ? 201 : 200), Data(grantJSON.utf8))
+        }
+        let client = SessionClient(session: makeSession())
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+        let expires = try XCTUnwrap(ISO8601DateFormatter().date(from: "2030-08-13T13:00:00Z"))
+
+        _ = try await client.createPeripheralGrant(
+            at: origin, apiToken: "native-secret", workspaceID: "default", sessionID: "session-1",
+            leaseToken: "lease-secret", idempotencyKey: "grant-1", capability: .download,
+            peripheralOrigin: "https://viewer.example.test", expiresAt: expires
+        )
+        let decision = try await client.authorizePeripheral(
+            at: origin, apiToken: "native-secret", workspaceID: "default", sessionID: "session-1",
+            capability: .download, peripheralOrigin: "https://viewer.example.test"
+        )
+        _ = try await client.revokePeripheralGrant(at: origin, apiToken: "native-secret", workspaceID: "default", grantID: "grant-1")
+
+        XCTAssertTrue(decision.allowed)
+        XCTAssertEqual(requests.map { $0.url?.path }, [
+            "/base/v1/workspaces/default/peripheral-grants",
+            "/base/v1/workspaces/default/peripheral-authorizations",
+            "/base/v1/workspaces/default/peripheral-grants/grant-1",
+        ])
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "X-Ghostlight-Lease-Token"), "lease-secret")
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Idempotency-Key"), "grant-1")
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(Self.bodyData(from: requests[0]))) as? NSDictionary)
+        XCTAssertEqual(body["capability"] as? String, "download")
+        XCTAssertEqual(body["direction"] as? String, "remote_to_local")
+        XCTAssertEqual(body["origin"] as? String, "https://viewer.example.test")
+        XCTAssertNil(requests[1].value(forHTTPHeaderField: "X-Ghostlight-Lease-Token"))
+    }
+
     @MainActor
     func testGhostlightSendURLRejectsCredentialsAndSubmitsSafeDestination() async throws {
         let service = NativeSessionServiceStub(receipts: [Self.receipt(id: "continuity-send", type: .newTab, state: .queued, url: "https://example.test/sent")])

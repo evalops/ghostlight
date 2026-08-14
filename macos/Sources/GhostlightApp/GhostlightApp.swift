@@ -62,6 +62,7 @@ struct ContentView: View {
     @State private var showingFileImporter = false
     @State private var showingShortcutEditor = false
     @State private var showingChromePairing = false
+    @State private var showingPeripheralAccess = false
     @State private var showingHome = true
     @State private var homeQuery = ""
     @State private var newSpaceName = ""
@@ -89,6 +90,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingChromePairing) {
             ChromePairingView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showingPeripheralAccess) {
+            PeripheralAccessView(viewModel: viewModel)
         }
         .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.data]) { result in
             if case let .success(url) = result { viewModel.attach(url) }
@@ -427,7 +431,8 @@ struct ContentView: View {
                     onNavigationFinished: viewModel.viewerNavigationFinished,
                     onNavigationFailed: viewModel.viewerNavigationFailed,
                     onMediaReady: viewModel.viewerMediaReady,
-                    onWebContentProcessTerminated: viewModel.viewerProcessTerminated
+                    onWebContentProcessTerminated: viewModel.viewerProcessTerminated,
+                    authorizePeripheral: viewModel.authorizePeripheral
                 )
 
                 if showingHome {
@@ -713,6 +718,9 @@ struct ContentView: View {
                         homeTool("Connect your Chrome", symbol: "laptopcomputer.and.arrow.down") {
                             showingChromePairing = true
                         }
+                        homeTool("Peripheral access", symbol: "lock.shield") {
+                            showingPeripheralAccess = true
+                        }
                     }
                     .frame(width: 220, alignment: .leading)
                 }
@@ -978,6 +986,94 @@ private struct ChromePairingView: View {
         .padding(26)
         .frame(width: 540)
         .task { await viewModel.refreshChromeDevices() }
+    }
+}
+
+private struct PeripheralAccessView: View {
+    @ObservedObject var viewModel: SessionViewModel
+    @Environment(\.dismiss) private var dismiss
+    private let supported: [PeripheralCapability] = [.download, .camera, .microphone]
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Access applies only to the current viewer origin, expires after one hour, and can be revoked here at any time.")
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Available access") {
+                    ForEach(supported, id: \.self) { capability in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(label(capability))
+                                Text(capability.direction == .localToRemote ? "This Mac → remote browser" : "Remote browser → this Mac")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Grant for 1 hour") { Task { await viewModel.grantPeripheral(capability) } }
+                                .disabled(!viewModel.canControl)
+                        }
+                    }
+                }
+
+                Section("Grants") {
+                    if viewModel.peripheralGrants.isEmpty {
+                        Text("No grants recorded.").foregroundStyle(.secondary)
+                    }
+                    ForEach(viewModel.peripheralGrants) { grant in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(label(grant.capability))
+                                Text("\(grant.state.capitalized) · \(grant.origin) · expires \(grant.expiresAt.formatted())")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if grant.state == "active" {
+                                Button("Revoke", role: .destructive) { Task { await viewModel.revokePeripheral(grant) } }
+                            }
+                        }
+                    }
+                }
+
+                Section("Recent decisions") {
+                    ForEach(Array(viewModel.peripheralAudit.prefix(12))) { event in
+                        HStack {
+                            Text(label(event.capability))
+                            Spacer()
+                            Text("\(event.action) · \(event.outcome)")
+                                .foregroundStyle(event.outcome == "denied" ? .red : .secondary)
+                        }
+                    }
+                    if viewModel.peripheralAudit.isEmpty {
+                        Text("No decisions recorded.").foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Not yet brokered") {
+                    Text("Copy, paste, upload, drag, page audio, notifications, pointer lock, and cursor control stay denied until each native path has enforcement.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = viewModel.peripheralError {
+                    Section { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle("Peripheral Access")
+            .frame(minWidth: 660, minHeight: 560)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    private func label(_ capability: PeripheralCapability) -> String {
+        switch capability {
+        case .download: "Downloads"
+        case .camera: "Camera"
+        case .microphone: "Microphone"
+        default: capability.rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+        }
     }
 }
 

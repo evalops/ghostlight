@@ -40,6 +40,10 @@ Startup applies the same validation to the viewer URL and an explicit health URL
 | `POST /v1/workspaces/{id}/spaces/{space}/park` | `200` | Refreshes a Space from the authoritative browser snapshot and marks it parked. |
 | `POST /v1/workspaces/{id}/spaces/{space}/activate` | `202` | Queues an idempotent browser-extension restore; the Space becomes active only after an applied command receipt. |
 | `GET, POST /v1/workspaces/{id}/continuity` | `200`, `202` | Lists typed Resume, Browse, and Send sources or accepts an expiring Resume/Send intent under a lease, revision fence, and idempotency key. |
+| `GET, POST /v1/workspaces/{id}/peripheral-grants` | `200`, `201` | Lists client-scoped grants or creates a lease-authorized, idempotent grant for one fixed capability/direction, viewer origin, session, and expiry of at most eight hours. |
+| `DELETE /v1/workspaces/{id}/peripheral-grants/{grant}` | `200` | Revokes a grant immediately; native clients can revoke only their own grants. |
+| `POST /v1/workspaces/{id}/peripheral-authorizations` | `200` | Fails closed against active grants and records a content-free allowed or denied use event. |
+| `GET /v1/workspaces/{id}/peripheral-audit` | `200` | Returns at most 200 recent grant, use, denial, and revocation events without transferred content or filenames. |
 | `GET, POST /v1/sessions` | `200` | Lists or idempotently ensures the single durable browser session. |
 | `GET /v1/sessions/{id}` | `200` | Returns authoritative session, tab, lease, and stream state. |
 | `GET /v1/sessions/{id}/events` | `200, 204` | Returns a newer revision or no content. |
@@ -69,6 +73,8 @@ Unknown paths return `404`. A known path with a method other than `GET` returns 
 Spaces contain names, ordered credential-free HTTP/HTTPS destinations, active position, Home preference ownership, and opaque pending-handoff IDs. They do not contain titles, page content, cookies, credentials, history, incognito state, or Chromium profile data. Restores run through the extension command path and become authoritative only after the command is applied.
 
 Continuity has three contracts. Resume restores an authoritative Space. Browse returns Chrome-owned bookmark and Reading List snapshots without mutating either browser. Send accepts one credential-free destination and queues it through the command receipt path. Resume and Send require an adapter name, a lease, an expected session revision, an idempotency key, and an expiry no more than 10 minutes ahead. Their adapter and expiry remain attached to the durable command receipt.
+
+Peripheral capabilities have one direction each: copy, download, drag out, audio, and notifications are remote-to-local; paste, upload, drag in, camera, microphone, pointer lock, and cursor control are local-to-remote. A grant cannot change that direction. Origins are canonical HTTP(S) origins with no path, query, fragment, or embedded credentials. The shipped macOS enforcement adapters currently consume only download, camera, and microphone grants; every other named capability remains denied until its native path exists.
 
 ## Network boundary
 

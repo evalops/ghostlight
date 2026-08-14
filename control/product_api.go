@@ -28,7 +28,19 @@ const (
 	maxSessionAttachmentBytes = 1 << 30
 	maxBridgeCommands         = 100
 	continuityIntentTTL       = 10 * time.Minute
+	peripheralGrantTTL        = 8 * time.Hour
 )
+
+var peripheralDirections = map[string]string{
+	"paste": "local_to_remote", "upload": "local_to_remote", "drag_in": "local_to_remote",
+	"camera": "local_to_remote", "microphone": "local_to_remote", "pointer_lock": "local_to_remote", "cursor_control": "local_to_remote",
+	"copy": "remote_to_local", "download": "remote_to_local", "drag_out": "remote_to_local",
+	"audio": "remote_to_local", "notifications": "remote_to_local",
+}
+
+var brokeredPeripheralCapabilities = map[string]bool{
+	"download": true, "camera": true, "microphone": true,
+}
 
 var credentialBearingURLQueryKeys = map[string]bool{
 	"accesscode": true, "accesstoken": true, "apikey": true, "auth": true,
@@ -97,6 +109,26 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleContinuity(w, r, parts[2])
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "peripheral-grants":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handlePeripheralGrants(w, r, parts[2], principal)
+	case len(parts) == 5 && parts[1] == "workspaces" && parts[3] == "peripheral-grants":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handlePeripheralGrant(w, r, parts[2], parts[4], principal)
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "peripheral-authorizations":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handlePeripheralAuthorization(w, r, parts[2], principal)
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "peripheral-audit":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handlePeripheralAudit(w, r, parts[2], principal)
 	case len(parts) == 6 && parts[1] == "workspaces" && parts[3] == "spaces":
 		if !requirePrincipalScope(w, principal, nativeClientScope) {
 			return
@@ -145,6 +177,128 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func canonicalPeripheralOrigin(raw string) (string, bool) {
+	value, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (value.Scheme != "http" && value.Scheme != "https") || value.Host == "" || value.User != nil || value.RawQuery != "" || value.Fragment != "" || (value.Path != "" && value.Path != "/") {
+		return "", false
+	}
+	value.Scheme = strings.ToLower(value.Scheme)
+	value.Host = strings.ToLower(value.Host)
+	value.Path = ""
+	return value.String(), true
+}
+
+func principalGrantClientID(principal apiPrincipal) string {
+	if principal.isOperator() {
+		return "operator"
+	}
+	return principal.id
+}
+
+func (h *handler) handlePeripheralGrants(w http.ResponseWriter, r *http.Request, workspaceID string, principal apiPrincipal) {
+	clientID := principalGrantClientID(principal)
+	if r.Method == http.MethodGet {
+		values, err := h.store.listPeripheralGrants(r.Context(), workspaceID, clientID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, values)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 200 || leaseToken(r) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Idempotency-Key and lease token are required")
+		return
+	}
+	var input struct {
+		SessionID  string    `json:"session_id"`
+		Capability string    `json:"capability"`
+		Direction  string    `json:"direction"`
+		Origin     string    `json:"origin"`
+		ExpiresAt  time.Time `json:"expires_at"`
+	}
+	body, err := decodeStrictJSON(r, &input)
+	input.Capability = strings.TrimSpace(input.Capability)
+	input.Direction = strings.TrimSpace(input.Direction)
+	origin, validOrigin := canonicalPeripheralOrigin(input.Origin)
+	now := h.now().UTC()
+	if err != nil || input.SessionID == "" || peripheralDirections[input.Capability] != input.Direction || !validOrigin || !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(peripheralGrantTTL)) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "a known capability, its fixed direction, canonical HTTP(S) origin, session_id, and expiry within 8 hours are required")
+		return
+	}
+	if !brokeredPeripheralCapabilities[input.Capability] {
+		writeError(w, http.StatusConflict, "capability_unavailable", "this capability has no enforceable native adapter")
+		return
+	}
+	digest := sha256.Sum256(append([]byte("peripheral-grant\x00"), body...))
+	value, created, err := h.store.createPeripheralGrant(r.Context(), workspaceID, input.SessionID, clientID, leaseToken(r), key, hex.EncodeToString(digest[:]), input.Capability, input.Direction, origin, input.ExpiresAt.UTC())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, value)
+}
+
+func (h *handler) handlePeripheralGrant(w http.ResponseWriter, r *http.Request, workspaceID, grantID string, principal apiPrincipal) {
+	if r.Method != http.MethodDelete {
+		writeMethodNotAllowed(w, http.MethodDelete)
+		return
+	}
+	value, err := h.store.revokePeripheralGrant(r.Context(), workspaceID, grantID, principalGrantClientID(principal))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (h *handler) handlePeripheralAuthorization(w http.ResponseWriter, r *http.Request, workspaceID string, principal apiPrincipal) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var input struct {
+		SessionID  string `json:"session_id"`
+		Capability string `json:"capability"`
+		Direction  string `json:"direction"`
+		Origin     string `json:"origin"`
+	}
+	_, err := decodeStrictJSON(r, &input)
+	origin, validOrigin := canonicalPeripheralOrigin(input.Origin)
+	if err != nil || input.SessionID == "" || peripheralDirections[input.Capability] != input.Direction || !validOrigin {
+		writeError(w, http.StatusBadRequest, "invalid_request", "a known capability, its fixed direction, canonical HTTP(S) origin, and session_id are required")
+		return
+	}
+	value, err := h.store.authorizePeripheral(r.Context(), workspaceID, input.SessionID, principalGrantClientID(principal), input.Capability, input.Direction, origin)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (h *handler) handlePeripheralAudit(w http.ResponseWriter, r *http.Request, workspaceID string, principal apiPrincipal) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	values, err := h.store.listPeripheralAudit(r.Context(), workspaceID, principalGrantClientID(principal))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, values)
 }
 
 func (h *handler) handleContinuity(w http.ResponseWriter, r *http.Request, workspaceID string) {

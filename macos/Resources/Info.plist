@@ -40,5 +40,9 @@
     </dict>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>Ghostlight uses the camera only while an active viewer-origin grant allows a remote call to request it.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Ghostlight uses the microphone only while an active viewer-origin grant allows a remote call to request it.</string>
 </dict>
 </plist>

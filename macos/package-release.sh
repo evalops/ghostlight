@@ -117,7 +117,7 @@ architectures="$(lipo -archs "$macos_dir/GhostlightApp")"
 
 signing_identity="${GHOSTLIGHT_SIGNING_IDENTITY:--}"
 if [[ "$signing_identity" == "-" ]]; then
-  codesign --force --timestamp=none --sign - "$app_dir"
+  codesign --force --timestamp=none --sign - --entitlements "$SCRIPT_DIR/Resources/Ghostlight.entitlements" "$app_dir"
   codesign_identity=adhoc
   notarized=no
 else
@@ -125,7 +125,7 @@ else
     printf 'required command is unavailable: %s\n' "xcrun" >&2
     exit 1
   }
-  codesign --force --timestamp --options runtime --sign "$signing_identity" "$app_dir"
+  codesign --force --timestamp --options runtime --sign "$signing_identity" --entitlements "$SCRIPT_DIR/Resources/Ghostlight.entitlements" "$app_dir"
   codesign_identity="$signing_identity"
   notarized=no
   if [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]]; then
