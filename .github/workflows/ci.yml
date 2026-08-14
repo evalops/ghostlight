@@ -183,6 +183,7 @@ jobs:
 
   swift-tests:
     name: Swift tests
+    if: vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true'
     runs-on: macos-14
     steps:
       - name: Check out source
