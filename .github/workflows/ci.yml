@@ -353,6 +353,9 @@ jobs:
           set -euo pipefail
           node tools/measure-streaming-performance.mjs --self-test
           node tools/test-evaluate-recovery.mjs
+          node tools/test-build-readiness-ledger.mjs
+          node tools/build-readiness-ledger.mjs docs/readiness/evidence.json /tmp/ghostlight-readiness-ledger.json
+          cmp docs/readiness/ledger.json /tmp/ghostlight-readiness-ledger.json
           node tools/test-evaluate-native-performance.mjs
           node tools/test-evaluate-codec-pair.mjs
           bash tools/test-native-performance-processes.sh
@@ -381,5 +384,6 @@ jobs:
           path: |
             tests/acceptance/package-lock.json
             docs/acceptance/2026-08-12/
+            docs/readiness/
           if-no-files-found: warn
           retention-days: 14

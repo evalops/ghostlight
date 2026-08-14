@@ -41,7 +41,7 @@ After recreation, tab B:
 
 This is a day-one Linux browser-level receipt. The nested test host required a test-only AppArmor override, and its installed Buildx version required `COMPOSE_BAKE=false`. Test instrumentation also enabled Chromium's debugging protocol and mounted a loopback proxy and synthetic page server. None of these hooks is part of Ghostlight's committed runtime. The PNGs are X-display captures of Linux Chromium; they are not Ghostlight.app, WKWebView, or WebRTC screenshots.
 
-This receipt does not claim that Gmail, the native macOS relaunch flow, or the seven-consecutive-day acceptance gate has passed. Those remain separate acceptance checks.
+This receipt does not claim native macOS relaunch, bounded recovery, or explicitly witnessed real-account persistence. Those remain separate acceptance checks; elapsed calendar days are not a gate.
 
 ## Native macOS navigation receipt
 
