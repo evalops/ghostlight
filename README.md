@@ -43,7 +43,7 @@ macOS client:
 - Swift 5.10 or later for local builds
 - access to the Linux control, viewer, and WebRTC ports
 
-Repository verification uses a Go 1.26-compatible module, a Go 1.26.5 container builder, and ShellCheck.
+Repository verification uses a Go 1.26-compatible module, a Go 1.26.6 container builder, and ShellCheck.
 
 Live browser acceptance requires Node.js with npm, Python 3, `shasum`, and Tesseract OCR. The reviewed container-update commands require Docker Buildx, `jq`, and Perl.
 

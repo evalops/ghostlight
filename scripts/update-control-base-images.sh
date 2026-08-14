@@ -62,7 +62,7 @@ resolve_digest() {
   printf '%s\n' "$digest"
 }
 
-go_candidate=golang:1.26.5-alpine
+go_candidate=golang:1.26.6-alpine
 alpine_candidate=alpine:3.24
 go_digest=$(resolve_digest "$go_candidate" "${GHOSTLIGHT_GO_BASE_RESOLVED_DIGEST:-}")
 alpine_digest=$(resolve_digest "$alpine_candidate" "${GHOSTLIGHT_ALPINE_BASE_RESOLVED_DIGEST:-}")
@@ -71,7 +71,7 @@ alpine_new="$alpine_candidate@$alpine_digest"
 
 go_current=$(awk '$1 == "FROM" && $2 ~ /^golang:/ { print $2; exit }' "$dockerfile")
 alpine_current=$(awk '$1 == "FROM" && $2 ~ /^alpine:/ { print $2; exit }' "$dockerfile")
-[[ "$go_current" =~ ^golang:1\.26\.5-alpine@sha256:[0-9a-f]{64}$ ]] || {
+[[ "$go_current" =~ ^golang:1\.26\.6-alpine@sha256:[0-9a-f]{64}$ ]] || {
   printf 'unexpected Go build base reference: %s\n' "$go_current" >&2
   exit 1
 }

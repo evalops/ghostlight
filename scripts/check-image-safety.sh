@@ -121,6 +121,12 @@ if (( dockerfile_count == 0 )); then
   failures=$((failures + 1))
 fi
 
+control_dockerfile="$repo_root/control/Dockerfile"
+if grep -Eq '^FROM[[:space:]]+golang:1\.26\.5-alpine@' "$control_dockerfile"; then
+  printf 'control/Dockerfile uses Go 1.26.5, which contains fixed HIGH stdlib vulnerabilities\n' >&2
+  failures=$((failures + 1))
+fi
+
 viewer_dockerfile="$repo_root/viewer/Dockerfile"
 if [[ -f "$viewer_dockerfile" ]]; then
   if grep -Eq '^FROM[[:space:]]+golang:1\.25\.12-trixie@' "$viewer_dockerfile"; then
