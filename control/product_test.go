@@ -346,6 +346,9 @@ func TestActivitySpacesCaptureParkActivateAndAuthorization(t *testing.T) {
 	if space.Name != "Launch" || space.State != "active" || space.HomePreferencesWorkspaceID != "default" || space.ActivePosition != 0 || len(space.Tabs) != 1 || space.Tabs[0].URL != "https://example.test/work" {
 		t.Fatalf("created space = %#v", space)
 	}
+	if strings.Contains(created.Body.String(), `"pending_handoff_ids":null`) || !strings.Contains(created.Body.String(), `"pending_handoff_ids":[]`) {
+		t.Fatalf("created space must encode an empty pending handoff collection: %s", created.Body.String())
+	}
 	if strings.Contains(created.Body.String(), "Private title") || strings.Contains(created.Body.String(), "chrome://") || strings.Contains(created.Body.String(), "cookie") {
 		t.Fatalf("space exposed unsafe browser state: %s", created.Body.String())
 	}

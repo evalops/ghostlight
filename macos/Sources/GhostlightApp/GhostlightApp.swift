@@ -152,8 +152,12 @@ struct ContentView: View {
     private func connectionPanel(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 20) {
             if compact {
-                Text("Connection")
-                    .font(.title2.bold())
+                HStack {
+                    Text("Connection")
+                        .font(.title2.bold())
+                    Spacer()
+                    Button("Done") { showingConnection = false }
+                }
             } else {
                 Text("Open your workspace")
                     .font(.title2.bold())
@@ -434,6 +438,8 @@ struct ContentView: View {
                     onWebContentProcessTerminated: viewModel.viewerProcessTerminated,
                     authorizePeripheral: viewModel.authorizePeripheral
                 )
+                .allowsHitTesting(!showingHome)
+                .accessibilityHidden(showingHome)
 
                 if showingHome {
                     nativeHome
@@ -996,75 +1002,93 @@ private struct PeripheralAccessView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
                     Text("Access applies only to the current viewer origin, expires after one hour, and can be revoked here at any time.")
                         .foregroundStyle(.secondary)
-                }
 
-                Section("Available access") {
-                    ForEach(supported, id: \.self) { capability in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(label(capability))
-                                Text(capability.direction == .localToRemote ? "This Mac → remote browser" : "Remote browser → this Mac")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("Grant for 1 hour") { Task { await viewModel.grantPeripheral(capability) } }
-                                .disabled(!viewModel.canControl)
-                        }
-                    }
-                }
-
-                Section("Grants") {
-                    if viewModel.peripheralGrants.isEmpty {
-                        Text("No grants recorded.").foregroundStyle(.secondary)
-                    }
-                    ForEach(viewModel.peripheralGrants) { grant in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(label(grant.capability))
-                                Text("\(grant.state.capitalized) · \(grant.origin) · expires \(grant.expiresAt.formatted())")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if grant.state == "active" {
-                                Button("Revoke", role: .destructive) { Task { await viewModel.revokePeripheral(grant) } }
+                    peripheralSection("Available access") {
+                        ForEach(supported, id: \.self) { capability in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(label(capability))
+                                    Text(capability.direction == .localToRemote ? "This Mac → remote browser" : "Remote browser → this Mac")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Grant for 1 hour") { Task { await viewModel.grantPeripheral(capability) } }
+                                    .buttonStyle(.borderless)
+                                    .accessibilityLabel("Grant \(label(capability)) for 1 hour")
+                                    .disabled(!viewModel.canControl)
                             }
                         }
                     }
-                }
 
-                Section("Recent decisions") {
-                    ForEach(Array(viewModel.peripheralAudit.prefix(12))) { event in
-                        HStack {
-                            Text(label(event.capability))
-                            Spacer()
-                            Text("\(event.action) · \(event.outcome)")
-                                .foregroundStyle(event.outcome == "denied" ? .red : .secondary)
+                    peripheralSection("Grants") {
+                        if viewModel.peripheralGrants.isEmpty {
+                            Text("No grants recorded.").foregroundStyle(.secondary)
+                        }
+                        ForEach(viewModel.peripheralGrants) { grant in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(label(grant.capability))
+                                    Text("\(grant.state.capitalized) · \(grant.origin) · expires \(grant.expiresAt.formatted())")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if grant.state == "active" {
+                                    Button("Revoke", role: .destructive) { Task { await viewModel.revokePeripheral(grant) } }
+                                        .buttonStyle(.borderless)
+                                        .accessibilityLabel("Revoke \(label(grant.capability)) access")
+                                }
+                            }
                         }
                     }
-                    if viewModel.peripheralAudit.isEmpty {
-                        Text("No decisions recorded.").foregroundStyle(.secondary)
+
+                    peripheralSection("Recent decisions") {
+                        ForEach(Array(viewModel.peripheralAudit.prefix(12))) { event in
+                            HStack {
+                                Text(label(event.capability))
+                                Spacer()
+                                Text("\(event.action) · \(event.outcome)")
+                                    .foregroundStyle(event.outcome == "denied" ? .red : .secondary)
+                            }
+                        }
+                        if viewModel.peripheralAudit.isEmpty {
+                            Text("No decisions recorded.").foregroundStyle(.secondary)
+                        }
+                    }
+
+                    peripheralSection("Not yet brokered") {
+                        Text("Copy, paste, upload, drag, page audio, notifications, pointer lock, and cursor control stay denied until each native path has enforcement.")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let error = viewModel.peripheralError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
                     }
                 }
-
-                Section("Not yet brokered") {
-                    Text("Copy, paste, upload, drag, page audio, notifications, pointer lock, and cursor control stay denied until each native path has enforcement.")
-                        .foregroundStyle(.secondary)
-                }
-
-                if let error = viewModel.peripheralError {
-                    Section { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red) }
-                }
+                .padding(24)
             }
             .navigationTitle("Peripheral Access")
             .frame(minWidth: 660, minHeight: 560)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+    }
+
+    private func peripheralSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            Divider()
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func label(_ capability: PeripheralCapability) -> String {
@@ -1130,10 +1154,12 @@ private struct ShortcutEditorView: View {
                 }
 
                 Section("Add Shortcut") {
-                    TextField("Name", text: $newName)
-                    TextField("https://example.com", text: $newURL)
-                    Button("Add") { addShortcut() }
-                        .disabled(!isValid(name: newName, url: newURL) || shortcuts.count >= 24)
+                    HStack {
+                        TextField("Name", text: $newName)
+                        TextField("https://example.com", text: $newURL)
+                        Button("Add") { addShortcut() }
+                            .disabled(!isValid(name: newName, url: newURL) || shortcuts.count >= 24)
+                    }
                 }
             }
             .navigationTitle("Edit Shortcuts")

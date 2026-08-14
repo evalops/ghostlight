@@ -249,7 +249,7 @@ func (s *sqliteStore) listWorkspaces(ctx context.Context) ([]Workspace, error) {
 }
 
 func scanActivitySpace(row interface{ Scan(...any) error }) (ActivitySpace, error) {
-	var value ActivitySpace
+	value := ActivitySpace{PendingHandoffIDs: []string{}}
 	var tabsJSON, created, updated string
 	err := row.Scan(&value.ID, &value.WorkspaceID, &value.Name, &value.State, &value.Revision, &tabsJSON, &value.ActivePosition, &value.HomePreferencesWorkspaceID, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
