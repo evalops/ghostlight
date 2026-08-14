@@ -96,8 +96,14 @@ steps:
           bash scripts/test-container-pins.sh
           bash runtime/tests/test_profile_backup.sh
 
+  - block: ":no_entry: macOS CI is dormant"
+    key: "macos-dormant"
+    if: build.env("GHOSTLIGHT_ENABLE_MACOS_CI") != "true"
+    prompt: "macOS validation is intentionally dormant until a self-hosted Mac runner is provisioned. Set GHOSTLIGHT_ENABLE_MACOS_CI=true only for an explicitly authorized hosted run."
+
   - label: ":apple: macOS app, tests, and universal archive"
     key: "macos"
+    if: build.env("GHOSTLIGHT_ENABLE_MACOS_CI") == "true"
     timeout_in_minutes: 90
     agents:
       queue: "macos-large"

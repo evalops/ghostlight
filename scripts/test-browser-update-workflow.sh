@@ -193,4 +193,17 @@ grep -Fq -- 'python3 tests/acceptance/test_audit_screenshots.py' "$buildkite_pip
   exit 1
 }
 
+grep -Fq -- 'key: "macos-dormant"' "$buildkite_pipeline" || {
+  printf 'Buildkite macOS validation is not fail-closed while dormant\n' >&2
+  exit 1
+}
+grep -Fq -- 'build.env("GHOSTLIGHT_ENABLE_MACOS_CI") == "true"' "$buildkite_pipeline" || {
+  printf 'Buildkite macOS validation lacks an explicit opt-in gate\n' >&2
+  exit 1
+}
+grep -Fq -- "vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true' && 'macos-14' || 'evalops-private-ci'" "$ci_workflow" || {
+  printf 'GitHub macOS validation does not fail closed on the self-hosted lane\n' >&2
+  exit 1
+}
+
 printf 'browser update workflow dependency and outcome contract passed\n'

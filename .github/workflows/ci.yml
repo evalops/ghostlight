@@ -183,13 +183,21 @@ jobs:
 
   swift-tests:
     name: Swift tests
-    runs-on: macos-14
+    runs-on: ${{ vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true' && 'macos-14' || 'evalops-private-ci' }}
     steps:
+      - name: Fail closed while macOS CI is dormant
+        if: vars.GHOSTLIGHT_ENABLE_MACOS_CI != 'true'
+        run: |
+          echo "macOS validation is intentionally dormant until a self-hosted Mac runner is provisioned" >&2
+          exit 1
+
       - name: Check out source
+        if: vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true'
         # actions/checkout v4.2.2
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Run macOS tests
+        if: vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -248,6 +256,7 @@ jobs:
           exit 1
 
       - name: Build the Ghostlight app bundle
+        if: vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true'
         run: |
           macos/package-app.sh
           test -x macos/.build/Ghostlight.app/Contents/MacOS/GhostlightApp
@@ -263,6 +272,7 @@ jobs:
           fi
 
       - name: Build and verify the universal release archive
+        if: vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true'
         shell: bash
         run: |
           set -euo pipefail

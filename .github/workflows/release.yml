@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   package:
+    if: vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true'
     runs-on: macos-14
     outputs:
       archive-sha256: ${{ steps.archive.outputs.sha256 }}

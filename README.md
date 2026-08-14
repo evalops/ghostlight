@@ -116,6 +116,8 @@ open macos/.build/Ghostlight.app
 
 The script creates an ad-hoc signed bundle at `macos/.build/Ghostlight.app` with identifier `org.evalops.Ghostlight`. The bundle has no Developer ID signature or notarization receipt.
 
+Automated macOS CI and release packaging are intentionally dormant until a self-hosted Mac runner is provisioned. Buildkite blocks fail-closed and the GitHub pull-request check fails on the self-hosted Linux guard unless `GHOSTLIGHT_ENABLE_MACOS_CI=true` is explicitly configured for an authorized hosted run. A dormant lane is not evidence of macOS correctness; macOS remains **Needs a test**.
+
 Enter the Linux control URL and `GHOSTLIGHT_API_TOKEN`, then select **Open Ghostlight**. The app resumes or creates the durable browser session, acquires its controller lease when available, and loads the stream URL in `WKWebView`. Sign in to Neko with `NEKO_USER_PASSWORD` when required.
 
 The status row distinguishes `Loading viewer`, `Viewer loaded`, and viewer navigation failure. `Viewer loaded` means WebKit finished the page navigation; it does not confirm a connected WebRTC media stream. Automatic launch from a saved control URL retries failed viewer navigation twice. **Retry** initiates one user-requested reload. **Disconnect** cancels discovery, clears the saved URL, and disables automatic connection on the next launch.
