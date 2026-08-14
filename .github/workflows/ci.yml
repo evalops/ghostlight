@@ -301,7 +301,7 @@ jobs:
             tests/acceptance/test_validate_persistence.py
             tests/acceptance/validate-persistence.py
             tests/acceptance/test_audit_screenshots.py
-            tests/acceptance/fixtures/chromium.conf
+            tests/acceptance/fixtures/chromium-cdp-flags
             tests/acceptance/fixtures/cdp_proxy.conf
             tests/acceptance/fixtures/cdp_proxy.py
             tests/acceptance/fixtures/synthetic_server.conf

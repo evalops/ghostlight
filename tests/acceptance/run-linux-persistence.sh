@@ -71,6 +71,43 @@ finish() {
 }
 trap finish EXIT
 
+record_chromium_argv() {
+  local phase="$1"
+  local argv_file="$OUTPUT_DIR/${phase}-chromium-argv.txt"
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
+    exec -T viewer sh -lc '
+      for cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$cmdline" ] || continue
+        first_arg="$(tr "\000" "\n" <"$cmdline" | sed -n "1p")"
+        [ "$first_arg" = /usr/lib/chromium/chromium ] || continue
+        tr "\000" "\n" <"$cmdline"
+        exit 0
+      done
+      exit 1
+    ' >"$argv_file"
+  grep -Fx -- '--remote-debugging-port=9222' "$argv_file" >/dev/null
+  if grep -F -- '--load-extension=' "$argv_file" >/dev/null; then
+    printf 'default Chromium launch injected --load-extension; argv: %s\n' "$argv_file" >&2
+    return 1
+  fi
+  if grep -F -- '/usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json' "$argv_file" >/dev/null; then
+    printf 'external-registration JSON leaked into Chromium argv: %s\n' "$argv_file" >&2
+    return 1
+  fi
+}
+
+record_browser_agent_installation() {
+  local phase="$1"
+  local installation_file="$OUTPUT_DIR/${phase}-browser-agent-installation.txt"
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
+    exec -T viewer sh -lc '
+      set -eu
+      extension_root=/home/neko/.config/chromium/Default/Extensions/okabifedphcnokaehflbkmpfphleoaha
+      find "$extension_root" -mindepth 1 -maxdepth 1 -type d -print
+    ' >"$installation_file"
+  grep -F -- '/Default/Extensions/okabifedphcnokaehflbkmpfphleoaha/' "$installation_file" >/dev/null
+}
+
 for command in docker node npm curl python3 shasum; do
   command -v "$command" >/dev/null || { printf 'missing required command: %s\n' "$command" >&2; exit 1; }
 done
@@ -125,7 +162,7 @@ $shared_viewer_port
     environment:
       GHOSTLIGHT_ACCEPTANCE_MARKER: "$MARKER"
     volumes:
-      - "$FIXTURE_DIR/chromium.conf:/etc/neko/supervisord/chromium.conf:ro"
+      - "$FIXTURE_DIR/chromium-cdp-flags:/etc/chromium.d/zz-ghostlight-acceptance:ro"
       - "$FIXTURE_DIR/cdp_proxy.py:/usr/local/bin/ghostlight-cdp-proxy.py:ro"
       - "$FIXTURE_DIR/cdp_proxy.conf:/etc/neko/supervisord/ghostlight-cdp-proxy.conf:ro"
       - "$FIXTURE_DIR/synthetic_server.py:/usr/local/bin/ghostlight-synthetic-server.py:ro"
@@ -187,8 +224,12 @@ for _attempt in {1..60}; do
 done
   curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version"
   printf '\n'
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
+    exec -T viewer sh -lc 'test ! -e /etc/chromium.d/extensions; test -f /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+  record_chromium_argv before
 
   node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" before "$OUTPUT_DIR"
+  record_browser_agent_installation before
 docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" exec -T viewer sh -lc 'cat /home/neko/.config/chromium/acceptance-requests.jsonl' >"$OUTPUT_DIR/before-requests.jsonl"
 BEFORE_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 BEFORE_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
@@ -199,7 +240,9 @@ for _attempt in {1..60}; do
   curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
   sleep 1
 done
+  record_chromium_argv after
   node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" after "$OUTPUT_DIR"
+  record_browser_agent_installation after
 AFTER_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 AFTER_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
 [[ "$BEFORE_VIEWER" != "$AFTER_VIEWER" && "$BEFORE_CONTROL" != "$AFTER_CONTROL" ]]
@@ -213,9 +256,11 @@ docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/ru
   shopt -s nullglob
   image_files=("$OUTPUT_DIR"/*.png "$OUTPUT_DIR"/*.jpg)
   evidence_files=("$OUTPUT_DIR"/*-evidence.json)
+  argv_files=("$OUTPUT_DIR"/*-chromium-argv.txt)
+  installation_files=("$OUTPUT_DIR"/*-browser-agent-installation.txt)
   request_files=("$OUTPUT_DIR"/*-requests.jsonl)
   python3 "$TEST_DIR/audit-screenshots.py" "${image_files[@]}"
-  shasum -a 256 "${image_files[@]}" "${evidence_files[@]}" "${request_files[@]}"
+  shasum -a 256 "${image_files[@]}" "${evidence_files[@]}" "${argv_files[@]}" "${installation_files[@]}" "${request_files[@]}"
 } >>"$TRANSCRIPT" 2>&1
 
 printf 'acceptance passed; evidence: %s\n' "$OUTPUT_DIR"
