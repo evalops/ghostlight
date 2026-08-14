@@ -136,9 +136,7 @@ assert extension_id == "okabifedphcnokaehflbkmpfphleoaha"
 assert extension_id in policy.get("ExtensionInstallAllowlist", []), (
     f"packaged browser agent {extension_id} must be exempt from the extension blocklist"
 )
-assert f"{extension_id};{manifest['update_url']}" in policy.get("ExtensionInstallForcelist", []), (
-    f"packaged browser agent {extension_id} must be installed from its loopback update source"
-)
+assert not any(item.startswith(f"{extension_id};") for item in policy.get("ExtensionInstallForcelist", []))
 assert "ExtensionSettings" not in policy
 assert policy.get("NativeMessagingBlocklist") == ["*"]
 assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browser_agent"]
@@ -174,7 +172,7 @@ PY
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent.crx /opt/ghostlight/browser-agent.crx'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY extension/manifest.json /opt/ghostlight/browser-agent-manifest.json'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-updates.xml /opt/ghostlight/browser-agent-updates.xml'
-assert_not_contains "$REPO_DIR/viewer/Dockerfile" '/usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-update-server.conf /etc/neko/supervisord/ghostlight-browser-agent-update-server.conf'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY chromium-launch.sh /usr/local/bin/ghostlight-chromium'
 assert_contains "$REPO_DIR/viewer/chromium.conf" 'command=/usr/local/bin/ghostlight-chromium'
@@ -193,17 +191,22 @@ assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'find "$extension_root" -m
 assert_not_contains "$REPO_DIR/viewer/chromium-launch.sh" '/home/neko/.config/chromium/Default/Extensions -mindepth'
 assert_contains "$REPO_DIR/viewer/Dockerfile" '16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'rm /etc/chromium.d/extensions'
-python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-updates.xml" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-policy.json" <<'PY'
+python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-external.json" "$REPO_DIR/viewer/browser-agent-updates.xml" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-policy.json" <<'PY'
 import json
 import sys
 import xml.etree.ElementTree as ET
 
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
-update = ET.parse(sys.argv[2]).getroot().find("{http://www.google.com/update2/response}app/{http://www.google.com/update2/response}updatecheck")
-upgrade_source = json.load(open(sys.argv[3], encoding="utf-8"))
-upgrade_policy = json.load(open(sys.argv[4], encoding="utf-8"))
+external = json.load(open(sys.argv[2], encoding="utf-8"))
+update = ET.parse(sys.argv[3]).getroot().find("{http://www.google.com/update2/response}app/{http://www.google.com/update2/response}updatecheck")
+upgrade_source = json.load(open(sys.argv[4], encoding="utf-8"))
+upgrade_policy = json.load(open(sys.argv[5], encoding="utf-8"))
 assert manifest["version"] == "0.1.1"
 assert manifest["update_url"] == "http://127.0.0.1:18084/browser-agent-updates.xml"
+assert external == {
+    "external_crx": "/opt/ghostlight/browser-agent.crx",
+    "external_version": manifest["version"],
+}
 assert update.attrib == {
     "codebase": "http://127.0.0.1:18084/browser-agent.crx",
     "version": manifest["version"],

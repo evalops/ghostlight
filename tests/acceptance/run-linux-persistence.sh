@@ -318,7 +318,7 @@ fi
   record_browser_agent_installation before 0.1.1
   wait_for_cdp before
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
-    exec -T viewer sh -lc 'test ! -e /etc/chromium.d/extensions; test ! -e /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+    exec -T viewer sh -lc 'test ! -e /etc/chromium.d/extensions; test -f /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
   record_chromium_argv before
 
   node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" before "$OUTPUT_DIR"
