@@ -245,6 +245,8 @@ PY
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'browser-agent-0.1.0-policy.json:/etc/chromium/policies/managed/policies.json:ro'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'http://127.0.0.1:18084/browser-agent-updates.xml'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '/usr/local/bin/ghostlight-native-host'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'failure-diagnostics.txt'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'ghostlight-browser-agent-update-server.log'
 assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'parse_time(value["last_heartbeat"]) > phase_started'
 assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("state") == "applied"'
 assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("acknowledged_at")'

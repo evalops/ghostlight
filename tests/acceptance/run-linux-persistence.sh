@@ -47,6 +47,28 @@ export COMPOSE_BAKE="${COMPOSE_BAKE:-false}"
 finish() {
   local status=$?
   local cleanup_status=0
+  if (( status != 0 )) && [[ -f "$ENV_FILE" && -f "$OVERRIDE_FILE" ]]; then
+    docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
+      exec -T viewer sh -lc '
+        printf "%s\n" "--- supervisor ---"
+        supervisorctl status
+        printf "%s\n" "--- chromium argv ---"
+        for cmdline in /proc/[0-9]*/cmdline; do
+          [ -r "$cmdline" ] || continue
+          tr "\000" "\n" <"$cmdline" | grep -Fx /usr/lib/chromium/chromium >/dev/null || continue
+          tr "\000" "\n" <"$cmdline"
+          break
+        done
+        printf "%s\n" "--- update server ---"
+        cat /var/log/neko/ghostlight-browser-agent-update-server.log 2>/dev/null || true
+        printf "%s\n" "--- chromium ---"
+        tail -200 /var/log/neko/chromium.log 2>/dev/null || true
+        printf "%s\n" "--- policy ---"
+        cat /etc/chromium/policies/managed/policies.json
+        printf "%s\n" "--- installed agent versions ---"
+        find /home/neko/.config/chromium/Default/Extensions/okabifedphcnokaehflbkmpfphleoaha -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null || true
+      ' >"$OUTPUT_DIR/failure-diagnostics.txt" 2>&1 || true
+  fi
   if [[ "${GHOSTLIGHT_ACCEPTANCE_KEEP_STACK:-0}" != 1 ]]; then
     if ! docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down --remove-orphans >>"$TRANSCRIPT" 2>&1; then
       cleanup_status=1
