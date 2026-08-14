@@ -103,15 +103,31 @@ assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_PIPELINE=ximages
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'GHOSTLIGHT_API_TOKEN=$API_TOKEN'
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'GHOSTLIGHT_BRIDGE_TOKEN=$BRIDGE_TOKEN'
-python3 - "$RUNTIME_DIR/chromium-policy.json" <<'PY'
+python3 - "$RUNTIME_DIR/chromium-policy.json" "$REPO_DIR/viewer/extension/manifest.json" <<'PY'
+import base64
+import hashlib
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as policy_file:
     policy = json.load(policy_file)
+with open(sys.argv[2], encoding="utf-8") as manifest_file:
+    manifest = json.load(manifest_file)
+
+public_key = base64.b64decode(manifest["key"], validate=True)
+extension_id = "".join(
+    chr(ord("a") + nibble)
+    for byte in hashlib.sha256(public_key).digest()[:16]
+    for nibble in (byte >> 4, byte & 0x0F)
+)
 
 assert policy.get("DefaultCookiesSetting") == 1
 assert policy.get("RestoreOnStartup") == 1
+assert policy.get("ExtensionInstallBlocklist") == ["*"]
+assert extension_id == "okabifedphcnokaehflbkmpfphleoaha"
+assert extension_id in policy.get("ExtensionInstallAllowlist", []), (
+    f"packaged browser agent {extension_id} must be exempt from the extension blocklist"
+)
 assert policy.get("NativeMessagingBlocklist") == ["*"]
 assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browser_agent"]
 assert policy.get("NativeMessagingUserLevelHosts") is False

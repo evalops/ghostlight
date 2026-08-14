@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { chromium } from "playwright";
 
 const [cdpEndpoint, viewerEndpoint, phase, outputDir] = process.argv.slice(2);
 if (!cdpEndpoint || !viewerEndpoint || !["before", "after"].includes(phase) || !outputDir) {
@@ -6,6 +7,28 @@ if (!cdpEndpoint || !viewerEndpoint || !["before", "after"].includes(phase) || !
 }
 
 const proofURLs = ["http://127.0.0.1:18083/state-a", "http://127.0.0.1:18083/state-b"];
+const browserAgentID = "okabifedphcnokaehflbkmpfphleoaha";
+const browserAgentURL = `chrome-extension://${browserAgentID}/service-worker.js`;
+
+async function waitForBrowserAgent(timeoutMilliseconds = 30000) {
+  const browser = await chromium.connectOverCDP(cdpEndpoint);
+  const context = browser.contexts()[0];
+  if (!context) throw new Error("CDP connection did not expose the default Chromium context");
+
+  const existing = context.serviceWorkers().find((worker) => worker.url() === browserAgentURL);
+  if (existing) return existing.url();
+
+  try {
+    const worker = await context.waitForEvent("serviceworker", {
+      predicate: (candidate) => candidate.url() === browserAgentURL,
+      timeout: timeoutMilliseconds,
+    });
+    return worker.url();
+  } catch (error) {
+    const observed = context.serviceWorkers().map((worker) => worker.url());
+    throw new Error(`packaged browser agent service worker did not load; expected ${browserAgentURL}; observed ${observed.join(", ") || "none"}`, { cause: error });
+  }
+}
 
 async function listTargets() {
   const response = await fetch(`${cdpEndpoint}/json/list`);
@@ -37,6 +60,7 @@ if (phase === "before") {
   }
 }
 
+const loadedBrowserAgentURL = await waitForBrowserAgent();
 if (phase === "after") await new Promise((resolve) => setTimeout(resolve, 5000));
 const { allTargets, proofTargets } = await waitForProofTargets();
 if (proofTargets.length !== proofURLs.length) {
@@ -61,6 +85,7 @@ for (const target of proofTargets.sort((left, right) => left.url.localeCompare(r
 const result = {
   phase,
   pipeline: "browser-target-restoration-server-state-and-neko-screenshot",
+  browserAgent: { id: browserAgentID, serviceWorkerURL: loadedBrowserAgentURL },
   proofTargetCount: proofTargets.length,
   evidence,
 };
