@@ -1,5 +1,5 @@
 agents:
-  queue: "hetzner-linux-medium"
+  queue: "hetzner-linux-heavy"
   image: "evalops-platform-ci-v3"
 
 env:

@@ -197,6 +197,10 @@ grep -Fq -- 'key: "macos-dormant"' "$buildkite_pipeline" || {
   printf 'Buildkite macOS validation is not fail-closed while dormant\n' >&2
   exit 1
 }
+grep -Fq -- 'queue: "hetzner-linux-heavy"' "$buildkite_pipeline" || {
+  printf 'Buildkite Linux validation does not target the self-hosted heavy queue\n' >&2
+  exit 1
+}
 grep -Fq -- 'build.env("GHOSTLIGHT_ENABLE_MACOS_CI") == "true"' "$buildkite_pipeline" || {
   printf 'Buildkite macOS validation lacks an explicit opt-in gate\n' >&2
   exit 1
