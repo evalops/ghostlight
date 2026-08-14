@@ -104,13 +104,15 @@ COPY --from=neko-builder /build/neko /usr/bin/neko
 COPY --from=neko-builder /build/ghostlight-native-host /usr/local/bin/ghostlight-native-host
 COPY --from=neko-builder /build/source/LICENSE /usr/share/doc/neko/LICENSE
 COPY --from=neko-builder /build/SOURCE-PROVENANCE /usr/share/doc/neko/SOURCE-PROVENANCE
-COPY extension /opt/ghostlight/browser-agent
+COPY browser-agent.crx /opt/ghostlight/browser-agent.crx
+COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json
 COPY native-messaging-host.json /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json
 COPY chromium.conf /etc/neko/supervisord/chromium.conf
 
 RUN set -eux; \
     chmod 0755 /usr/local/bin/ghostlight-native-host; \
-    chmod -R a-w /opt/ghostlight/browser-agent; \
+    chmod 0444 /opt/ghostlight/browser-agent.crx \
+      /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json; \
     chmod 0644 /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json \
       /etc/neko/supervisord/chromium.conf
 

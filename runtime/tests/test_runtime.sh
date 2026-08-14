@@ -22,6 +22,14 @@ assert_contains() {
     || fail "expected ${path} to contain: ${needle}"
 }
 
+assert_not_contains() {
+  local path="$1"
+  local needle="$2"
+  if grep --fixed-strings --line-number -- "$needle" "$path" >/dev/null; then
+    fail "expected ${path} not to contain: ${needle}"
+  fi
+}
+
 expect_failure() {
   local label="$1"
   shift
@@ -132,7 +140,42 @@ assert policy.get("NativeMessagingBlocklist") == ["*"]
 assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browser_agent"]
 assert policy.get("NativeMessagingUserLevelHosts") is False
 PY
-assert_contains "$REPO_DIR/viewer/chromium.conf" '--load-extension=/opt/ghostlight/browser-agent'
+python3 - "$REPO_DIR/viewer/browser-agent.crx" "$REPO_DIR/viewer/extension" <<'PY'
+import struct
+import sys
+import zipfile
+from pathlib import Path
+
+crx_path = Path(sys.argv[1])
+source_dir = Path(sys.argv[2])
+with crx_path.open("rb") as crx_file:
+    assert crx_file.read(4) == b"Cr24", "browser agent is not a CRX package"
+    assert struct.unpack("<I", crx_file.read(4))[0] == 3, "browser agent must use CRX3"
+    header_size = struct.unpack("<I", crx_file.read(4))[0]
+    crx_file.seek(header_size, 1)
+    with zipfile.ZipFile(crx_file) as package:
+        packaged = {
+            name: package.read(name)
+            for name in package.namelist()
+            if not name.endswith("/")
+        }
+
+source = {
+    path.relative_to(source_dir).as_posix(): path.read_bytes()
+    for path in source_dir.rglob("*")
+    if path.is_file()
+}
+assert packaged == source, "signed browser-agent CRX must exactly match viewer/extension"
+PY
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent.crx /opt/ghostlight/browser-agent.crx'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+assert_contains "$REPO_DIR/viewer/browser-agent-external.json" '"external_crx": "/opt/ghostlight/browser-agent.crx"'
+for chromium_config in \
+  "$REPO_DIR/viewer/chromium.conf" \
+  "$RUNTIME_DIR/config/chromium-gpu.conf" \
+  "$REPO_DIR/tests/acceptance/fixtures/chromium.conf"; do
+  assert_not_contains "$chromium_config" '--load-extension='
+done
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
   "$RUNTIME_DIR/config/chromium-gpu.conf" \
