@@ -91,6 +91,9 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var chromeReadingList: [ChromeLibraryItem] = []
     @Published private(set) var chromeDevices: [ChromeDevice] = []
     @Published private(set) var activitySpaces: [ActivitySpace] = []
+    @Published private(set) var peripheralGrants: [PeripheralGrant] = []
+    @Published private(set) var peripheralAudit: [PeripheralAuditEvent] = []
+    @Published private(set) var peripheralError: String?
     @Published private(set) var chromePairing: ChromePairing?
     @Published private(set) var chromeSyncError: String?
     @Published private(set) var openingChromeHandoffIDs: Set<String> = []
@@ -226,6 +229,9 @@ final class SessionViewModel: ObservableObject {
         chromeReadingList = []
         chromeDevices = []
         activitySpaces = []
+        peripheralGrants = []
+        peripheralAudit = []
+        peripheralError = nil
         chromePairing = nil
         chromeSyncError = nil
         preferencesError = nil
@@ -296,6 +302,7 @@ final class SessionViewModel: ObservableObject {
                     guard owns(runID) else { return }
                     stream = connection
                     viewerBootstrap = bootstrap
+                    await loadPeripheralState(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                     // Legacy and rolling old servers have no capability redemption
                     // endpoint; their stream URL remains the compatible fallback.
                     surfaceState = .loadingPage(bootstrap?.viewerURL ?? connection.url)
@@ -326,6 +333,72 @@ final class SessionViewModel: ObservableObject {
                 controlState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    func grantPeripheral(_ capability: PeripheralCapability) async {
+        guard let context = peripheralContext, let peripheralOrigin = Self.canonicalOrigin(streamURL) else {
+            peripheralError = "Connect as controller before changing peripheral access."
+            return
+        }
+        do {
+            let grant = try await client.createPeripheralGrant(
+                at: context.origin, apiToken: context.apiToken, workspaceID: context.workspaceID,
+                sessionID: context.sessionID, leaseToken: context.leaseToken,
+                idempotencyKey: UUID().uuidString.lowercased(), capability: capability,
+                peripheralOrigin: peripheralOrigin, expiresAt: now().addingTimeInterval(60 * 60)
+            )
+            peripheralGrants.insert(grant, at: 0)
+            peripheralError = nil
+            await loadPeripheralAudit(at: context.origin, apiToken: context.apiToken, workspaceID: context.workspaceID)
+        } catch { peripheralError = error.localizedDescription }
+    }
+
+    func revokePeripheral(_ grant: PeripheralGrant) async {
+        guard let session, let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
+        do {
+            let value = try await client.revokePeripheralGrant(at: origin, apiToken: authorizationToken, workspaceID: session.workspaceID, grantID: grant.id)
+            if let index = peripheralGrants.firstIndex(where: { $0.id == value.id }) { peripheralGrants[index] = value }
+            peripheralError = nil
+            await loadPeripheralAudit(at: origin, apiToken: authorizationToken, workspaceID: session.workspaceID)
+        } catch { peripheralError = error.localizedDescription }
+    }
+
+    func authorizePeripheral(_ capability: PeripheralCapability, from url: URL) async -> Bool {
+        guard let session, let origin = try? ControlPlaneURLValidator.validate(controlOrigin), let peripheralOrigin = Self.canonicalOrigin(url) else { return false }
+        do {
+            let decision = try await client.authorizePeripheral(at: origin, apiToken: authorizationToken, workspaceID: session.workspaceID, sessionID: session.id, capability: capability, peripheralOrigin: peripheralOrigin)
+            await loadPeripheralAudit(at: origin, apiToken: authorizationToken, workspaceID: session.workspaceID)
+            return decision.allowed
+        } catch {
+            peripheralError = error.localizedDescription
+            return false
+        }
+    }
+
+    private static func canonicalOrigin(_ url: URL?) -> String? {
+        guard let url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false), ["http", "https"].contains(components.scheme?.lowercased() ?? ""), components.host != nil else { return nil }
+        components.path = ""; components.query = nil; components.fragment = nil; components.user = nil; components.password = nil
+        return components.url?.absoluteString
+    }
+
+    private var peripheralContext: (origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String)? {
+        guard let origin = try? ControlPlaneURLValidator.validate(controlOrigin), let session, let leaseToken = lease?.token, canControl else { return nil }
+        return (origin, authorizationToken, session.workspaceID, session.id, leaseToken)
+    }
+
+    private func loadPeripheralState(at origin: URL, apiToken: String, workspaceID: String) async {
+        do {
+            async let grants = client.listPeripheralGrants(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+            async let audit = client.listPeripheralAudit(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+            let (grantValues, auditValues) = try await (grants, audit)
+            guard session?.workspaceID == workspaceID else { return }
+            peripheralGrants = grantValues; peripheralAudit = auditValues; peripheralError = nil
+        } catch is CancellationError { return } catch { peripheralError = error.localizedDescription }
+    }
+
+    private func loadPeripheralAudit(at origin: URL, apiToken: String, workspaceID: String) async {
+        do { peripheralAudit = try await client.listPeripheralAudit(at: origin, apiToken: apiToken, workspaceID: workspaceID) }
+        catch is CancellationError { return } catch { peripheralError = error.localizedDescription }
     }
 
     func pairThisMac(clientName: String) async -> Bool {

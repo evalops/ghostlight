@@ -26,7 +26,7 @@ cp "$SCRIPT_DIR/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$BIN_DIR/GhostlightApp" "$MACOS_DIR/GhostlightApp"
 
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --sign - "$APP_DIR"
+  codesign --force --sign - --entitlements "$SCRIPT_DIR/Resources/Ghostlight.entitlements" "$APP_DIR"
 fi
 
 printf '%s\n' "$APP_DIR"

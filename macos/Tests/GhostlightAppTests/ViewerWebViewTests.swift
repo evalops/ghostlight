@@ -49,6 +49,9 @@ final class ViewerWebViewTests: XCTestCase {
 
     func testMediaCapturePermissionPolicyFailsClosed() {
         XCTAssertEqual(ViewerWebView.PermissionPolicy.mediaCaptureDecision, .deny)
+        XCTAssertEqual(ViewerWebView.PermissionPolicy.capabilities(for: .camera), [.camera])
+        XCTAssertEqual(ViewerWebView.PermissionPolicy.capabilities(for: .microphone), [.microphone])
+        XCTAssertEqual(ViewerWebView.PermissionPolicy.capabilities(for: .cameraAndMicrophone), [.camera, .microphone])
     }
 
     func testDownloadDestinationSanitizesTraversalAndAvoidsExistingFiles() {

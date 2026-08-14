@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 type Workspace struct {
 	ID        string    `json:"id"`
@@ -142,6 +142,40 @@ type ContinuityIntentReceipt struct {
 	ExpiresAt time.Time      `json:"expires_at"`
 	Space     *ActivitySpace `json:"space,omitempty"`
 	Command   BrowserCommand `json:"command"`
+}
+
+type PeripheralGrant struct {
+	ID          string     `json:"id"`
+	WorkspaceID string     `json:"workspace_id"`
+	SessionID   string     `json:"session_id"`
+	ClientID    string     `json:"client_id"`
+	Capability  string     `json:"capability"`
+	Direction   string     `json:"direction"`
+	Origin      string     `json:"origin"`
+	State       string     `json:"state"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
+}
+
+type PeripheralAuditEvent struct {
+	ID          string    `json:"id"`
+	GrantID     string    `json:"grant_id,omitempty"`
+	WorkspaceID string    `json:"workspace_id"`
+	SessionID   string    `json:"session_id"`
+	ClientID    string    `json:"client_id"`
+	Capability  string    `json:"capability"`
+	Direction   string    `json:"direction"`
+	Origin      string    `json:"origin"`
+	Action      string    `json:"action"`
+	Outcome     string    `json:"outcome"`
+	OccurredAt  time.Time `json:"occurred_at"`
+}
+
+type PeripheralAuthorization struct {
+	Allowed   bool      `json:"allowed"`
+	GrantID   string    `json:"grant_id,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 type NativeClientEnrollment struct {

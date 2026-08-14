@@ -3,6 +3,7 @@ import WebKit
 
 struct ViewerWebView: NSViewRepresentable {
     typealias RevealDownload = () -> Void
+    typealias AuthorizePeripheral = (PeripheralCapability, URL) async -> Bool
 
     let url: URL
     let credential: ViewerCredential?
@@ -19,6 +20,7 @@ struct ViewerWebView: NSViewRepresentable {
     let onWebContentProcessTerminated: (@escaping () -> Void) -> Void
     let onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
     let onCapabilitiesChanged: (Capabilities) -> Void
+    let authorizePeripheral: AuthorizePeripheral
 
     init(
         url: URL,
@@ -35,7 +37,8 @@ struct ViewerWebView: NSViewRepresentable {
         onDownloadFailed: @escaping (String) -> Void = { _ in },
         onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void = { _ in },
         onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void = { _ in },
-        onCapabilitiesChanged: @escaping (Capabilities) -> Void = { _ in }
+        onCapabilitiesChanged: @escaping (Capabilities) -> Void = { _ in },
+        authorizePeripheral: @escaping AuthorizePeripheral = { _, _ in false }
     ) {
         self.url = url
         self.credential = credential
@@ -52,6 +55,7 @@ struct ViewerWebView: NSViewRepresentable {
         self.onWebContentProcessTerminated = onWebContentProcessTerminated
         self.onFullscreenStateChanged = onFullscreenStateChanged
         self.onCapabilitiesChanged = onCapabilitiesChanged
+        self.authorizePeripheral = authorizePeripheral
     }
 
     func makeCoordinator() -> Coordinator {
@@ -66,7 +70,8 @@ struct ViewerWebView: NSViewRepresentable {
             onDownloadFailed: onDownloadFailed,
             onWebContentProcessTerminated: onWebContentProcessTerminated,
             onFullscreenStateChanged: onFullscreenStateChanged,
-            onCapabilitiesChanged: onCapabilitiesChanged
+            onCapabilitiesChanged: onCapabilitiesChanged,
+            authorizePeripheral: authorizePeripheral
         )
     }
 
@@ -139,7 +144,8 @@ struct ViewerWebView: NSViewRepresentable {
             onDownloadFailed: onDownloadFailed,
             onWebContentProcessTerminated: onWebContentProcessTerminated,
             onFullscreenStateChanged: onFullscreenStateChanged,
-            onCapabilitiesChanged: onCapabilitiesChanged
+            onCapabilitiesChanged: onCapabilitiesChanged,
+            authorizePeripheral: authorizePeripheral
         )
         context.coordinator.onCapabilitiesChanged(.current)
         context.coordinator.performFind(findRequest, in: webView)
@@ -226,6 +232,25 @@ struct ViewerWebView: NSViewRepresentable {
 
     enum PermissionPolicy {
         static let mediaCaptureDecision = WKPermissionDecision.deny
+
+        static func capabilities(for type: WKMediaCaptureType) -> [PeripheralCapability] {
+            switch type {
+            case .camera: [.camera]
+            case .microphone: [.microphone]
+            case .cameraAndMicrophone: [.camera, .microphone]
+            @unknown default: []
+            }
+        }
+
+        static func url(for origin: WKSecurityOrigin) -> URL? {
+            var components = URLComponents()
+            components.scheme = origin.protocol
+            components.host = origin.host
+            if origin.port > 0 {
+                components.port = origin.port
+            }
+            return components.url
+        }
     }
 
     enum DownloadDestination {
@@ -292,6 +317,7 @@ struct ViewerWebView: NSViewRepresentable {
         var onWebContentProcessTerminated: (@escaping () -> Void) -> Void
         var onFullscreenStateChanged: (WKWebView.FullscreenState) -> Void
         var onCapabilitiesChanged: (Capabilities) -> Void
+        var authorizePeripheral: AuthorizePeripheral
         private var nativePerformanceRecorder: NativePerformanceRecorder?
         private var findSequence: Int?
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
@@ -308,7 +334,8 @@ struct ViewerWebView: NSViewRepresentable {
             onDownloadFailed: @escaping (String) -> Void,
             onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
             onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
-            onCapabilitiesChanged: @escaping (Capabilities) -> Void
+            onCapabilitiesChanged: @escaping (Capabilities) -> Void,
+            authorizePeripheral: @escaping AuthorizePeripheral
         ) {
             self.onNavigationStarted = onNavigationStarted
             self.onNavigationFinished = onNavigationFinished
@@ -321,6 +348,7 @@ struct ViewerWebView: NSViewRepresentable {
             self.onWebContentProcessTerminated = onWebContentProcessTerminated
             self.onFullscreenStateChanged = onFullscreenStateChanged
             self.onCapabilitiesChanged = onCapabilitiesChanged
+            self.authorizePeripheral = authorizePeripheral
         }
 
         func configureMediaReadiness(_ configuration: WKWebViewConfiguration) {
@@ -360,7 +388,8 @@ struct ViewerWebView: NSViewRepresentable {
             onDownloadFailed: @escaping (String) -> Void,
             onWebContentProcessTerminated: @escaping (@escaping () -> Void) -> Void,
             onFullscreenStateChanged: @escaping (WKWebView.FullscreenState) -> Void,
-            onCapabilitiesChanged: @escaping (Capabilities) -> Void
+            onCapabilitiesChanged: @escaping (Capabilities) -> Void,
+            authorizePeripheral: @escaping AuthorizePeripheral
         ) {
             self.onNavigationStarted = onNavigationStarted
             self.onNavigationFinished = onNavigationFinished
@@ -373,6 +402,7 @@ struct ViewerWebView: NSViewRepresentable {
             self.onWebContentProcessTerminated = onWebContentProcessTerminated
             self.onFullscreenStateChanged = onFullscreenStateChanged
             self.onCapabilitiesChanged = onCapabilitiesChanged
+            self.authorizePeripheral = authorizePeripheral
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -462,6 +492,26 @@ struct ViewerWebView: NSViewRepresentable {
             suggestedFilename: String,
             completionHandler: @escaping (URL?) -> Void
         ) {
+            guard let origin = loadedURL else {
+                onDownloadFailed("Download access was denied because the viewer origin is unavailable.")
+                completionHandler(nil)
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self, await authorizePeripheral(.download, origin) else {
+                    self?.onDownloadFailed("Download access is not granted for this viewer.")
+                    completionHandler(nil)
+                    return
+                }
+                finishDownloadDestination(download, suggestedFilename: suggestedFilename, completionHandler: completionHandler)
+            }
+        }
+
+        private func finishDownloadDestination(
+            _ download: WKDownload,
+            suggestedFilename: String,
+            completionHandler: @escaping (URL?) -> Void
+        ) {
             guard let directory = DownloadDestination.downloadsDirectory() else {
                 onDownloadFailed("The Downloads folder is unavailable.")
                 completionHandler(nil)
@@ -508,7 +558,24 @@ struct ViewerWebView: NSViewRepresentable {
             type: WKMediaCaptureType,
             decisionHandler: @escaping (WKPermissionDecision) -> Void
         ) {
-            decisionHandler(PermissionPolicy.mediaCaptureDecision)
+            guard let viewerOrigin = loadedURL,
+                  let requestingOrigin = PermissionPolicy.url(for: origin),
+                  Self.isSameOrigin(requestingOrigin, as: viewerOrigin) else {
+                decisionHandler(.deny)
+                return
+            }
+            let capabilities = PermissionPolicy.capabilities(for: type)
+            Task { @MainActor [weak self] in
+                guard let self, !capabilities.isEmpty else {
+                    decisionHandler(.deny)
+                    return
+                }
+                for capability in capabilities where !(await authorizePeripheral(capability, requestingOrigin)) {
+                    decisionHandler(.deny)
+                    return
+                }
+                decisionHandler(.grant)
+            }
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

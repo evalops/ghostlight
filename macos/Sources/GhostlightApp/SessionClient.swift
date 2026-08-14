@@ -69,6 +69,11 @@ protocol SessionServicing: Sendable {
     func activateActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpaceActivation
     func getContinuity(at origin: URL, apiToken: String, workspaceID: String) async throws -> ContinuityOverview
     func submitContinuity(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, verb: ContinuityVerb, adapter: ContinuityAdapter, expiresAt: Date, expectedRevision: Int, spaceID: String?, url: String?) async throws -> ContinuityIntentReceipt
+    func listPeripheralGrants(at origin: URL, apiToken: String, workspaceID: String) async throws -> [PeripheralGrant]
+    func createPeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, capability: PeripheralCapability, peripheralOrigin: String, expiresAt: Date) async throws -> PeripheralGrant
+    func revokePeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, grantID: String) async throws -> PeripheralGrant
+    func authorizePeripheral(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, capability: PeripheralCapability, peripheralOrigin: String) async throws -> PeripheralAuthorization
+    func listPeripheralAudit(at origin: URL, apiToken: String, workspaceID: String) async throws -> [PeripheralAuditEvent]
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession
     func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int, waitMilliseconds: Int) async throws -> BrowserSession?
@@ -82,6 +87,11 @@ protocol SessionServicing: Sendable {
 }
 
 extension SessionServicing {
+    func listPeripheralGrants(at origin: URL, apiToken: String, workspaceID: String) async throws -> [PeripheralGrant] { [] }
+    func createPeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, capability: PeripheralCapability, peripheralOrigin: String, expiresAt: Date) async throws -> PeripheralGrant { throw SessionClientError.invalidResponse }
+    func revokePeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, grantID: String) async throws -> PeripheralGrant { throw SessionClientError.invalidResponse }
+    func authorizePeripheral(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, capability: PeripheralCapability, peripheralOrigin: String) async throws -> PeripheralAuthorization { PeripheralAuthorization(allowed: false, grantID: nil, expiresAt: nil) }
+    func listPeripheralAudit(at origin: URL, apiToken: String, workspaceID: String) async throws -> [PeripheralAuditEvent] { [] }
     func listActivitySpaces(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ActivitySpace] { [] }
     func createActivitySpace(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, name: String, expectedRevision: Int) async throws -> ActivitySpace { throw SessionClientError.invalidResponse }
     func parkActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpace { throw SessionClientError.invalidResponse }
@@ -353,6 +363,33 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
         )
     }
 
+    public func listPeripheralGrants(at origin: URL, apiToken: String, workspaceID: String) async throws -> [PeripheralGrant] {
+        try await send(.get, origin: origin, path: ["v1", "workspaces", workspaceID, "peripheral-grants"], headers: Self.apiBearer(apiToken))
+    }
+
+    public func createPeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, capability: PeripheralCapability, peripheralOrigin: String, expiresAt: Date) async throws -> PeripheralGrant {
+        try await send(
+            .post, origin: origin, path: ["v1", "workspaces", workspaceID, "peripheral-grants"],
+            headers: Self.spaceHeaders(apiToken: apiToken, leaseToken: leaseToken, idempotencyKey: idempotencyKey),
+            body: try SessionJSON.encoder.encode(PeripheralGrantRequest(sessionID: sessionID, capability: capability, direction: capability.direction, origin: peripheralOrigin, expiresAt: expiresAt))
+        )
+    }
+
+    public func revokePeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, grantID: String) async throws -> PeripheralGrant {
+        try await send(.delete, origin: origin, path: ["v1", "workspaces", workspaceID, "peripheral-grants", grantID], headers: Self.apiBearer(apiToken))
+    }
+
+    public func authorizePeripheral(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, capability: PeripheralCapability, peripheralOrigin: String) async throws -> PeripheralAuthorization {
+        try await send(
+            .post, origin: origin, path: ["v1", "workspaces", workspaceID, "peripheral-authorizations"], headers: Self.apiBearer(apiToken),
+            body: try SessionJSON.encoder.encode(PeripheralAuthorizationRequest(sessionID: sessionID, capability: capability, direction: capability.direction, origin: peripheralOrigin))
+        )
+    }
+
+    public func listPeripheralAudit(at origin: URL, apiToken: String, workspaceID: String) async throws -> [PeripheralAuditEvent] {
+        try await send(.get, origin: origin, path: ["v1", "workspaces", workspaceID, "peripheral-audit"], headers: Self.apiBearer(apiToken))
+    }
+
     public func sessionEvents(
         at origin: URL,
         apiToken: String,
@@ -604,6 +641,21 @@ private struct ContinuityIntentRequest: Encodable {
         case expiresAt = "expires_at"
         case spaceID = "space_id"
     }
+}
+private struct PeripheralGrantRequest: Encodable {
+    let sessionID: String
+    let capability: PeripheralCapability
+    let direction: PeripheralDirection
+    let origin: String
+    let expiresAt: Date
+    enum CodingKeys: String, CodingKey { case capability, direction, origin; case sessionID = "session_id"; case expiresAt = "expires_at" }
+}
+private struct PeripheralAuthorizationRequest: Encodable {
+    let sessionID: String
+    let capability: PeripheralCapability
+    let direction: PeripheralDirection
+    let origin: String
+    enum CodingKeys: String, CodingKey { case capability, direction, origin; case sessionID = "session_id" }
 }
 private struct AcquireLeaseRequest: Encodable { let clientID: String; enum CodingKeys: String, CodingKey { case clientID = "client_id" } }
 private struct ChromePairingRequest: Encodable { let deviceName: String; enum CodingKeys: String, CodingKey { case deviceName = "device_name" } }

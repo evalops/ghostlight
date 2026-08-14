@@ -278,6 +278,48 @@ func TestSchemaSixMigratesActivitySpacesWithoutBrowserProfileData(t *testing.T) 
 	}
 }
 
+func TestSchemaSevenMigratesContentFreePeripheralTables(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(stateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO metadata(key,value) VALUES('schema_version','7')`,
+		`PRAGMA user_version = 7`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("migrate schema seven: %v", err)
+	}
+	defer store.close()
+	for _, table := range []string{"peripheral_grants", "peripheral_audit_events"} {
+		columns := tableColumnNames(t, store.db, table)
+		for _, forbidden := range []string{"filename", "content", "url", "title", "media"} {
+			if columns[forbidden] {
+				t.Fatalf("%s persists forbidden %s column", table, forbidden)
+			}
+		}
+	}
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("migrated version = %d, %v; want %d", version, err, schemaVersion)
+	}
+}
+
 func TestActivitySpacesCaptureParkActivateAndAuthorization(t *testing.T) {
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
 	lease := acquireLease(t, h, "default")
@@ -452,6 +494,105 @@ func TestTypedContinuityExpiresQueuedIntentServerSide(t *testing.T) {
 	commands := doJSON(t, h, http.MethodGet, "/v1/bridge/commands?session_id=default&after=0", "", h.config.BridgeToken, nil)
 	if commands.Code != http.StatusOK || strings.Contains(commands.Body.String(), `"continuity_verb":"send"`) {
 		t.Fatalf("expired continuity remained executable = %d %s", commands.Code, commands.Body.String())
+	}
+}
+
+func TestPeripheralGrantsAreDirectionalOriginBoundRevocableAndAudited(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	store := h.store
+	lease, err := store.acquireLease(t.Context(), "default", "peripheral-client", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := store.now().UTC().Add(time.Hour)
+	body := fmt.Sprintf(`{"session_id":"default","capability":"download","direction":"remote_to_local","origin":"https://viewer.example.test","expires_at":%q}`, formatTime(expires))
+	created := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-grants", "grant-download", lease.Token, strings.NewReader(body))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create grant = %d %s", created.Code, created.Body.String())
+	}
+	var grant PeripheralGrant
+	decodeRecorder(t, created, &grant)
+	if grant.Capability != "download" || grant.Direction != "remote_to_local" || grant.Origin != "https://viewer.example.test" || grant.State != "active" || grant.ClientID != "operator" {
+		t.Fatalf("grant = %#v", grant)
+	}
+	retry := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-grants", "grant-download", lease.Token, strings.NewReader(body))
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retry grant = %d %s", retry.Code, retry.Body.String())
+	}
+	wrongDirection := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-grants", "wrong-direction", lease.Token, strings.NewReader(fmt.Sprintf(`{"session_id":"default","capability":"download","direction":"local_to_remote","origin":"https://viewer.example.test","expires_at":%q}`, formatTime(expires))))
+	if wrongDirection.Code != http.StatusBadRequest {
+		t.Fatalf("wrong direction = %d %s", wrongDirection.Code, wrongDirection.Body.String())
+	}
+	unsafeOrigin := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-grants", "unsafe-origin", lease.Token, strings.NewReader(fmt.Sprintf(`{"session_id":"default","capability":"camera","direction":"local_to_remote","origin":"https://viewer.example.test/path?token=secret","expires_at":%q}`, formatTime(expires))))
+	if unsafeOrigin.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe origin = %d %s", unsafeOrigin.Code, unsafeOrigin.Body.String())
+	}
+	unavailable := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-grants", "unavailable-copy", lease.Token, strings.NewReader(fmt.Sprintf(`{"session_id":"default","capability":"copy","direction":"remote_to_local","origin":"https://viewer.example.test","expires_at":%q}`, formatTime(expires))))
+	if unavailable.Code != http.StatusConflict || !strings.Contains(unavailable.Body.String(), `"code":"capability_unavailable"`) {
+		t.Fatalf("unavailable capability = %d %s", unavailable.Code, unavailable.Body.String())
+	}
+
+	authorized := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-authorizations", "", "", strings.NewReader(`{"session_id":"default","capability":"download","direction":"remote_to_local","origin":"https://viewer.example.test"}`))
+	var decision PeripheralAuthorization
+	decodeRecorder(t, authorized, &decision)
+	if authorized.Code != http.StatusOK || !decision.Allowed || decision.GrantID != grant.ID {
+		t.Fatalf("authorization = %d %#v", authorized.Code, decision)
+	}
+	denied := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-authorizations", "", "", strings.NewReader(`{"session_id":"default","capability":"camera","direction":"local_to_remote","origin":"https://viewer.example.test"}`))
+	decision = PeripheralAuthorization{}
+	decodeRecorder(t, denied, &decision)
+	if denied.Code != http.StatusOK || decision.Allowed {
+		t.Fatalf("denied authorization = %d %#v", denied.Code, decision)
+	}
+
+	revoked := doJSON(t, h, http.MethodDelete, "/v1/workspaces/default/peripheral-grants/"+grant.ID, "", "", nil)
+	if revoked.Code != http.StatusOK || !strings.Contains(revoked.Body.String(), `"state":"revoked"`) {
+		t.Fatalf("revoke = %d %s", revoked.Code, revoked.Body.String())
+	}
+	authorized = doJSON(t, h, http.MethodPost, "/v1/workspaces/default/peripheral-authorizations", "", "", strings.NewReader(`{"session_id":"default","capability":"download","direction":"remote_to_local","origin":"https://viewer.example.test"}`))
+	decision = PeripheralAuthorization{}
+	decodeRecorder(t, authorized, &decision)
+	if decision.Allowed {
+		t.Fatalf("authorization after revoke = %#v", decision)
+	}
+	audit := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/peripheral-audit", "", "", nil)
+	if audit.Code != http.StatusOK || !strings.Contains(audit.Body.String(), `"action":"granted"`) || !strings.Contains(audit.Body.String(), `"action":"revoked"`) || !strings.Contains(audit.Body.String(), `"outcome":"denied"`) || strings.Contains(audit.Body.String(), "secret") {
+		t.Fatalf("audit = %d %s", audit.Code, audit.Body.String())
+	}
+}
+
+func TestPeripheralGrantsAreScopedToAuthenticatedNativeClient(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	first := enrollNativeClient(t, h, "First Mac")
+	second := enrollNativeClient(t, h, "Second Mac")
+	lease, err := h.store.acquireLease(t.Context(), "default", "controller", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := formatTime(h.store.now().UTC().Add(time.Hour))
+	body := strings.NewReader(fmt.Sprintf(`{"session_id":"default","capability":"camera","direction":"local_to_remote","origin":"https://viewer.example.test","expires_at":%q}`, expires))
+	request := httptest.NewRequest(http.MethodPost, "http://ghostlight.test/v1/workspaces/default/peripheral-grants", body)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+first.ClientToken)
+	request.Header.Set("X-Ghostlight-Lease-Token", lease.Token)
+	request.Header.Set("Idempotency-Key", "first-camera")
+	created := httptest.NewRecorder()
+	h.ServeHTTP(created, request)
+	var grant PeripheralGrant
+	decodeRecorder(t, created, &grant)
+	if created.Code != http.StatusCreated || grant.ClientID != first.Client.ID {
+		t.Fatalf("native grant = %d %#v", created.Code, grant)
+	}
+
+	listed := doBearerRequest(h, http.MethodGet, "/v1/workspaces/default/peripheral-grants", second.ClientToken, nil)
+	if listed.Code != http.StatusOK || listed.Body.String() != "[]\n" {
+		t.Fatalf("other client grants = %d %s", listed.Code, listed.Body.String())
+	}
+	authorize := doBearerRequest(h, http.MethodPost, "/v1/workspaces/default/peripheral-authorizations", second.ClientToken, strings.NewReader(`{"session_id":"default","capability":"camera","direction":"local_to_remote","origin":"https://viewer.example.test"}`))
+	var decision PeripheralAuthorization
+	decodeRecorder(t, authorize, &decision)
+	if authorize.Code != http.StatusOK || decision.Allowed {
+		t.Fatalf("other client authorization = %d %#v", authorize.Code, decision)
 	}
 }
 

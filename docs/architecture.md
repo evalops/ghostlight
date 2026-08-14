@@ -51,7 +51,7 @@ WebKit navigation completion is only page readiness. The native `mediaReady` sta
 | Control API token | macOS client | Process memory | Never persisted; supplied in the connection UI or `GHOSTLIGHT_API_TOKEN`. |
 | Runtime configuration and Neko passwords | Linux operator | `runtime/.env` | Persists until the operator changes or removes the file. |
 | Viewer URL | Control process | `GHOSTLIGHT_VIEWER_URL` environment value | Recreated with the control container. |
-| Workspace, session, revision, lease epochs, commands, streams, tab snapshots, and attachment metadata | Control service | `ghostlight-control-state` SQLite volume | Persists across control-container recreation. |
+| Workspace, session, revision, lease epochs, commands, streams, tab snapshots, peripheral grants and content-free peripheral audit metadata, and attachment metadata | Control service | `ghostlight-control-state` SQLite volume | Persists across control-container recreation. |
 | Attachment bodies | Control service and native host | `ghostlight-control-attachments` volume, staged into the viewer downloads volume | Persists until the named volume or file is removed. Each session is capped at 100 files and 1 GiB; staged download names include the attachment ID to avoid collisions. |
 | Chromium browser data | Chromium through Neko | `runtime/data/chromium` bind mount | Persists across container recreation and `docker compose down`. |
 | Neko login and WebRTC connection state | Neko process and embedded client | Process memory | Ends when the viewer or client connection ends. |
@@ -94,7 +94,7 @@ The Chromium profile remains the authoritative website-state store. The control 
 
 | Boundary | Data | Shipped control | Remaining exposure |
 | --- | --- | --- | --- |
-| Mac to control `8080/tcp` | Legacy discovery plus workspace, session, lease, command, stream, and attachment requests | Product routes require the API bearer token; lease writes also require a short-lived lease token. Ports bind to `GHOSTLIGHT_BIND_ADDRESS`. | Health, readiness, and legacy discovery remain unauthenticated. The API has no TLS or rate limit. |
+| Mac to control `8080/tcp` | Legacy discovery plus workspace, session, lease, command, stream, peripheral authorization, and attachment requests | Product routes require the API bearer token; grant creation and other lease writes also require a short-lived lease token. Peripheral grants are client-, session-, direction-, origin-, and time-bound. Ports bind to `GHOSTLIGHT_BIND_ADDRESS`. | Health, readiness, and legacy discovery remain unauthenticated. The API has no TLS or rate limit. |
 | Viewer bridge to control | Bootstrap, tab snapshots, command polling, acknowledgements, and attachment fetches | A separate bridge bearer token authenticates these routes. The extension ID and command enum are fixed. | A compromised viewer container can use its bridge token and alter browser product state. |
 | Mac to Neko `8081/tcp` | Login page, credentials, and signaling | Neko requires the configured user or admin password. | The default viewer URL uses HTTP; the repository supplies no TLS termination. |
 | Mac to Neko `52000/udp,tcp` | Browser media and input | Both mux protocols bind to the selected host address. | Host firewall and NAT configuration determine reachability. The repository supplies no TURN service. |

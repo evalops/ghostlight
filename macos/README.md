@@ -9,7 +9,7 @@ macos/package-app.sh
 open macos/.build/Ghostlight.app
 ```
 
-The packaging script performs a release Swift build, creates `macos/.build/Ghostlight.app`, copies the executable and `Info.plist`, and applies an ad-hoc signature when `codesign` is available. The bundle identifier is `org.evalops.Ghostlight`. The output has no Developer ID signature or notarization receipt.
+The packaging script performs a release Swift build, creates `macos/.build/Ghostlight.app`, copies the executable and `Info.plist`, and applies camera and audio-input entitlements with an ad-hoc signature when `codesign` is available. The bundle identifier is `org.evalops.Ghostlight`. The output has no Developer ID signature or notarization receipt.
 
 For the distributable universal ZIP:
 
@@ -33,6 +33,8 @@ After the stream connects, the native Home view provides web search, app shortcu
 Home separates continuity by operation. **Resume** restores a Ghostlight Space. **Browse** reads Chrome-owned bookmarks and Reading List snapshots. **Send** lists destinations explicitly sent from Chrome. Selecting a Browse or Send item creates an expiring, lease-protected intent and resolves a Chrome inbox item only after its command applies. **Dismiss** resolves the item without changing Chromium. **Connect your Chrome** creates the one-use pairing capability described in [Chrome continuity](../docs/chrome-sync.md).
 
 The app registers `ghostlight://send?url=<encoded-http-or-https-url>`. URL handling rejects embedded credentials, fragments, and credential-bearing query keys before submitting the destination with `url_handler` provenance.
+
+**Peripheral access** on Home grants Downloads, Camera, or Microphone to the current viewer origin for one hour. WebKit asks control for an exact capability, direction, session, client, and origin match before writing a download or granting media capture. The panel shows active, expired, and revoked grants plus recent allowed or denied decisions. Revocation is immediate. Audit events contain capability metadata and the canonical viewer origin, never filenames, transferred content, media, or remote page URLs. Copy, paste, upload, drag, page audio, notifications, pointer lock, and cursor control remain explicitly unavailable.
 
 ## Saved connection
 
