@@ -219,6 +219,19 @@ assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'verify_br
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation upgrade-source 0.1.0'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation before 0.1.1'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation after 0.1.1'
+# The managed update can restart Chromium. Do not probe CDP until the exact
+# extension version is committed to the persistent profile.
+python3 - "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+for phase in ("before", "after"):
+    installation = source.index(f"record_browser_agent_installation {phase} 0.1.1")
+    cdp = source.index(f"wait_for_cdp {phase}")
+    assert installation < cdp
+assert 'value.get("webSocketDebuggerUrl")' in source
+assert '${phase}-cdp-version.json' in source
+PY
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'browser-agent-0.1.0-policy.json:/etc/chromium/policies/managed/policies.json:ro'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'http://127.0.0.1:18084/browser-agent-updates.xml'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '/usr/local/bin/ghostlight-native-host'

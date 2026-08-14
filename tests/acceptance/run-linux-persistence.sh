@@ -126,6 +126,22 @@ record_browser_agent_installation() {
   grep -F -- "/Default/Extensions/okabifedphcnokaehflbkmpfphleoaha/${expected_version}_" "$installation_file" >/dev/null
 }
 
+wait_for_cdp() {
+  local phase="$1"
+  local version_file="$OUTPUT_DIR/${phase}-cdp-version.json"
+  local attempt=0
+  while (( attempt < 60 )); do
+    if curl --fail --silent --show-error "http://127.0.0.1:$CDP_PORT/json/version" >"$version_file" 2>/dev/null \
+      && python3 -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); assert value.get("webSocketDebuggerUrl")' "$version_file"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  printf 'Chromium CDP did not become ready after browser-agent installation: %s\n' "$version_file" >&2
+  return 1
+}
+
 verify_browser_agent_bridge() {
   local phase="$1"
   local target_url="http://127.0.0.1:18083/bridge-$phase?marker=$MARKER"
@@ -277,18 +293,13 @@ fi
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" -f "$UPGRADE_OVERRIDE_FILE" down
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build --wait --wait-timeout 120
 
-for _attempt in {1..60}; do
-  curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
-  sleep 1
-done
-  curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version"
-  printf '\n'
+  record_browser_agent_installation before 0.1.1
+  wait_for_cdp before
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
     exec -T viewer sh -lc 'test ! -e /etc/chromium.d/extensions; test -f /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
   record_chromium_argv before
 
   node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" before "$OUTPUT_DIR"
-  record_browser_agent_installation before 0.1.1
   verify_browser_agent_bridge before
 docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" exec -T viewer sh -lc 'cat /home/neko/.config/chromium/acceptance-requests.jsonl' >"$OUTPUT_DIR/before-requests.jsonl"
 BEFORE_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
@@ -296,13 +307,10 @@ BEFORE_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" down
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" up --detach --build --wait --wait-timeout 120
 
-for _attempt in {1..60}; do
-  curl --fail --silent "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1 && break
-  sleep 1
-done
+  record_browser_agent_installation after 0.1.1
+  wait_for_cdp after
   record_chromium_argv after
   node "$TEST_DIR/persistence.mjs" "http://127.0.0.1:$CDP_PORT" "http://127.0.0.1:$VIEWER_PORT" after "$OUTPUT_DIR"
-  record_browser_agent_installation after 0.1.1
   verify_browser_agent_bridge after
 AFTER_VIEWER="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q viewer)"
 AFTER_CONTROL="$(docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" ps -q control)"
@@ -318,13 +326,14 @@ docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/ru
   image_files=("$OUTPUT_DIR"/*.png "$OUTPUT_DIR"/*.jpg)
   evidence_files=("$OUTPUT_DIR"/*-evidence.json)
   argv_files=("$OUTPUT_DIR"/*-chromium-argv.txt)
+  cdp_files=("$OUTPUT_DIR"/*-cdp-version.json)
   installation_files=("$OUTPUT_DIR"/*-browser-agent-installation.txt)
   native_host_files=("$OUTPUT_DIR"/*-native-host-process.txt)
   native_bridge_files=("$OUTPUT_DIR"/*-native-bridge.json)
   update_files=("$OUTPUT_DIR"/*-browser-agent-update.xml)
   request_files=("$OUTPUT_DIR"/*-requests.jsonl)
   python3 "$TEST_DIR/audit-screenshots.py" "${image_files[@]}"
-  shasum -a 256 "${image_files[@]}" "${evidence_files[@]}" "${argv_files[@]}" "${installation_files[@]}" \
+  shasum -a 256 "${image_files[@]}" "${evidence_files[@]}" "${argv_files[@]}" "${cdp_files[@]}" "${installation_files[@]}" \
     "${native_host_files[@]}" "${native_bridge_files[@]}" "${update_files[@]}" "${request_files[@]}"
 } >>"$TRANSCRIPT" 2>&1
 
