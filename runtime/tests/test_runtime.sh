@@ -22,6 +22,14 @@ assert_contains() {
     || fail "expected ${path} to contain: ${needle}"
 }
 
+assert_not_contains() {
+  local path="$1"
+  local needle="$2"
+  if grep --fixed-strings --line-number -- "$needle" "$path" >/dev/null; then
+    fail "expected ${path} not to contain: ${needle}"
+  fi
+}
+
 expect_failure() {
   local label="$1"
   shift
@@ -103,20 +111,71 @@ assert_contains "$RUNTIME_DIR/.env.example" 'NEKO_CAPTURE_VIDEO_PIPELINE=ximages
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'GHOSTLIGHT_API_TOKEN=$API_TOKEN'
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'GHOSTLIGHT_BRIDGE_TOKEN=$BRIDGE_TOKEN'
-python3 - "$RUNTIME_DIR/chromium-policy.json" <<'PY'
+python3 - "$RUNTIME_DIR/chromium-policy.json" "$REPO_DIR/viewer/extension/manifest.json" <<'PY'
+import base64
+import hashlib
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as policy_file:
     policy = json.load(policy_file)
+with open(sys.argv[2], encoding="utf-8") as manifest_file:
+    manifest = json.load(manifest_file)
+
+public_key = base64.b64decode(manifest["key"], validate=True)
+extension_id = "".join(
+    chr(ord("a") + nibble)
+    for byte in hashlib.sha256(public_key).digest()[:16]
+    for nibble in (byte >> 4, byte & 0x0F)
+)
 
 assert policy.get("DefaultCookiesSetting") == 1
 assert policy.get("RestoreOnStartup") == 1
+assert policy.get("ExtensionInstallBlocklist") == ["*"]
+assert extension_id == "okabifedphcnokaehflbkmpfphleoaha"
+assert extension_id in policy.get("ExtensionInstallAllowlist", []), (
+    f"packaged browser agent {extension_id} must be exempt from the extension blocklist"
+)
 assert policy.get("NativeMessagingBlocklist") == ["*"]
 assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browser_agent"]
 assert policy.get("NativeMessagingUserLevelHosts") is False
 PY
-assert_contains "$REPO_DIR/viewer/chromium.conf" '--load-extension=/opt/ghostlight/browser-agent'
+python3 - "$REPO_DIR/viewer/browser-agent.crx" "$REPO_DIR/viewer/extension" <<'PY'
+import struct
+import sys
+import zipfile
+from pathlib import Path
+
+crx_path = Path(sys.argv[1])
+source_dir = Path(sys.argv[2])
+with crx_path.open("rb") as crx_file:
+    assert crx_file.read(4) == b"Cr24", "browser agent is not a CRX package"
+    assert struct.unpack("<I", crx_file.read(4))[0] == 3, "browser agent must use CRX3"
+    header_size = struct.unpack("<I", crx_file.read(4))[0]
+    crx_file.seek(header_size, 1)
+    with zipfile.ZipFile(crx_file) as package:
+        packaged = {
+            name: package.read(name)
+            for name in package.namelist()
+            if not name.endswith("/")
+        }
+
+source = {
+    path.relative_to(source_dir).as_posix(): path.read_bytes()
+    for path in source_dir.rglob("*")
+    if path.is_file()
+}
+assert packaged == source, "signed browser-agent CRX must exactly match viewer/extension"
+PY
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent.crx /opt/ghostlight/browser-agent.crx'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+assert_contains "$REPO_DIR/viewer/browser-agent-external.json" '"external_crx": "/opt/ghostlight/browser-agent.crx"'
+for chromium_config in \
+  "$REPO_DIR/viewer/chromium.conf" \
+  "$RUNTIME_DIR/config/chromium-gpu.conf" \
+  "$REPO_DIR/tests/acceptance/fixtures/chromium.conf"; do
+  assert_not_contains "$chromium_config" '--load-extension='
+done
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
   "$RUNTIME_DIR/config/chromium-gpu.conf" \

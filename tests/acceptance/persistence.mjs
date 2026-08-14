@@ -6,11 +6,25 @@ if (!cdpEndpoint || !viewerEndpoint || !["before", "after"].includes(phase) || !
 }
 
 const proofURLs = ["http://127.0.0.1:18083/state-a", "http://127.0.0.1:18083/state-b"];
+const browserAgentID = "okabifedphcnokaehflbkmpfphleoaha";
+const browserAgentURL = `chrome-extension://${browserAgentID}/service-worker.js`;
 
 async function listTargets() {
   const response = await fetch(`${cdpEndpoint}/json/list`);
   if (!response.ok) throw new Error(`CDP target listing failed: ${response.status}`);
   return response.json();
+}
+
+async function waitForBrowserAgent(timeoutMilliseconds = 30000) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let observed = [];
+  while (Date.now() < deadline) {
+    observed = (await listTargets()).filter((target) => target.type === "service_worker");
+    const agent = observed.find((target) => target.url === browserAgentURL);
+    if (agent) return agent.url;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`packaged browser agent service worker did not load; expected ${browserAgentURL}; observed ${observed.map((target) => target.url).join(", ") || "none"}`);
 }
 
 async function waitForProofTargets(timeoutMilliseconds = 30000) {
@@ -37,6 +51,7 @@ if (phase === "before") {
   }
 }
 
+const loadedBrowserAgentURL = await waitForBrowserAgent();
 if (phase === "after") await new Promise((resolve) => setTimeout(resolve, 5000));
 const { allTargets, proofTargets } = await waitForProofTargets();
 if (proofTargets.length !== proofURLs.length) {
@@ -61,6 +76,7 @@ for (const target of proofTargets.sort((left, right) => left.url.localeCompare(r
 const result = {
   phase,
   pipeline: "browser-target-restoration-server-state-and-neko-screenshot",
+  browserAgent: { id: browserAgentID, serviceWorkerURL: loadedBrowserAgentURL },
   proofTargetCount: proofTargets.length,
   evidence,
 };
