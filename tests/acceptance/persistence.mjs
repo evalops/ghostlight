@@ -12,22 +12,21 @@ const browserAgentURL = `chrome-extension://${browserAgentID}/service-worker.js`
 
 async function waitForBrowserAgent(timeoutMilliseconds = 30000) {
   const browser = await chromium.connectOverCDP(cdpEndpoint);
-  const context = browser.contexts()[0];
-  if (!context) throw new Error("CDP connection did not expose the default Chromium context");
-
-  const existing = context.serviceWorkers().find((worker) => worker.url() === browserAgentURL);
-  if (existing) return existing.url();
-
-  try {
-    const worker = await context.waitForEvent("serviceworker", {
-      predicate: (candidate) => candidate.url() === browserAgentURL,
-      timeout: timeoutMilliseconds,
-    });
-    return worker.url();
-  } catch (error) {
-    const observed = context.serviceWorkers().map((worker) => worker.url());
-    throw new Error(`packaged browser agent service worker did not load; expected ${browserAgentURL}; observed ${observed.join(", ") || "none"}`, { cause: error });
+  const session = await browser.newBrowserCDPSession();
+  const deadline = Date.now() + timeoutMilliseconds;
+  let observed = [];
+  while (Date.now() < deadline) {
+    const { targetInfos } = await session.send("Target.getTargets");
+    observed = targetInfos.filter((target) => target.type === "service_worker");
+    const agent = observed.find((target) => target.url === browserAgentURL);
+    if (agent) {
+      await session.detach();
+      return agent.url;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  await session.detach();
+  throw new Error(`packaged browser agent service worker did not load; expected ${browserAgentURL}; observed ${observed.map((target) => target.url).join(", ") || "none"}`);
 }
 
 async function listTargets() {
