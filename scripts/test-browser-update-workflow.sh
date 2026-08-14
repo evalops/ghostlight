@@ -209,8 +209,8 @@ grep -Fq -- 'build.env("GHOSTLIGHT_ENABLE_MACOS_CI") == "true"' "$buildkite_pipe
   printf 'Buildkite macOS validation lacks an explicit opt-in gate\n' >&2
   exit 1
 }
-grep -Fq -- "vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true' && fromJSON('[\"macos-14\"]') || fromJSON('[\"self-hosted\", \"evalops-public-pr\"]')" "$ci_workflow" || {
-  printf 'GitHub macOS validation does not fail closed on the self-hosted lane\n' >&2
+grep -A3 -F -- 'swift-tests:' "$ci_workflow" | grep -Fq -- "if: vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true'" || {
+  printf 'GitHub macOS validation lacks a runner-free dormant gate\n' >&2
   exit 1
 }
 
