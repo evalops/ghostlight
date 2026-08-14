@@ -86,6 +86,11 @@ record_chromium_argv() {
       exit 1
     ' >"$argv_file"
   grep -Fx -- '--remote-debugging-port=9222' "$argv_file" >/dev/null
+  grep -Fx -- '--enable-remote-extensions' "$argv_file" >/dev/null
+  if grep -Fx -- '--disable-extensions-except=' "$argv_file" >/dev/null; then
+    printf 'Debian Chromium wrapper disabled the packaged browser agent; argv: %s\n' "$argv_file" >&2
+    return 1
+  fi
   if grep -F -- '--load-extension=' "$argv_file" >/dev/null; then
     printf 'default Chromium launch injected --load-extension; argv: %s\n' "$argv_file" >&2
     return 1

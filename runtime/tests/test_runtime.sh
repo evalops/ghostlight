@@ -175,6 +175,8 @@ assert_contains "$REPO_DIR/viewer/browser-agent-external.json" '"external_crx": 
 assert_not_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'fixtures/chromium.conf:/etc/neko/supervisord/chromium.conf'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'chromium-cdp-flags:/etc/chromium.d/zz-ghostlight-acceptance:ro'
 assert_contains "$REPO_DIR/tests/acceptance/fixtures/chromium-cdp-flags" '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" "grep -Fx -- '--enable-remote-extensions'"
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" "grep -Fx -- '--disable-extensions-except='"
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'default Chromium launch injected --load-extension'
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '${phase}-chromium-argv.txt'
@@ -185,6 +187,7 @@ assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'test ! -e
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
   "$RUNTIME_DIR/config/chromium-gpu.conf"; do
+  assert_contains "$chromium_config" '--enable-remote-extensions'
   assert_not_contains "$chromium_config" '--load-extension='
 done
 for chromium_config in \
