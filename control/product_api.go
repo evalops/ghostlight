@@ -935,6 +935,17 @@ func (h *handler) createViewerCredential(ctx context.Context, stream StreamConne
 			ExpiresAt: expiresAt,
 		}, nil
 	}
+	var login struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &login); err == nil && strings.TrimSpace(login.Token) != "" {
+		return ViewerCredential{
+			Type:      "neko_login",
+			Name:      "ghostlight-" + stream.ID,
+			Value:     login.Token,
+			ExpiresAt: stream.ExpiresAt,
+		}, nil
+	}
 	return ViewerCredential{}, errors.New("Neko login returned no WebKit-compatible session cookie")
 }
 

@@ -1138,6 +1138,43 @@ func TestViewerCapabilityRedeemsToNekoSessionCredentialWithoutPassword(t *testin
 	}
 }
 
+func TestViewerCapabilityRedeemsNekoJSONTokenWithoutExposingGlobalPassword(t *testing.T) {
+	cfg := productTestConfig(t.TempDir())
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"neko-session","token":"scoped-neko-token","profile":{},"state":{}}`)),
+			Request:    r,
+		}, nil
+	})}
+	h, err := newHandlerWithConfig(cfg, client, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.store.close() })
+	stream, err := h.store.createStream(t.Context(), "default", "mac-client", "", h.viewerURL, defaultStreamTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://ghostlight.test/v1/viewer-capabilities/redeem", strings.NewReader(`{"client_id":"mac-client"}`))
+	request.Header.Set("Authorization", "Bearer "+stream.Capability)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("redeem = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), cfg.ViewerPassword) {
+		t.Fatalf("redemption exposed global viewer password: %s", response.Body.String())
+	}
+	var bootstrap ViewerBootstrap
+	decodeRecorder(t, response, &bootstrap)
+	if bootstrap.ViewerCredential.Type != "neko_login" || bootstrap.ViewerCredential.Name != "ghostlight-"+stream.ID || bootstrap.ViewerCredential.Value != "scoped-neko-token" {
+		t.Fatalf("viewer credential = %#v", bootstrap.ViewerCredential)
+	}
+}
+
 func TestViewerCapabilityCanRetryAfterViewerLoginFailure(t *testing.T) {
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
 	stream, err := h.store.createStream(t.Context(), "default", "mac-client", "", h.viewerURL, defaultStreamTTL)
