@@ -8,6 +8,8 @@
 
 Ghostlight runs a persistent Chromium profile on Linux and streams the browser to a native macOS client over WebRTC.
 
+The [daily-driver readiness ledger](docs/readiness/README.md) separates proven historical evidence from failed or missing tests without collecting browsing content. It uses bounded receipts; calendar duration is not an acceptance gate.
+
 The optional [Chrome continuity companion](docs/chrome-sync.md) sends a chosen tab or window to Ghostlight and can mirror bookmarks or Reading List with separate runtime consent. Credentials, cookies, history, and the Chrome profile stay local.
 
 ## Current scope

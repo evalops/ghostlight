@@ -48,7 +48,7 @@ The native client can drive remote Chromium, but command completion, viewer auth
 ### Key Decisions
 
 - Token handoff precedes direct signaling. (session-settled: user-directed — chosen over direct signaling first: remove visible setup without expanding the transport architecture.) Governs R5-R7.
-- Recovery uses bounded cycles, not a seven-day gate. (session-settled: user-directed — chosen over a seven-day soak: deterministic failures are faster and produce attributable receipts.) Governs R11-R12.
+- Recovery uses bounded cycles, not elapsed calendar time. (session-settled: user-directed — deterministic failures are faster and produce attributable receipts.) Governs R11-R12.
 - Performance input uses X11-equivalent actions and treats CDP as optional. (session-settled: user-directed — chosen over CDP-driven input: the measured path must match real viewer input.) Governs R13-R15.
 
 ## Planning Contract

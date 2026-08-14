@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "status": "Needs a test",
+  "calendar_duration_gate": false,
+  "content_blind": true,
+  "collected_content_fields": [],
+  "claims": [
+    {
+      "id": "remote_profile_continuity",
+      "status": "Proven",
+      "evidence": [
+        {
+          "receipt_sha256": "2488ae84a3cbccc6fdd15fd5f59c8d6a5038ceaa822896fa4cd30c66ac14ac8b",
+          "source_sha": "f94bb784316e206674234407a75170b10dd0e7bc",
+          "recorded_at": "2026-08-12T16:28:11Z",
+          "synthetic": true,
+          "consent": "synthetic",
+          "gates": {
+            "profile_restored": true,
+            "cookie_restored": true,
+            "local_storage_restored": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "decoded_media",
+      "status": "Proven",
+      "evidence": [
+        {
+          "receipt_sha256": "ac8b7de9400cadd1422990a0948d449d58adc1d832876fd65b2d7655851a92ed",
+          "source_sha": "ee58514c20493e1b93fc85677850726c30ce51c4",
+          "recorded_at": "2026-08-12T22:11:16-07:00",
+          "synthetic": true,
+          "consent": "synthetic",
+          "gates": {
+            "four_phases": true,
+            "frames_decoded": true,
+            "dropped_frames_recorded": true,
+            "selected_udp": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "accepted_input",
+      "status": "Proven",
+      "evidence": [
+        {
+          "receipt_sha256": "ac8b7de9400cadd1422990a0948d449d58adc1d832876fd65b2d7655851a92ed",
+          "source_sha": "ee58514c20493e1b93fc85677850726c30ce51c4",
+          "recorded_at": "2026-08-12T22:11:16-07:00",
+          "synthetic": true,
+          "consent": "synthetic",
+          "gates": {
+            "four_phases": true,
+            "x11_input": true,
+            "causal_pixel_marker": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "singular_controller_ownership",
+      "status": "Needs a test",
+      "evidence": []
+    },
+    {
+      "id": "sleep_wake_recovery",
+      "status": "Needs a test",
+      "evidence": []
+    },
+    {
+      "id": "peripheral_readiness",
+      "status": "Needs a test",
+      "evidence": []
+    },
+    {
+      "id": "real_account_persistence",
+      "status": "Needs a test",
+      "evidence": []
+    }
+  ]
+}

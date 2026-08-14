@@ -11,7 +11,7 @@ The six scenarios are:
 5. Lease expiry with controller transfer
 6. Deterministic suspension surrogate
 
-A seven-day soak is outside this gate. Calendar duration does not affect the evaluator result.
+Calendar duration is outside this gate and does not affect the evaluator result.
 
 ## Deterministic run
 
