@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import { chromium } from "playwright";
 
 const [cdpEndpoint, viewerEndpoint, phase, outputDir] = process.argv.slice(2);
 if (!cdpEndpoint || !viewerEndpoint || !["before", "after"].includes(phase) || !outputDir) {
@@ -10,29 +9,22 @@ const proofURLs = ["http://127.0.0.1:18083/state-a", "http://127.0.0.1:18083/sta
 const browserAgentID = "okabifedphcnokaehflbkmpfphleoaha";
 const browserAgentURL = `chrome-extension://${browserAgentID}/service-worker.js`;
 
-async function waitForBrowserAgent(timeoutMilliseconds = 30000) {
-  const browser = await chromium.connectOverCDP(cdpEndpoint);
-  const session = await browser.newBrowserCDPSession();
-  const deadline = Date.now() + timeoutMilliseconds;
-  let observed = [];
-  while (Date.now() < deadline) {
-    const { targetInfos } = await session.send("Target.getTargets");
-    observed = targetInfos.filter((target) => target.type === "service_worker");
-    const agent = observed.find((target) => target.url === browserAgentURL);
-    if (agent) {
-      await session.detach();
-      return agent.url;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  await session.detach();
-  throw new Error(`packaged browser agent service worker did not load; expected ${browserAgentURL}; observed ${observed.map((target) => target.url).join(", ") || "none"}`);
-}
-
 async function listTargets() {
   const response = await fetch(`${cdpEndpoint}/json/list`);
   if (!response.ok) throw new Error(`CDP target listing failed: ${response.status}`);
   return response.json();
+}
+
+async function waitForBrowserAgent(timeoutMilliseconds = 30000) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let observed = [];
+  while (Date.now() < deadline) {
+    observed = (await listTargets()).filter((target) => target.type === "service_worker");
+    const agent = observed.find((target) => target.url === browserAgentURL);
+    if (agent) return agent.url;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`packaged browser agent service worker did not load; expected ${browserAgentURL}; observed ${observed.map((target) => target.url).join(", ") || "none"}`);
 }
 
 async function waitForProofTargets(timeoutMilliseconds = 30000) {
