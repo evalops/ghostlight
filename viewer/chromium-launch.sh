@@ -19,12 +19,31 @@ if [ "$chromium_running" -eq 0 ]; then
   rm -f -- "$profile_root/SingletonCookie" "$profile_root/SingletonLock" "$profile_root/SingletonSocket"
 fi
 
-set -- /usr/bin/chromium "$@"
+migration_needed=0
 if ! find "$extension_root" -mindepth 1 -maxdepth 1 -type d -name "${expected_version}_*" -print -quit 2>/dev/null | grep -q .; then
+  migration_needed=1
   if [ -d "$extension_root" ]; then
     find "$extension_root" -mindepth 1 -maxdepth 1 -type d ! -name "${expected_version}_*" -exec rm -rf -- {} +
   fi
+fi
+
+set -- /usr/bin/chromium "$@"
+if [ "$migration_needed" -eq 1 ]; then
   set -- "$@" --extensions-update-frequency=30
+  browser_pid=$$
+  (
+    attempt=0
+    while [ "$attempt" -lt 90 ]; do
+      if find "$extension_root" -mindepth 2 -maxdepth 2 -type f \
+        -path "*/${expected_version}_*/manifest.json" -print -quit 2>/dev/null | grep -q .; then
+        sleep 1
+        kill -INT "$browser_pid"
+        exit 0
+      fi
+      attempt=$((attempt + 1))
+      sleep 1
+    done
+  ) &
 fi
 
 exec "$@"

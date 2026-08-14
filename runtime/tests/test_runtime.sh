@@ -177,6 +177,12 @@ assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-update-server.
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY chromium-launch.sh /usr/local/bin/ghostlight-chromium'
 assert_contains "$REPO_DIR/viewer/chromium.conf" 'command=/usr/local/bin/ghostlight-chromium'
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '--extensions-update-frequency=30'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'if [ "$migration_needed" -eq 1 ]'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'kill -INT "$browser_pid"'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '-path "*/${expected_version}_*/manifest.json"'
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" '/opt/ghostlight/browser-agent.version'
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/viewer/chromium-launch.sh" 'if [ "$chromium_running" -eq 0 ]'
