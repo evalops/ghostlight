@@ -183,7 +183,7 @@ jobs:
 
   swift-tests:
     name: Swift tests
-    runs-on: ${{ vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true' && fromJSON('["macos-14"]') || fromJSON('["self-hosted", "evalops-private-ci"]') }}
+    runs-on: ${{ vars.GHOSTLIGHT_ENABLE_MACOS_CI == 'true' && fromJSON('["macos-14"]') || fromJSON('["self-hosted", "evalops-private-heavy"]') }}
     steps:
       - name: Fail closed while macOS CI is dormant
         if: vars.GHOSTLIGHT_ENABLE_MACOS_CI != 'true'
