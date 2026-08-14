@@ -131,6 +131,12 @@ verify_browser_agent_bridge() {
   local target_url="http://127.0.0.1:18083/bridge-$phase?marker=$MARKER"
   local process_file="$OUTPUT_DIR/${phase}-native-host-process.txt"
   local receipt_file="$OUTPUT_DIR/${phase}-native-bridge.json"
+  local update_file="$OUTPUT_DIR/${phase}-browser-agent-update.xml"
+  docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
+    exec -T viewer curl --fail --silent --show-error \
+      http://127.0.0.1:18084/browser-agent-updates.xml >"$update_file"
+  grep -F -- 'appid="okabifedphcnokaehflbkmpfphleoaha"' "$update_file" >/dev/null
+  grep -F -- 'codebase="http://127.0.0.1:18084/browser-agent.crx" version="0.1.1"' "$update_file" >/dev/null
   python3 "$TEST_DIR/verify-browser-agent.py" \
     "http://127.0.0.1:$CONTROL_PORT" "$API_TOKEN" "$target_url" "$phase" "$receipt_file"
   docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/runtime/docker-compose.yml" -f "$OVERRIDE_FILE" \
@@ -218,6 +224,7 @@ services:
     volumes:
       - "$FIXTURE_DIR/browser-agent-0.1.0.crx:/opt/ghostlight/browser-agent.crx:ro"
       - "$FIXTURE_DIR/browser-agent-0.1.0-external.json:/usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json:ro"
+      - "$FIXTURE_DIR/browser-agent-0.1.0-policy.json:/etc/chromium/policies/managed/policies.json:ro"
 EOF
 
 if (( share_viewer_network == 1 )); then
@@ -314,10 +321,11 @@ docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$ROOT_DIR/ru
   installation_files=("$OUTPUT_DIR"/*-browser-agent-installation.txt)
   native_host_files=("$OUTPUT_DIR"/*-native-host-process.txt)
   native_bridge_files=("$OUTPUT_DIR"/*-native-bridge.json)
+  update_files=("$OUTPUT_DIR"/*-browser-agent-update.xml)
   request_files=("$OUTPUT_DIR"/*-requests.jsonl)
   python3 "$TEST_DIR/audit-screenshots.py" "${image_files[@]}"
   shasum -a 256 "${image_files[@]}" "${evidence_files[@]}" "${argv_files[@]}" "${installation_files[@]}" \
-    "${native_host_files[@]}" "${native_bridge_files[@]}" "${request_files[@]}"
+    "${native_host_files[@]}" "${native_bridge_files[@]}" "${update_files[@]}" "${request_files[@]}"
 } >>"$TRANSCRIPT" 2>&1
 
 printf 'acceptance passed; evidence: %s\n' "$OUTPUT_DIR"

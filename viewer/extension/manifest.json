@@ -3,6 +3,7 @@
   "name": "Ghostlight Browser Agent",
   "description": "Reports Chromium tab state to the local Ghostlight control service.",
   "version": "0.1.1",
+  "update_url": "http://127.0.0.1:18084/browser-agent-updates.xml",
   "minimum_chrome_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqW5z+hrCSbIAXZD1Zh8dfE/bi2Fo4cKQayd2fie67FtoMLeM2LyL84BtRll5AaTg13lw8X7VfWadYpywTXXfu8WrNdlv1+8XPcS5eQqYVd8KTXBv19807BGcjb0c5nCrXtaeXeJskOVXrJq+AsAkeyYiAY5fGFIhZpBKyziOGArx+EMxWBCJhlLBxcJtFUSlvqdYspuHOtS2kopr4F0V8UbwDvMs9DPDlnVaEsZW1uOrG+ZrZRufWJt+oYm7G1K16Lyrx8FAHI+SaEch8zZYInXBndFbbmsayEdHR8EcbGHutGL0gunX52wA6r4cxZH+18Kt4riftHS+tsMRNbsuKQIDAQAB",
   "permissions": [

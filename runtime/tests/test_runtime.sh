@@ -136,6 +136,13 @@ assert extension_id == "okabifedphcnokaehflbkmpfphleoaha"
 assert extension_id in policy.get("ExtensionInstallAllowlist", []), (
     f"packaged browser agent {extension_id} must be exempt from the extension blocklist"
 )
+extension_settings = policy.get("ExtensionSettings", {}).get(extension_id, {})
+assert extension_settings == {
+    "installation_mode": "force_installed",
+    "minimum_version_required": manifest["version"],
+    "override_update_url": True,
+    "update_url": manifest["update_url"],
+}
 assert policy.get("NativeMessagingBlocklist") == ["*"]
 assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browser_agent"]
 assert policy.get("NativeMessagingUserLevelHosts") is False
@@ -168,21 +175,34 @@ source = {
 assert packaged == source, "signed browser-agent CRX must exactly match viewer/extension"
 PY
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent.crx /opt/ghostlight/browser-agent.crx'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-updates.xml /opt/ghostlight/browser-agent-updates.xml'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-update-server.conf /etc/neko/supervisord/ghostlight-browser-agent-update-server.conf'
 assert_contains "$REPO_DIR/viewer/Dockerfile" '16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'rm /etc/chromium.d/extensions'
-assert_contains "$REPO_DIR/viewer/browser-agent-external.json" '"external_crx": "/opt/ghostlight/browser-agent.crx"'
-python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" <<'PY'
+python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-external.json" "$REPO_DIR/viewer/browser-agent-updates.xml" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-policy.json" <<'PY'
 import json
 import sys
+import xml.etree.ElementTree as ET
 
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 external = json.load(open(sys.argv[2], encoding="utf-8"))
-upgrade_source = json.load(open(sys.argv[3], encoding="utf-8"))
+update = ET.parse(sys.argv[3]).getroot().find("{http://www.google.com/update2/response}app/{http://www.google.com/update2/response}updatecheck")
+upgrade_source = json.load(open(sys.argv[4], encoding="utf-8"))
+upgrade_policy = json.load(open(sys.argv[5], encoding="utf-8"))
 assert manifest["version"] == "0.1.1"
-assert external["external_version"] == manifest["version"]
+assert manifest["update_url"] == "http://127.0.0.1:18084/browser-agent-updates.xml"
+assert external == {"external_update_url": manifest["update_url"]}
+assert update.attrib == {
+    "codebase": "http://127.0.0.1:18084/browser-agent.crx",
+    "version": manifest["version"],
+}
 assert upgrade_source["external_version"] == "0.1.0"
+assert upgrade_policy["ExtensionInstallBlocklist"] == ["*"]
+assert "ExtensionSettings" not in upgrade_policy
 PY
+assert_contains "$REPO_DIR/viewer/browser-agent-update-server.conf" '--bind 127.0.0.1'
+assert_contains "$REPO_DIR/viewer/browser-agent-update-server.conf" '--directory /opt/ghostlight'
 assert_not_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'fixtures/chromium.conf:/etc/neko/supervisord/chromium.conf'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'chromium-cdp-flags:/etc/chromium.d/zz-ghostlight-acceptance:ro'
 assert_contains "$REPO_DIR/tests/acceptance/fixtures/chromium-cdp-flags" '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*'
@@ -199,6 +219,8 @@ assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'verify_br
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation upgrade-source 0.1.0'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation before 0.1.1'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation after 0.1.1'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'browser-agent-0.1.0-policy.json:/etc/chromium/policies/managed/policies.json:ro'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'http://127.0.0.1:18084/browser-agent-updates.xml'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '/usr/local/bin/ghostlight-native-host'
 assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'parse_time(value["last_heartbeat"]) > phase_started'
 assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("state") == "applied"'

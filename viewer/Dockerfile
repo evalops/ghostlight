@@ -108,15 +108,19 @@ COPY --from=neko-builder /build/ghostlight-native-host /usr/local/bin/ghostlight
 COPY --from=neko-builder /build/source/LICENSE /usr/share/doc/neko/LICENSE
 COPY --from=neko-builder /build/SOURCE-PROVENANCE /usr/share/doc/neko/SOURCE-PROVENANCE
 COPY browser-agent.crx /opt/ghostlight/browser-agent.crx
+COPY browser-agent-updates.xml /opt/ghostlight/browser-agent-updates.xml
 COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json
 COPY native-messaging-host.json /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json
+COPY browser-agent-update-server.conf /etc/neko/supervisord/ghostlight-browser-agent-update-server.conf
 COPY chromium.conf /etc/neko/supervisord/chromium.conf
 
 RUN set -eux; \
     chmod 0755 /usr/local/bin/ghostlight-native-host; \
     chmod 0444 /opt/ghostlight/browser-agent.crx \
+      /opt/ghostlight/browser-agent-updates.xml \
       /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json; \
     chmod 0644 /etc/chromium/native-messaging-hosts/org.evalops.ghostlight.browser_agent.json \
+      /etc/neko/supervisord/ghostlight-browser-agent-update-server.conf \
       /etc/neko/supervisord/chromium.conf
 
 LABEL org.opencontainers.image.source="https://github.com/evalops/ghostlight" \
