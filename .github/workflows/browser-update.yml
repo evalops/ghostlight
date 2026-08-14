@@ -86,8 +86,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == pull_request ]]; then
-            # Pull requests exercise the deployed pin: the published hardened viewer.
-            resolved=$(awk -F= '$1 == "NEKO_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' runtime/.env.example)
+            # Pull requests must exercise the checked-out Dockerfile so source-pin
+            # remediations are built and scanned before they merge.
+            resolved="ghostlight-viewer:candidate-${{ github.sha }}"
           else
             # Schedule and dispatch runs test the hardened viewer rebuilt from
             # the resolved upstream base, never raw upstream.
@@ -124,7 +125,6 @@ jobs:
           fi
 
       - name: Build the hardened viewer candidate
-        if: github.event_name != 'pull_request'
         run: docker build --tag "ghostlight-viewer:candidate-${{ github.sha }}" viewer
 
       - name: Record the exact candidate references
