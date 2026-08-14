@@ -117,6 +117,13 @@ assert policy.get("NativeMessagingAllowlist") == ["org.evalops.ghostlight.browse
 assert policy.get("NativeMessagingUserLevelHosts") is False
 PY
 assert_contains "$REPO_DIR/viewer/chromium.conf" '--load-extension=/opt/ghostlight/browser-agent'
+for chromium_config in \
+  "$REPO_DIR/viewer/chromium.conf" \
+  "$RUNTIME_DIR/config/chromium-gpu.conf" \
+  "$REPO_DIR/tests/acceptance/fixtures/chromium.conf"; do
+  assert_contains "$chromium_config" 'XDG_CONFIG_HOME="/tmp/ghostlight-chromium/config"'
+  assert_contains "$chromium_config" 'XDG_CACHE_HOME="/tmp/ghostlight-chromium/cache"'
+done
 assert_contains "$REPO_DIR/viewer/native-messaging-host.json" 'chrome-extension://okabifedphcnokaehflbkmpfphleoaha/'
 assert_contains "$REPO_DIR/viewer/extension/manifest.json" '"nativeMessaging"'
 assert_contains "$REPO_DIR/viewer/extension/manifest.json" '"tabs"'

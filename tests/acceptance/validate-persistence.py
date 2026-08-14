@@ -27,17 +27,15 @@ def main() -> int:
         raise SystemExit("no post-recreation browser requests were recorded")
 
     expected_cookie = f"ghostlight_acceptance={marker}"
-    for tab, path in (("A", "/state-a"), ("B", "/state-b")):
-        page_requests = [row for row in restored if row.get("path") == path]
-        if not any(expected_cookie in str(row.get("cookie", "")) for row in page_requests):
-            raise SystemExit(f"restored cookie marker missing from tab {tab}")
-
+    for tab in ("A", "B"):
         reports = [
             row
             for row in restored
             if row.get("path") == "/storage-report"
             and row.get("query", {}).get("tab") == [tab]
         ]
+        if not any(expected_cookie in str(row.get("cookie", "")) for row in reports):
+            raise SystemExit(f"restored cookie marker missing from tab {tab}")
         if not any(row.get("query", {}).get("value") == [marker] for row in reports):
             raise SystemExit(f"restored local-storage marker missing from tab {tab}")
 
