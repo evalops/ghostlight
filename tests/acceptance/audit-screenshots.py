@@ -19,6 +19,11 @@ SECRET_PATTERN = re.compile(
     rb"(?:password|passwd|secret|api[ _-]?key|authorization))",
     re.IGNORECASE,
 )
+STARTUP_ERROR_PATTERN = re.compile(
+    rb"(?:Error Loading Extension|Failed to load extension|"
+    rb"Loading of unpacked extensions is disabled by the administrator)",
+    re.IGNORECASE,
+)
 
 
 def visible_marker_failures(data: bytes, source: str = "encoded image bytes") -> list[str]:
@@ -26,6 +31,8 @@ def visible_marker_failures(data: bytes, source: str = "encoded image bytes") ->
     visible_markers = b"\n".join(part for part in re.findall(rb"[ -~]{4,}", data) if part)
     if SECRET_PATTERN.search(visible_markers):
         failures.append(f"credential marker in {source}")
+    if STARTUP_ERROR_PATTERN.search(visible_markers):
+        failures.append(f"browser startup error in {source}")
     for match in IPV4_PATTERN.finditer(visible_markers):
         if match.group(0) != b"127.0.0.1":
             failures.append(f"address marker {match.group(0).decode('ascii')} in {source}")

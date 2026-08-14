@@ -4,13 +4,19 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 AUDIT_SCRIPT = Path(__file__).with_name("audit-screenshots.py")
+AUDIT_SPEC = importlib.util.spec_from_file_location("audit_screenshots", AUDIT_SCRIPT)
+assert AUDIT_SPEC and AUDIT_SPEC.loader
+AUDIT_MODULE = importlib.util.module_from_spec(AUDIT_SPEC)
+AUDIT_SPEC.loader.exec_module(AUDIT_MODULE)
 RENDERED_SECRET_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAASwAAABGCAAAAABTDvYhAAAFVElEQVR42u2afUyVVRzHP8/lVUURUMAwsmiipmZE"
     "5QsRjYwQ2vAtbW0pLrc2m5pt5ZzOwpWa+k/NtramzdlMnTbMF5ybQmATS03NpUOW+JIvJPiSLN/49sdz7+WK94/O"
@@ -38,6 +44,22 @@ RENDERED_SECRET_PNG = base64.b64decode(
 
 
 class ScreenshotPrivacyAuditTests(unittest.TestCase):
+    def test_rejects_chromium_extension_error_rendered_in_pixels(self) -> None:
+        ocr_result = subprocess.CompletedProcess(
+            args=["tesseract"],
+            returncode=0,
+            stdout=(
+                b"Error Loading Extension\n"
+                b"Failed to load extension from: /usr/share/chromium/extensions/agent.json\n"
+                b"Loading of unpacked extensions is disabled by the administrator.\n"
+            ),
+            stderr=b"",
+        )
+        with mock.patch.object(AUDIT_MODULE.subprocess, "run", return_value=ocr_result):
+            failures = AUDIT_MODULE.rendered_pixel_failures(Path("unused.jpg"))
+
+        self.assertIn("browser startup error in rendered pixels", failures)
+
     def test_rejects_secret_rendered_only_in_pixels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             screenshot = Path(temporary_directory) / "rendered-secret.png"

@@ -169,17 +169,27 @@ assert packaged == source, "signed browser-agent CRX must exactly match viewer/e
 PY
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent.crx /opt/ghostlight/browser-agent.crx'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json /usr/share/chromium/extensions/okabifedphcnokaehflbkmpfphleoaha.json'
+assert_contains "$REPO_DIR/viewer/Dockerfile" '16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions'
+assert_contains "$REPO_DIR/viewer/Dockerfile" 'rm /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/browser-agent-external.json" '"external_crx": "/opt/ghostlight/browser-agent.crx"'
+assert_not_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'fixtures/chromium.conf:/etc/neko/supervisord/chromium.conf'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'chromium-cdp-flags:/etc/chromium.d/zz-ghostlight-acceptance:ro'
+assert_contains "$REPO_DIR/tests/acceptance/fixtures/chromium-cdp-flags" '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'default Chromium launch injected --load-extension'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '${phase}-chromium-argv.txt'
+# shellcheck disable=SC2016
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '${phase}-browser-agent-installation.txt'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'test ! -e /etc/chromium.d/extensions'
+[[ ! -e "$REPO_DIR/tests/acceptance/fixtures/chromium.conf" ]] || fail "acceptance must use the baked default Chromium Supervisor config"
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
-  "$RUNTIME_DIR/config/chromium-gpu.conf" \
-  "$REPO_DIR/tests/acceptance/fixtures/chromium.conf"; do
+  "$RUNTIME_DIR/config/chromium-gpu.conf"; do
   assert_not_contains "$chromium_config" '--load-extension='
 done
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
-  "$RUNTIME_DIR/config/chromium-gpu.conf" \
-  "$REPO_DIR/tests/acceptance/fixtures/chromium.conf"; do
+  "$RUNTIME_DIR/config/chromium-gpu.conf"; do
   assert_contains "$chromium_config" 'XDG_CONFIG_HOME="/tmp/ghostlight-chromium/config"'
   assert_contains "$chromium_config" 'XDG_CACHE_HOME="/tmp/ghostlight-chromium/cache"'
 done

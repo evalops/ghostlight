@@ -98,6 +98,9 @@ RUN set -eux; \
       apt-get install --yes --no-install-recommends \
         intel-media-va-driver-non-free=25.2.3+ds1-1; \
     fi; \
+    echo "16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions" \
+      | sha256sum --check --strict; \
+    rm /etc/chromium.d/extensions; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
 COPY --from=neko-builder /build/neko /usr/bin/neko
