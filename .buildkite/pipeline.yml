@@ -35,6 +35,21 @@ steps:
         timeout_in_minutes: 45
         command: |
           set -euo pipefail
+          go_archive="$$(mktemp)"
+          go_root="$$(mktemp -d)"
+          cleanup() {
+            rm -f "$$go_archive"
+            rm -rf "$$go_root"
+          }
+          trap cleanup EXIT
+          curl --fail --location --silent --show-error \
+            https://go.dev/dl/go1.26.6.linux-amd64.tar.gz \
+            --output "$$go_archive"
+          printf '%s  %s\n' \
+            708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89 \
+            "$$go_archive" | sha256sum --check --status
+          tar -C "$$go_root" -xzf "$$go_archive"
+          export PATH="$$go_root/go/bin:$$PATH"
           for module in control viewer/bridge; do
             (cd "$$module" && test -z "$$(gofmt -l .)" && go test ./... && go test -race ./... && go vet ./...)
           done
