@@ -43,7 +43,7 @@ macOS client:
 - Swift 5.10 or later for local builds
 - access to the Linux control, viewer, and WebRTC ports
 
-Repository verification uses a Go 1.26-compatible module, a Go 1.26.5 container builder, and ShellCheck.
+Repository verification uses a Go 1.26-compatible module, a Go 1.26.6 container builder, and ShellCheck.
 
 Live browser acceptance requires Node.js with npm, Python 3, `shasum`, and Tesseract OCR. The reviewed container-update commands require Docker Buildx, `jq`, and Perl.
 
@@ -223,7 +223,7 @@ The receipt makes no hardware decode claim.
 
 ## Container updates
 
-The runtime pins the public `ghcr.io/evalops/ghostlight-viewer` image by its multi-architecture index digest. That image starts from the exact upstream Neko Chromium 3.1.5 digest. [`viewer/Dockerfile`](viewer/Dockerfile) verifies Neko source commit `395ca1a6f62b7b0e270e654d366a2d57b8042efd` by tarball SHA-256 and rebuilds `/usr/bin/neko` after the module-only changes in [`viewer/neko-go-modules.patch`](viewer/neko-go-modules.patch): `x/crypto` 0.53.0, `x/net` 0.56.0, `x/sys` 0.46.0, and `x/text` 0.39.0. It installs Chromium, chromium-common, and chromium-sandbox 151.0.7922.108-1~deb13u1 plus libheif1 and its dav1d and libde265 plugins 1.19.8-1+deb13u1 from the Debian `20260812T000000Z` snapshot. The image retains Neko's Apache-2.0 license and the Debian package copyright files inherited from the upstream image.
+The runtime pins the public `ghcr.io/evalops/ghostlight-viewer` image by its multi-architecture index digest. That image starts from the exact upstream Neko Chromium 3.1.5 digest. [`viewer/Dockerfile`](viewer/Dockerfile) verifies Neko source commit `395ca1a6f62b7b0e270e654d366a2d57b8042efd` by tarball SHA-256 and rebuilds `/usr/bin/neko` with Go 1.26.6 after the module-only changes in [`viewer/neko-go-modules.patch`](viewer/neko-go-modules.patch): `x/crypto` 0.53.0, `x/net` 0.56.0, `x/sys` 0.46.0, and `x/text` 0.39.0. It installs Chromium, chromium-common, and chromium-sandbox 151.0.7922.137-1~deb13u1 plus libheif1 and its dav1d and libde265 plugins 1.19.8-1+deb13u1 from the Debian `20260813T161554Z` snapshot. The image retains Neko's Apache-2.0 license and the Debian package copyright files inherited from the upstream image.
 
 The upstream Neko 3.1.5 image is not eligible for the runtime pin under the repository's scanner gate. Protected run `31621725290` found 32 fixed `HIGH` vulnerabilities: 18 in Debian packages and 14 in `/usr/bin/neko`. A fixed `HIGH` or `CRITICAL` finding blocks a candidate; `--ignore-unfixed` excludes findings without an available fix from that blocking command.
 

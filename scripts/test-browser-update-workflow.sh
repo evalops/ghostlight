@@ -44,6 +44,7 @@ require_text 'bash scripts/update-neko-image.sh'
 require_text 'bash scripts/update-viewer-base.sh'
 require_text 'bash scripts/update-control-base-images.sh'
 require_text "docker build --tag \"ghostlight-viewer:candidate-${dollar}{{ github.sha }}\" viewer"
+require_text 'Pull requests must exercise the checked-out Dockerfile'
 require_text "grep -Ev '^(control/Dockerfile|viewer/Dockerfile)$'"
 require_text 'needs: candidate'
 require_text "if: github.event_name != 'pull_request'"
@@ -60,6 +61,12 @@ require_text "tested_tree=\$(git rev-parse 'HEAD^{tree}')"
 require_text "remote_tree=\$(git rev-parse 'FETCH_HEAD^{tree}')"
 require_text 'gh pr list'
 require_text 'gh pr create'
+
+build_step=$(awk '/- name: Build the hardened viewer candidate/ { in_build = 1 } in_build { print } in_build && /run: docker build/ { exit }' "$workflow")
+if grep -Fq -- "if: github.event_name != 'pull_request'" <<<"$build_step"; then
+  printf 'pull requests must build the checked-out hardened viewer candidate\n' >&2
+  exit 1
+fi
 
 # These are literal workflow source contracts, not shell expansions.
 # shellcheck disable=SC2016

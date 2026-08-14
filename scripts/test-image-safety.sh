@@ -22,7 +22,7 @@ expect_failure() {
 }
 
 fixture="$scratch_dir/repository"
-mkdir -p "$fixture/.github/workflows" "$fixture/control" "$fixture/runtime/tests" "$fixture/tests/acceptance"
+mkdir -p "$fixture/.github/workflows" "$fixture/control" "$fixture/runtime/tests" "$fixture/tests/acceptance" "$fixture/viewer"
 
 old_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 new_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -38,8 +38,10 @@ printf '%s\n' \
   '    steps:' \
   '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' \
   >"$fixture/.github/workflows/ci.yml"
-printf 'FROM golang:1.26.5-alpine@sha256:%s AS build\nFROM alpine:3.24@sha256:%s\n' \
+printf 'FROM golang:1.26.6-alpine@sha256:%s AS build\nFROM alpine:3.24@sha256:%s\n' \
   "$old_digest" "$old_digest" >"$fixture/control/Dockerfile"
+printf 'FROM golang:1.26.6-trixie@sha256:%s AS build\nRUN apt-get install chromium=151.0.7922.137-1~deb13u1\n' \
+  "$old_digest" >"$fixture/viewer/Dockerfile"
 printf 'NEKO_IMAGE=%s\n' "$old_image" >"$fixture/runtime/.env.example"
 printf '%s\n' \
   'services:' \
@@ -61,7 +63,7 @@ alpine_new_digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 GHOSTLIGHT_GO_BASE_RESOLVED_DIGEST="sha256:$go_new_digest" \
 GHOSTLIGHT_ALPINE_BASE_RESOLVED_DIGEST="sha256:$alpine_new_digest" \
   "$base_updater" --root "$fixture"
-grep -Fqx -- "FROM golang:1.26.5-alpine@sha256:$go_new_digest AS build" "$fixture/control/Dockerfile" \
+grep -Fqx -- "FROM golang:1.26.6-alpine@sha256:$go_new_digest AS build" "$fixture/control/Dockerfile" \
   || fail 'base updater did not update the Go build image'
 grep -Fqx -- "FROM alpine:3.24@sha256:$alpine_new_digest" "$fixture/control/Dockerfile" \
   || fail 'base updater did not update the Alpine runtime image'
@@ -79,10 +81,27 @@ expect_failure 'mutable action with spaced key separator' "$checker" "$fixture"
 cp "$scratch_dir/ci.yml" "$fixture/.github/workflows/ci.yml"
 
 cp "$fixture/control/Dockerfile" "$scratch_dir/Dockerfile"
-printf 'FROM golang:1.26.5-alpine@sha256:%s AS build\nFROM alpine:3.24\n' \
+printf 'FROM golang:1.26.6-alpine@sha256:%s AS build\nFROM alpine:3.24\n' \
   "$old_digest" >"$fixture/control/Dockerfile"
 expect_failure 'mutable Docker base image' "$checker" "$fixture"
 cp "$scratch_dir/Dockerfile" "$fixture/control/Dockerfile"
+
+cp "$fixture/control/Dockerfile" "$scratch_dir/control-Dockerfile"
+sed -i.bak 's/golang:1\.26\.6-alpine/golang:1.26.5-alpine/' "$fixture/control/Dockerfile"
+rm "$fixture/control/Dockerfile.bak"
+expect_failure 'control Go stdlib vulnerability regression' "$checker" "$fixture"
+cp "$scratch_dir/control-Dockerfile" "$fixture/control/Dockerfile"
+
+cp "$fixture/viewer/Dockerfile" "$scratch_dir/viewer-Dockerfile"
+sed -i.bak 's/golang:1\.26\.6-trixie/golang:1.25.12-trixie/' "$fixture/viewer/Dockerfile"
+rm "$fixture/viewer/Dockerfile.bak"
+expect_failure 'viewer Go stdlib vulnerability regression' "$checker" "$fixture"
+cp "$scratch_dir/viewer-Dockerfile" "$fixture/viewer/Dockerfile"
+
+sed -i.bak 's/151\.0\.7922\.137/151.0.7922.108/' "$fixture/viewer/Dockerfile"
+rm "$fixture/viewer/Dockerfile.bak"
+expect_failure 'viewer Chromium vulnerability regression' "$checker" "$fixture"
+cp "$scratch_dir/viewer-Dockerfile" "$fixture/viewer/Dockerfile"
 
 printf '%s\n' \
   'services:' \

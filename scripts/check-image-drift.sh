@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 CONTROL_DIR="$ROOT_DIR/control"
 neko_candidate="${GHOSTLIGHT_NEKO_CANDIDATE_IMAGE:-ghcr.io/m1k1o/neko/chromium:latest}"
-go_candidate="${GHOSTLIGHT_GO_BASE_CANDIDATE:-golang:1.26.5-alpine}"
+go_candidate="${GHOSTLIGHT_GO_BASE_CANDIDATE:-golang:1.26.6-alpine}"
 alpine_candidate="${GHOSTLIGHT_ALPINE_BASE_CANDIDATE:-alpine:3.24}"
 # The deployed NEKO_IMAGE pin tracks the hardened ghostlight-viewer rebuild, so
 # upstream drift is measured against the base the hardened viewer builds from.

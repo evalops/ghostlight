@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1.18
 
-FROM golang:1.25.12-trixie@sha256:c083e42786e39fb1a7dd4ae5ab02f5d80c3beb3224848ca0fa89f4a063a4ba29 AS neko-builder
+FROM golang:1.26.6-trixie@sha256:ab563819a16cfe5faff0f96a8bb598fbb0e400ab2ac751996e60abcb23b106a3 AS neko-builder
 
 ARG NEKO_REVISION=395ca1a6f62b7b0e270e654d366a2d57b8042efd
 ARG NEKO_SOURCE_SHA256=148de6806aea9c523d635ca187ecd5d96442c694cf62043791e43328d3ad83dc
 ARG SOURCE_DATE_EPOCH=1785940131
-ARG DEBIAN_SNAPSHOT=20260812T000000Z
+ARG DEBIAN_SNAPSHOT=20260813T161554Z
 
 WORKDIR /build
 
@@ -70,14 +70,14 @@ USER root
 RUN set -eux; \
     printf '%s\n' \
       'Types: deb' \
-      'URIs: https://snapshot.debian.org/archive/debian/20260812T000000Z' \
+      'URIs: https://snapshot.debian.org/archive/debian/20260813T161554Z' \
       'Suites: trixie trixie-updates' \
       'Components: main non-free' \
       'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
       'Check-Valid-Until: no' \
       '' \
       'Types: deb' \
-      'URIs: https://snapshot.debian.org/archive/debian-security/20260812T000000Z' \
+      'URIs: https://snapshot.debian.org/archive/debian-security/20260813T161554Z' \
       'Suites: trixie-security' \
       'Components: main' \
       'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
@@ -85,9 +85,9 @@ RUN set -eux; \
       > /etc/apt/sources.list.d/debian.sources; \
     apt-get -o Acquire::Check-Valid-Until=false update; \
     apt-get install --yes --no-install-recommends --only-upgrade \
-      chromium=151.0.7922.108-1~deb13u1 \
-      chromium-common=151.0.7922.108-1~deb13u1 \
-      chromium-sandbox=151.0.7922.108-1~deb13u1 \
+      chromium=151.0.7922.137-1~deb13u1 \
+      chromium-common=151.0.7922.137-1~deb13u1 \
+      chromium-sandbox=151.0.7922.137-1~deb13u1 \
       libheif1=1.19.8-1+deb13u1 \
       libheif-plugin-dav1d=1.19.8-1+deb13u1 \
       libheif-plugin-libde265=1.19.8-1+deb13u1; \
@@ -117,5 +117,5 @@ RUN set -eux; \
 LABEL org.opencontainers.image.source="https://github.com/evalops/ghostlight" \
       org.opencontainers.image.description="Ghostlight hardened Neko Chromium 3.1.5 viewer with a native browser-session agent" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.version="neko-v3.1.5-ghostlight.3" \
+      org.opencontainers.image.version="neko-v3.1.5-ghostlight.4" \
       org.opencontainers.image.revision="${GHOSTLIGHT_REVISION}"
