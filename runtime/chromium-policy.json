@@ -40,14 +40,6 @@
   "ExtensionInstallBlocklist": [
     "*"
   ],
-  "ExtensionSettings": {
-    "okabifedphcnokaehflbkmpfphleoaha": {
-      "installation_mode": "force_installed",
-      "minimum_version_required": "0.1.1",
-      "override_update_url": true,
-      "update_url": "http://127.0.0.1:18084/browser-agent-updates.xml"
-    }
-  },
   "NativeMessagingBlocklist": [
     "*"
   ],
