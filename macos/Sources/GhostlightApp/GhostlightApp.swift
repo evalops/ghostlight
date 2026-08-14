@@ -71,7 +71,7 @@ struct ContentView: View {
             Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
 
-            if viewModel.session == nil || viewModel.streamURL == nil {
+            if viewModel.session == nil {
                 connectionView
             } else {
                 browserShell
@@ -428,18 +428,50 @@ struct ContentView: View {
                     onWebContentProcessTerminated: viewModel.viewerProcessTerminated
                 )
 
-                switch viewModel.surfaceState {
-                case .idle, .loadingPage:
-                    surfaceOverlay(title: "Waking your browser", detail: "Connecting the native window to the live session.", progress: true)
-                case .pageReady:
-                    surfaceOverlay(title: "Starting the stream", detail: "The viewer is ready. Waiting for the first decoded frame.", progress: true)
-                case let .failed(message):
-                    surfaceOverlay(title: "Stream unavailable", detail: message, progress: false)
-                case .mediaReady:
-                    if showingHome { nativeHome }
+                if showingHome {
+                    nativeHome
+                } else {
+                    switch viewModel.surfaceState {
+                    case .idle, .loadingPage:
+                        surfaceOverlay(title: "Waking your browser", detail: "Connecting the native window to the live session.", progress: true)
+                    case .pageReady:
+                        surfaceOverlay(title: "Starting the stream", detail: "The viewer is ready. Waiting for the first decoded frame.", progress: true)
+                    case let .failed(message):
+                        streamUnavailableSurface(message)
+                    case .mediaReady:
+                        EmptyView()
+                    }
                 }
             }
+        } else if showingHome {
+            nativeHome
+        } else {
+            streamUnavailableSurface(viewModel.surfaceFailureMessage ?? "The live view is not connected.")
         }
+    }
+
+    private func streamUnavailableSurface(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "rectangle.slash")
+                .font(.system(size: 30))
+                .foregroundStyle(.secondary)
+            Text("Live view unavailable")
+                .font(.title3.weight(.semibold))
+            Text(message)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+            HStack(spacing: 10) {
+                Button("Open Home") { showingHome = true }
+                Button(viewModel.streamRecoveryInProgress ? "Reconnecting…" : "Reconnect Live View") {
+                    viewModel.retryStream()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.streamRecoveryInProgress)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var nativeHome: some View {

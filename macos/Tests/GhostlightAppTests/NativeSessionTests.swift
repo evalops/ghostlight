@@ -735,6 +735,42 @@ final class NativeSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testFailedInitialStreamKeepsSessionAndManualRetryInstallsViewer() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        defaults.set("mac-client-1", forKey: SessionViewModel.clientIDKey)
+        let origin = try ControlPlaneURLValidator.validate("https://control.example.test")
+        let store = InMemoryNativeClientCredentialStore()
+        try store.storeClientToken("native-client-token", for: origin, clientID: "mac-client-1")
+        let service = PairedSessionServiceStub(
+            session: try Self.browserSession(),
+            streamError: .transportFailure
+        )
+        let viewModel = SessionViewModel(
+            client: service,
+            credentialStore: store,
+            defaults: defaults,
+            autoConnect: false
+        )
+        viewModel.controlOrigin = origin.absoluteString
+
+        viewModel.connect()
+        await Self.waitUntil { viewModel.controlState.isConnected && viewModel.surfaceFailureMessage != nil }
+
+        XCTAssertNotNil(viewModel.session)
+        XCTAssertNil(viewModel.stream)
+        XCTAssertEqual(service.streamRequestCount, 1)
+
+        service.allowStreamRecovery()
+        viewModel.retryStream()
+        viewModel.retryStream()
+        await Self.waitUntil { viewModel.stream != nil && !viewModel.streamRecoveryInProgress }
+
+        XCTAssertNotNil(viewModel.viewerBootstrap)
+        XCTAssertEqual(service.streamRequestCount, 2)
+        XCTAssertNil(viewModel.surfaceFailureMessage)
+    }
+
+    @MainActor
     func testLeaseInvalidCommandFailureDoesNotDeleteEnrolledCredential() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
         defaults.set("mac-client-1", forKey: SessionViewModel.clientIDKey)
@@ -1527,11 +1563,12 @@ private final class PairedSessionServiceStub: SessionServicing, @unchecked Senda
     private let redemptionError: SessionClientError?
     private let compensationError: SessionClientError?
     private let selfRevokeError: SessionClientError?
-    private let streamError: SessionClientError?
+    private var streamError: SessionClientError?
     private let commandError: SessionClientError?
     private var capturedAPITokens: [String] = []
     private var capturedCompensatedClientIDs: [String] = []
     private var capturedSelfRevokeTokens: [String] = []
+    private var capturedStreamRequestCount = 0
 
     init(
         session: BrowserSession,
@@ -1563,6 +1600,14 @@ private final class PairedSessionServiceStub: SessionServicing, @unchecked Senda
 
     var selfRevokeTokens: [String] {
         lock.withLock { capturedSelfRevokeTokens }
+    }
+
+    var streamRequestCount: Int {
+        lock.withLock { capturedStreamRequestCount }
+    }
+
+    func allowStreamRecovery() {
+        lock.withLock { streamError = nil }
     }
 
     private func record(_ token: String) throws {
@@ -1693,7 +1738,11 @@ private final class PairedSessionServiceStub: SessionServicing, @unchecked Senda
         clientID: String
     ) async throws -> StreamConnection {
         try record(apiToken)
-        if let streamError { throw streamError }
+        let error = lock.withLock {
+            capturedStreamRequestCount += 1
+            return streamError
+        }
+        if let error { throw error }
         return StreamConnection(
             id: "stream-1",
             url: URL(string: "https://viewer.example.test")!,

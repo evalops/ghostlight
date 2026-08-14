@@ -100,6 +100,7 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var pairingInProgress = false
     @Published private(set) var forgettingPairingInProgress = false
     @Published private(set) var pairingError: String?
+    @Published private(set) var streamRecoveryInProgress = false
 
     static let originKey = "GhostlightControlOrigin"
     static let sessionIDKey = "GhostlightSessionID"
@@ -117,6 +118,7 @@ final class SessionViewModel: ObservableObject {
     private var lifecycleTask: Task<Void, Never>?
     private var leaseTask: Task<Void, Never>?
     private var eventsTask: Task<Void, Never>?
+    private var streamRecoveryTask: Task<Void, Never>?
     private var lifecycleID = UUID()
     private var submissionsByKey: [String: CommandSubmission] = [:]
     private var submissionsByReceiptID: [String: CommandSubmission] = [:]
@@ -189,6 +191,11 @@ final class SessionViewModel: ObservableObject {
     }
 
     var streamURL: URL? { viewerBootstrap?.viewerURL ?? stream?.url }
+
+    var surfaceFailureMessage: String? {
+        guard case let .failed(message) = surfaceState else { return nil }
+        return message
+    }
 
     var shortcuts: [WorkspaceShortcut] { workspacePreferences?.shortcuts ?? [] }
 
@@ -744,14 +751,34 @@ final class SessionViewModel: ObservableObject {
             return
         }
         surfaceState = .loadingPage(url)
-        guard let session,
-              let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else {
+        guard session != nil,
+              (try? ControlPlaneURLValidator.validate(controlOrigin)) != nil else {
             reload()
             return
         }
+        requestFreshStream(reloadLegacyViewer: reload)
+    }
+
+    func retryStream() {
+        requestFreshStream()
+    }
+
+    private func requestFreshStream(reloadLegacyViewer: (() -> Void)? = nil) {
+        guard !streamRecoveryInProgress,
+              let session,
+              let origin = try? ControlPlaneURLValidator.validate(controlOrigin),
+              !authorizationToken.isEmpty else { return }
         let runID = lifecycleID
-        Task { [weak self] in
+        streamRecoveryInProgress = true
+        surfaceState = .loadingPage(streamURL ?? origin)
+        streamRecoveryTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if owns(runID) {
+                    streamRecoveryInProgress = false
+                    streamRecoveryTask = nil
+                }
+            }
             do {
                 let connection = try await client.createStream(
                     at: origin, apiToken: authorizationToken, sessionID: session.id, clientID: clientID
@@ -763,7 +790,7 @@ final class SessionViewModel: ObservableObject {
                 stream = connection
                 viewerBootstrap = bootstrap
                 surfaceState = .loadingPage(bootstrap?.viewerURL ?? connection.url)
-                if bootstrap == nil { reload() }
+                if bootstrap == nil { reloadLegacyViewer?() }
             } catch {
                 guard owns(runID) else { return }
                 if removeEnrolledCredentialIfRejected(error, at: origin) { return }
@@ -1163,9 +1190,12 @@ final class SessionViewModel: ObservableObject {
         lifecycleTask?.cancel()
         leaseTask?.cancel()
         eventsTask?.cancel()
+        streamRecoveryTask?.cancel()
         lifecycleTask = nil
         leaseTask = nil
         eventsTask = nil
+        streamRecoveryTask = nil
+        streamRecoveryInProgress = false
         preferenceWriteTail?.cancel()
         preferenceWriteTail = nil
         lease = nil
