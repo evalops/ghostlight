@@ -4,6 +4,59 @@ import XCTest
 @testable import GhostlightApp
 
 final class ViewerWebViewTests: XCTestCase {
+    func testEmbeddedViewerURLSuppressesNekoChromeWithoutDroppingBootstrapState() throws {
+        let source = try XCTUnwrap(URL(string: "https://viewer.example.test/room?token=scoped&embed=0#live"))
+
+        let embedded = ViewerWebView.embeddedViewerURL(source)
+        let components = try XCTUnwrap(URLComponents(url: embedded, resolvingAgainstBaseURL: false))
+
+        XCTAssertEqual(components.queryItems?.filter { $0.name == "embed" }.map(\.value), ["1"])
+        XCTAssertEqual(components.queryItems?.first { $0.name == "token" }?.value, "scoped")
+        XCTAssertEqual(components.fragment, "live")
+        XCTAssertTrue(EmbeddedViewerSignal.userScript.contains(".header-container,.room-container,.video-menu"))
+    }
+
+    func testContextDockCommandsOnlyInvokeFixedViewerBridgeOperations() {
+        XCTAssertEqual(
+            ViewerWebView.Command(kind: .toggleAudio, sequence: 1).javaScript,
+            "window.__ghostlightBridge?.toggleAudio()"
+        )
+        XCTAssertEqual(
+            ViewerWebView.Command(kind: .focusKeyboard, sequence: 2).javaScript,
+            "window.__ghostlightBridge?.focusKeyboard()"
+        )
+    }
+
+    func testStreamTelemetryStaysHiddenUntilDegradedOrInspected() {
+        let healthy = ViewerWebView.StreamTelemetry(
+            connectionState: "connected", framesDecoded: 50, framesDropped: 0,
+            packetsReceived: 100, packetsLost: 0, roundTripTimeMilliseconds: 12,
+            jitterMilliseconds: 2, frozen: false
+        )
+        let degraded = ViewerWebView.StreamTelemetry(
+            connectionState: "connected", framesDecoded: 40, framesDropped: 2,
+            packetsReceived: 100, packetsLost: 0, roundTripTimeMilliseconds: 12,
+            jitterMilliseconds: 2, frozen: false
+        )
+
+        XCTAssertFalse(ViewerWebView.TelemetryVisibility.isVisible(healthy, inspected: false))
+        XCTAssertTrue(ViewerWebView.TelemetryVisibility.isVisible(healthy, inspected: true))
+        XCTAssertTrue(ViewerWebView.TelemetryVisibility.isVisible(degraded, inspected: false))
+        XCTAssertEqual(degraded.degradationReason, "Dropped frames")
+    }
+
+    func testStreamTelemetryDecodesTypedWebRTCStats() throws {
+        let telemetry = try XCTUnwrap(ViewerWebView.StreamTelemetry.decode([
+            "kind": "telemetry", "connection_state": "connected", "frames_decoded": 49,
+            "frames_dropped": 1, "packets_received": 101, "packets_lost": 0,
+            "round_trip_time_ms": 9, "jitter_ms": 2, "frozen": false,
+        ]))
+
+        XCTAssertEqual(telemetry.framesDecoded, 49)
+        XCTAssertEqual(telemetry.roundTripTimeMilliseconds, 9)
+        XCTAssertFalse(telemetry.isDegraded)
+    }
+
     func testViewerCredentialBuildsAnEphemeralCookieWithoutTheGlobalPassword() throws {
         let expiresAt = Date().addingTimeInterval(30)
         let credential = ViewerCredential(

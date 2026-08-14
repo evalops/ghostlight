@@ -67,6 +67,11 @@ struct ContentView: View {
     @State private var homeQuery = ""
     @State private var newSpaceName = ""
     @State private var nativeClientName = Host.current().localizedName ?? "This Mac"
+    @State private var viewerCommandSequence = 0
+    @State private var viewerCommand: ViewerWebView.Command?
+    @State private var viewerMuted = false
+    @State private var streamTelemetry: ViewerWebView.StreamTelemetry?
+    @State private var showingStreamDetails = false
 
     var body: some View {
         ZStack {
@@ -102,6 +107,11 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.session?.id) { _, sessionID in
             if sessionID != nil { showingHome = true }
+        }
+        .onChange(of: viewModel.streamURL) { _, _ in
+            viewerMuted = false
+            streamTelemetry = nil
+            showingStreamDetails = false
         }
         .onChange(of: viewModel.addressFocusRequest) { _, _ in
             addressFocused = true
@@ -301,9 +311,7 @@ struct ContentView: View {
 
     private var tabStrip: some View {
         HStack(spacing: 5) {
-            brandMark
-                .scaleEffect(0.72)
-                .frame(width: 30)
+            workspaceIdentity
                 .padding(.trailing, 6)
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -399,14 +407,6 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.separator.opacity(0.55)))
             .disabled(!viewModel.canControl)
 
-            Button {
-                showingFileImporter = true
-            } label: {
-                Image(systemName: "paperclip")
-            }
-            .buttonStyle(.plain)
-            .disabled(!viewModel.canControl)
-            .help("Attach file")
         }
         .padding(.horizontal, 14)
         .frame(height: 46)
@@ -436,6 +436,9 @@ struct ContentView: View {
                     onNavigationFailed: viewModel.viewerNavigationFailed,
                     onMediaReady: viewModel.viewerMediaReady,
                     onWebContentProcessTerminated: viewModel.viewerProcessTerminated,
+                    command: viewerCommand,
+                    onAudioStateChanged: { viewerMuted = $0 },
+                    onStreamTelemetry: { streamTelemetry = $0 },
                     authorizePeripheral: viewModel.authorizePeripheral
                 )
                 .allowsHitTesting(!showingHome)
@@ -454,6 +457,12 @@ struct ContentView: View {
                     case .mediaReady:
                         EmptyView()
                     }
+                }
+
+                if !showingHome, case .mediaReady = viewModel.surfaceState {
+                    viewerDock
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(12)
                 }
             }
         } else if showingHome {
@@ -855,6 +864,122 @@ struct ContentView: View {
             Text("Ghostlight")
                 .font(.system(.headline, design: .rounded).weight(.semibold))
         }
+    }
+
+    @ViewBuilder
+    private var workspaceIdentity: some View {
+        if let title = viewModel.workspaceIdentityTitle,
+           let initials = viewModel.workspaceIdentityInitials {
+            HStack(spacing: 7) {
+                Text(initials)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    if let subtitle = viewModel.workspaceIdentitySubtitle {
+                        Text(subtitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Workspace \(title)")
+        } else {
+            Image(systemName: "key.fill")
+                .rotationEffect(.degrees(-90))
+                .foregroundStyle(Color(red: 0.55, green: 0.35, blue: 1))
+                .frame(width: 26, height: 26)
+                .accessibilityLabel("Ghostlight")
+        }
+    }
+
+    private var viewerDock: some View {
+        HStack(spacing: 2) {
+            Button {
+                issueViewerCommand(.toggleAudio)
+            } label: {
+                Image(systemName: viewerMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            }
+            .help(viewerMuted ? "Unmute browser audio" : "Mute browser audio")
+
+            Button {
+                issueViewerCommand(.focusKeyboard)
+            } label: {
+                Image(systemName: "keyboard")
+            }
+            .disabled(!viewModel.canControl)
+            .help("Send keyboard input to the browser")
+
+            Menu {
+                Button("Share a file…") { showingFileImporter = true }
+                    .disabled(!viewModel.canControl)
+                Button("Peripheral access…") { showingPeripheralAccess = true }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Share with this browser")
+
+            Button {
+                showingStreamDetails.toggle()
+            } label: {
+                Image(systemName: streamTelemetry?.isDegraded == true ? "wifi.exclamationmark" : "wifi")
+                    .foregroundStyle(streamTelemetry?.isDegraded == true ? .orange : .primary)
+            }
+            .disabled(streamTelemetry == nil)
+            .help("Stream details")
+            .popover(isPresented: $showingStreamDetails) {
+                streamDetails
+                    .padding(16)
+                    .frame(width: 260)
+            }
+
+            if ViewerWebView.TelemetryVisibility.isVisible(streamTelemetry, inspected: false),
+               let reason = streamTelemetry?.degradationReason {
+                Text(reason)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 7)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(7)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.separator.opacity(0.45)))
+        .shadow(color: .black.opacity(0.14), radius: 12, y: 5)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Browser controls")
+    }
+
+    @ViewBuilder
+    private var streamDetails: some View {
+        if let telemetry = streamTelemetry {
+            VStack(alignment: .leading, spacing: 9) {
+                Text(telemetry.isDegraded ? "Stream needs attention" : "Stream is healthy")
+                    .font(.headline)
+                LabeledContent("Connection", value: telemetry.connectionState.capitalized)
+                if let latency = telemetry.roundTripTimeMilliseconds {
+                    LabeledContent("Round trip", value: "\(latency) ms")
+                }
+                if let jitter = telemetry.jitterMilliseconds {
+                    LabeledContent("Jitter", value: "\(jitter) ms")
+                }
+                LabeledContent("Frames", value: "\(telemetry.framesDecoded) decoded · \(telemetry.framesDropped) dropped")
+                LabeledContent("Packets", value: "\(telemetry.packetsReceived) received · \(telemetry.packetsLost) lost")
+            }
+        }
+    }
+
+    private func issueViewerCommand(_ kind: ViewerWebView.Command.Kind) {
+        viewerCommandSequence &+= 1
+        viewerCommand = ViewerWebView.Command(kind: kind, sequence: viewerCommandSequence)
     }
 
     @ViewBuilder

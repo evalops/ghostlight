@@ -51,6 +51,7 @@ public enum SessionClientError: Error, Equatable, LocalizedError, Sendable {
 }
 
 protocol SessionServicing: Sendable {
+    func listWorkspaces(at origin: URL, apiToken: String) async throws -> [Workspace]
     func createNativeClientEnrollment(at origin: URL, operatorToken: String, clientName: String) async throws -> NativeClientEnrollment
     func redeemNativeClientEnrollment(at origin: URL, pairingCapability: String, clientName: String) async throws -> NativeClientCredential
     func revokeNativeClient(at origin: URL, operatorToken: String, clientID: String) async throws
@@ -87,6 +88,7 @@ protocol SessionServicing: Sendable {
 }
 
 extension SessionServicing {
+    func listWorkspaces(at origin: URL, apiToken: String) async throws -> [Workspace] { [] }
     func listPeripheralGrants(at origin: URL, apiToken: String, workspaceID: String) async throws -> [PeripheralGrant] { [] }
     func createPeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, capability: PeripheralCapability, peripheralOrigin: String, expiresAt: Date) async throws -> PeripheralGrant { throw SessionClientError.invalidResponse }
     func revokePeripheralGrant(at origin: URL, apiToken: String, workspaceID: String, grantID: String) async throws -> PeripheralGrant { throw SessionClientError.invalidResponse }
