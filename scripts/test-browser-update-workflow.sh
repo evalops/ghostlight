@@ -184,8 +184,8 @@ grep -Fq -- 'python3 tests/acceptance/test_audit_screenshots.py' "$ci_workflow" 
   printf 'CI does not run the screenshot-audit regression suite\n' >&2
   exit 1
 }
-grep -Fq -- 'sudo apt-get install --yes tesseract-ocr' "$buildkite_pipeline" || {
-  printf 'Buildkite does not install the fail-closed screenshot OCR dependency\n' >&2
+grep -Fq -- 'python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7' "$buildkite_pipeline" || {
+  printf 'Buildkite does not pin the fail-closed screenshot OCR container\n' >&2
   exit 1
 }
 grep -Fq -- 'python3 tests/acceptance/test_audit_screenshots.py' "$buildkite_pipeline" || {
@@ -201,14 +201,14 @@ grep -Fq -- 'queue: "hetzner-linux-heavy"' "$buildkite_pipeline" || {
   printf 'Buildkite Linux validation does not target the self-hosted heavy queue\n' >&2
   exit 1
 }
-grep -A5 -F -- 'key: "harnesses"' "$buildkite_pipeline" | grep -Fq -- 'queue: "hetzner-linux-medium"' || {
-  printf 'Buildkite OCR harness does not target the package-capable self-hosted medium queue\n' >&2
+grep -Fq -- 'timeout --signal=TERM --kill-after=10s 5m docker run --rm' "$buildkite_pipeline" || {
+  printf 'Buildkite OCR container lacks a command-level deadline\n' >&2
   exit 1
 }
-grep -A3 -F -- 'key: "harnesses"' "$buildkite_pipeline" | grep -Fq -- 'priority: 100' || {
-  printf 'Buildkite OCR harness lacks migration priority on the constrained queue\n' >&2
+if grep -Fq -- 'sudo apt-get' "$buildkite_pipeline"; then
+  printf 'Buildkite must not require host sudo for OCR validation\n' >&2
   exit 1
-}
+fi
 grep -Fq -- 'build.env("GHOSTLIGHT_ENABLE_MACOS_CI") == "true"' "$buildkite_pipeline" || {
   printf 'Buildkite macOS validation lacks an explicit opt-in gate\n' >&2
   exit 1
