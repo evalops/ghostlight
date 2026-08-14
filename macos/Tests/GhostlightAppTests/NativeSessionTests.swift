@@ -311,7 +311,7 @@ final class NativeSessionTests: XCTestCase {
         NativeSessionURLProtocol.requestHandler = { request in
             XCTAssertEqual(
                 request.url?.absoluteString,
-                "https://control.example.test/v1/sessions/session-1/events?after_revision=7"
+                "https://control.example.test/v1/sessions/session-1/events?after_revision=7&wait_ms=10000"
             )
             return (Self.response(for: request, status: 204), Data())
         }
@@ -320,7 +320,8 @@ final class NativeSessionTests: XCTestCase {
             at: try XCTUnwrap(URL(string: "https://control.example.test")),
             apiToken: "api-secret",
             sessionID: "session-1",
-            afterRevision: 7
+            afterRevision: 7,
+            waitMilliseconds: 10_000
         )
 
         XCTAssertNil(result)
@@ -1006,6 +1007,7 @@ final class NativeSessionTests: XCTestCase {
         let handoff = try SessionJSON.decoder.decode(ChromeHandoff.self, from: Data(Self.chromeHandoffJSON.utf8))
 
         viewModel.openChromeHandoff(handoff)
+        XCTAssertEqual(viewModel.openingChromeHandoffIDs, ["handoff-1"])
         await service.waitForCommandCount(1)
         await service.waitForHandoffUpdateCount(1)
 
@@ -1013,6 +1015,7 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(service.commandSubmissions[0].command.type, .newTab)
         XCTAssertEqual(service.commandSubmissions[0].command.url, "https://example.test/work")
         XCTAssertEqual(service.handoffUpdates, ["handoff-1:opened"])
+        XCTAssertTrue(viewModel.openingChromeHandoffIDs.isEmpty)
     }
 
     @MainActor
@@ -1678,7 +1681,8 @@ private final class PairedSessionServiceStub: SessionServicing, @unchecked Senda
         at origin: URL,
         apiToken: String,
         sessionID: String,
-        afterRevision: Int
+        afterRevision: Int,
+        waitMilliseconds: Int
     ) async throws -> BrowserSession? {
         try record(apiToken)
         return nil
@@ -1944,7 +1948,7 @@ private final class NativeSessionServiceStub: SessionServicing, @unchecked Senda
     func revokeCurrentNativeClient(at origin: URL, clientToken: String) async throws { fatalError() }
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession { fatalError() }
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession { fatalError() }
-    func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int) async throws -> BrowserSession? { nil }
+    func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int, waitMilliseconds: Int) async throws -> BrowserSession? { nil }
     func acquireLease(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> ControllerLease { fatalError() }
     func renewLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws -> ControllerLease { fatalError() }
     func releaseLease(at origin: URL, apiToken: String, sessionID: String, leaseID: String, token: String) async throws {}

@@ -92,6 +92,7 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var chromeDevices: [ChromeDevice] = []
     @Published private(set) var chromePairing: ChromePairing?
     @Published private(set) var chromeSyncError: String?
+    @Published private(set) var openingChromeHandoffIDs: Set<String> = []
     @Published private(set) var preferencesError: String?
     @Published private(set) var commandError: String?
     @Published private(set) var commandStatus: CommandStatus = .idle
@@ -118,6 +119,7 @@ final class SessionViewModel: ObservableObject {
     private var lifecycleTask: Task<Void, Never>?
     private var leaseTask: Task<Void, Never>?
     private var eventsTask: Task<Void, Never>?
+    private var chromeSyncTask: Task<Void, Never>?
     private var streamRecoveryTask: Task<Void, Never>?
     private var lifecycleID = UUID()
     private var submissionsByKey: [String: CommandSubmission] = [:]
@@ -176,6 +178,7 @@ final class SessionViewModel: ObservableObject {
         lifecycleTask?.cancel()
         leaseTask?.cancel()
         eventsTask?.cancel()
+        chromeSyncTask?.cancel()
         preferenceWriteTail?.cancel()
     }
 
@@ -277,6 +280,7 @@ final class SessionViewModel: ObservableObject {
                 await loadChromeDevices(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 guard owns(runID) else { return }
                 startEvents(at: origin, apiToken: authorizationToken, sessionID: browser.id, runID: runID)
+                startChromeSync(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID, runID: runID)
 
                 do {
                     let connection = try await client.createStream(at: origin, apiToken: authorizationToken, sessionID: browser.id, clientID: clientID)
@@ -461,6 +465,7 @@ final class SessionViewModel: ObservableObject {
         viewerBootstrap = nil
         workspacePreferences = nil
         chromeHandoffs = []
+        openingChromeHandoffIDs = []
         chromeBookmarks = []
         chromeReadingList = []
         chromeDevices = []
@@ -599,8 +604,11 @@ final class SessionViewModel: ObservableObject {
     }
 
     func openChromeHandoff(_ handoff: ChromeHandoff) {
-        guard handoff.state == "pending",
+        guard canControl,
+              handoff.state == "pending",
+              !openingChromeHandoffIDs.contains(handoff.id),
               WorkspacePreferences.safeRecentURL(handoff.url) != nil else { return }
+        openingChromeHandoffIDs.insert(handoff.id)
         let command = BrowserCommand(
             type: .newTab,
             url: handoff.url,
@@ -848,6 +856,7 @@ final class SessionViewModel: ObservableObject {
                 accept(receipt, submission: submission)
             } catch {
                 if removeEnrolledCredentialIfRejected(error, at: context.origin) { return }
+                if let handoffID = submission.handoffID { openingChromeHandoffIDs.remove(handoffID) }
                 submissionsByKey.removeValue(forKey: submission.idempotencyKey)
                 failedSubmission = submission
                 failedSubmissionIsTerminal = false
@@ -886,6 +895,7 @@ final class SessionViewModel: ObservableObject {
         case .failed:
             failedSubmission = submission ?? submissionsByReceiptID[receipt.id]
             failedSubmissionIsTerminal = true
+            if let handoffID = resolvedSubmission?.handoffID { openingChromeHandoffIDs.remove(handoffID) }
         }
         updateCommandStatus()
     }
@@ -1018,9 +1028,11 @@ final class SessionViewModel: ObservableObject {
                     state: state
                 )
                 chromeHandoffs.removeAll { $0.id == handoffID }
+                openingChromeHandoffIDs.remove(handoffID)
                 chromeSyncError = nil
             } catch let error as SessionClientError where error.statusCode == 409 {
                 chromeHandoffs.removeAll { $0.id == handoffID }
+                openingChromeHandoffIDs.remove(handoffID)
             } catch {
                 if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                 chromeSyncError = error.localizedDescription
@@ -1090,7 +1102,6 @@ final class SessionViewModel: ObservableObject {
         eventsTask?.cancel()
         eventsTask = Task { [weak self] in
             guard let self else { return }
-            var pollCount = 0
             while owns(runID), !Task.isCancelled {
                 do {
                     let revision = session?.revision ?? 0
@@ -1098,23 +1109,33 @@ final class SessionViewModel: ObservableObject {
                         at: origin,
                         apiToken: apiToken,
                         sessionID: sessionID,
-                        afterRevision: revision
+                        afterRevision: revision,
+                        waitMilliseconds: 10_000
                     ) {
                         apply(updated)
                     }
-                    pollCount += 1
-                    if pollCount.isMultiple(of: 8), let workspaceID = session?.workspaceID {
-                        await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: workspaceID)
-                    }
-                    if pollCount.isMultiple(of: 32), let workspaceID = session?.workspaceID {
-                        await loadChromeLibrary(at: origin, apiToken: apiToken, workspaceID: workspaceID)
-                    }
-                    try await Task.sleep(for: .milliseconds(250))
                 } catch is CancellationError {
                     return
                 } catch {
                     if removeEnrolledCredentialIfRejected(error, at: origin) { return }
                     try? await Task.sleep(for: .seconds(1))
+                }
+            }
+        }
+    }
+
+    private func startChromeSync(at origin: URL, apiToken: String, workspaceID: String, runID: UUID) {
+        chromeSyncTask?.cancel()
+        chromeSyncTask = Task { [weak self] in
+            guard let self else { return }
+            var refreshCount = 0
+            while owns(runID), !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard owns(runID), !Task.isCancelled else { return }
+                await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+                refreshCount += 1
+                if refreshCount.isMultiple(of: 4) {
+                    await loadChromeLibrary(at: origin, apiToken: apiToken, workspaceID: workspaceID)
                 }
             }
         }
@@ -1190,10 +1211,12 @@ final class SessionViewModel: ObservableObject {
         lifecycleTask?.cancel()
         leaseTask?.cancel()
         eventsTask?.cancel()
+        chromeSyncTask?.cancel()
         streamRecoveryTask?.cancel()
         lifecycleTask = nil
         leaseTask = nil
         eventsTask = nil
+        chromeSyncTask = nil
         streamRecoveryTask = nil
         streamRecoveryInProgress = false
         preferenceWriteTail?.cancel()

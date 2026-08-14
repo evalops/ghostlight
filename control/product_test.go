@@ -463,6 +463,15 @@ func TestSessionCreateIdempotencyEventsAndStrictJSON(t *testing.T) {
 	if unchanged.Code != http.StatusNoContent {
 		t.Fatalf("unchanged events = %d %s", unchanged.Code, unchanged.Body.String())
 	}
+	started := time.Now()
+	waited := doJSON(t, h, http.MethodGet, fmt.Sprintf("/v1/sessions/%s/events?after_revision=%d&wait_ms=75", created.ID, created.Revision), "", "", nil)
+	if waited.Code != http.StatusNoContent || time.Since(started) < 50*time.Millisecond {
+		t.Fatalf("waited events = %d after %s, want bounded wait", waited.Code, time.Since(started))
+	}
+	invalidWait := doJSON(t, h, http.MethodGet, fmt.Sprintf("/v1/sessions/%s/events?after_revision=%d&wait_ms=10001", created.ID, created.Revision), "", "", nil)
+	if invalidWait.Code != http.StatusBadRequest {
+		t.Fatalf("invalid wait = %d %s", invalidWait.Code, invalidWait.Body.String())
+	}
 	bad := doJSON(t, h, http.MethodPost, "/v1/sessions", "create-2", "", strings.NewReader(`{"workspace_id":"default","name":"x"}`))
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("unknown JSON field = %d %s", bad.Code, bad.Body.String())

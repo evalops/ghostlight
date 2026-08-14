@@ -575,12 +575,13 @@ struct ContentView: View {
                                 Spacer()
                                 Button("Dismiss") { viewModel.dismissChromeHandoff(handoff) }
                                     .buttonStyle(.borderless)
-                                Button("Open") {
+                                    .disabled(viewModel.openingChromeHandoffIDs.contains(handoff.id))
+                                Button(viewModel.openingChromeHandoffIDs.contains(handoff.id) ? "Opening…" : "Open") {
                                     viewModel.openChromeHandoff(handoff)
                                     showingHome = false
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .disabled(!viewModel.canControl)
+                                .disabled(!viewModel.canControl || viewModel.openingChromeHandoffIDs.contains(handoff.id))
                             }
                             .padding(12)
                             .background(Color(nsColor: .controlBackgroundColor))
