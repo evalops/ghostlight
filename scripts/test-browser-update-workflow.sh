@@ -205,6 +205,10 @@ grep -A5 -F -- 'key: "harnesses"' "$buildkite_pipeline" | grep -Fq -- 'queue: "h
   printf 'Buildkite OCR harness does not target the package-capable self-hosted medium queue\n' >&2
   exit 1
 }
+grep -A3 -F -- 'key: "harnesses"' "$buildkite_pipeline" | grep -Fq -- 'priority: 100' || {
+  printf 'Buildkite OCR harness lacks migration priority on the constrained queue\n' >&2
+  exit 1
+}
 grep -Fq -- 'build.env("GHOSTLIGHT_ENABLE_MACOS_CI") == "true"' "$buildkite_pipeline" || {
   printf 'Buildkite macOS validation lacks an explicit opt-in gate\n' >&2
   exit 1

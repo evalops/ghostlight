@@ -71,6 +71,7 @@ steps:
 
       - label: ":test_tube: Deterministic harnesses"
         key: "harnesses"
+        priority: 100
         timeout_in_minutes: 60
         agents:
           queue: "hetzner-linux-medium"
