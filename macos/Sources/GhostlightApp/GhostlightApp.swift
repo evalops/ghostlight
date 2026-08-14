@@ -105,6 +105,7 @@ struct ContentView: View {
         .onChange(of: viewModel.controlOrigin) { _, _ in
             viewModel.refreshPairingStatus()
         }
+        .onOpenURL { viewModel.handleExternalURL($0) }
     }
 
     private var connectionView: some View {
@@ -534,7 +535,7 @@ struct ContentView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("Spaces")
+                        Text("Resume")
                             .font(.headline)
                         Spacer()
                         TextField("New space", text: $newSpaceName)
@@ -562,7 +563,7 @@ struct ContentView: View {
                             if space.state == "active" {
                                 Button("Update") { Task { await viewModel.parkActivitySpace(space) } }
                             } else {
-                                Button("Open") {
+                                Button("Resume") {
                                     Task { await viewModel.activateActivitySpace(space) }
                                     showingHome = false
                                 }
@@ -597,7 +598,7 @@ struct ContentView: View {
                 if !viewModel.chromeHandoffs.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("From Chrome")
+                            Text("Send")
                                 .font(.headline)
                             Spacer()
                             Text("Opens only when you choose")
@@ -635,17 +636,24 @@ struct ContentView: View {
                 }
 
                 if !viewModel.chromeBookmarks.isEmpty || !viewModel.chromeReadingList.isEmpty {
-                    HStack(alignment: .top, spacing: 28) {
-                        chromeLibraryColumn(
-                            title: "Chrome bookmarks",
-                            symbol: "bookmark",
-                            items: Array(viewModel.chromeBookmarks.prefix(6))
-                        )
-                        chromeLibraryColumn(
-                            title: "Reading List",
-                            symbol: "text.book.closed",
-                            items: Array(viewModel.chromeReadingList.filter { !$0.read }.prefix(6))
-                        )
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Browse")
+                            .font(.headline)
+                        Text("Chrome remains the source. Selecting an item sends its safe destination to Ghostlight.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(alignment: .top, spacing: 28) {
+                            chromeLibraryColumn(
+                                title: "Chrome bookmarks",
+                                symbol: "bookmark",
+                                items: Array(viewModel.chromeBookmarks.prefix(6))
+                            )
+                            chromeLibraryColumn(
+                                title: "Reading List",
+                                symbol: "text.book.closed",
+                                items: Array(viewModel.chromeReadingList.filter { !$0.read }.prefix(6))
+                            )
+                        }
                     }
                 }
 

@@ -355,6 +355,106 @@ func TestActivitySpacesCaptureParkActivateAndAuthorization(t *testing.T) {
 	}
 }
 
+func TestTypedContinuityRoutesResumeBrowseAndSend(t *testing.T) {
+	now := time.Date(2026, 8, 13, 20, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	lease := acquireLease(t, h, "default")
+	heartbeat := doJSON(t, h, http.MethodPost, "/v1/bridge/heartbeat", "", h.config.BridgeToken, strings.NewReader(`{"session_id":"default","sequence":1,"agent_version":"test","tabs":[{"id":"safe","title":"Private title","url":"https://example.test/work","active":true,"loading":false,"audible":false,"discarded":false,"window_id":1,"index":0}],"active_tab_id":"safe","runtime_state":"ready"}`))
+	var session BrowserSession
+	decodeRecorder(t, heartbeat, &session)
+
+	spaceBody := fmt.Sprintf(`{"name":"Research","session_id":"default","expected_revision":%d}`, session.Revision)
+	created := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/spaces", "continuity-space", lease.Token, strings.NewReader(spaceBody))
+	var space ActivitySpace
+	decodeRecorder(t, created, &space)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create continuity space = %d %s", created.Code, created.Body.String())
+	}
+
+	overview := doJSON(t, h, http.MethodGet, "/v1/workspaces/default/continuity", "", "", nil)
+	var inventory ContinuityOverview
+	decodeRecorder(t, overview, &inventory)
+	if overview.Code != http.StatusOK || len(inventory.Resume) != 1 || inventory.Resume[0].ID != space.ID || inventory.Browse.Authority != "chrome_snapshot" || inventory.Browse.Bookmarks == nil || inventory.Browse.ReadingList == nil || inventory.Send == nil {
+		t.Fatalf("continuity overview = %d %#v", overview.Code, inventory)
+	}
+
+	current := doJSON(t, h, http.MethodGet, "/v1/sessions/default", "", "", nil)
+	decodeRecorder(t, current, &session)
+	expires := now.Add(5 * time.Minute).Format(time.RFC3339)
+	sendBody := fmt.Sprintf(`{"verb":"send","adapter":"url_handler","session_id":"default","expected_revision":%d,"expires_at":%q,"url":"https://example.test/sent"}`, session.Revision, expires)
+	sent := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/continuity", "continuity-send", lease.Token, strings.NewReader(sendBody))
+	var sendReceipt ContinuityIntentReceipt
+	decodeRecorder(t, sent, &sendReceipt)
+	if sent.Code != http.StatusAccepted || sendReceipt.Verb != "send" || sendReceipt.Adapter != "url_handler" || sendReceipt.Authority != "ghostlight_session" || sendReceipt.Command.Type != "create_tab" || sendReceipt.Command.ContinuityVerb != "send" || sendReceipt.Command.ContinuityAdapter != "url_handler" || sendReceipt.Command.ContinuityExpiry == nil {
+		t.Fatalf("send receipt = %d %#v", sent.Code, sendReceipt)
+	}
+	retried := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/continuity", "continuity-send", lease.Token, strings.NewReader(sendBody))
+	var retryReceipt ContinuityIntentReceipt
+	decodeRecorder(t, retried, &retryReceipt)
+	if retried.Code != http.StatusOK || retryReceipt.Command.ID != sendReceipt.Command.ID {
+		t.Fatalf("idempotent send = %d %#v", retried.Code, retryReceipt)
+	}
+	bridge := doJSON(t, h, http.MethodGet, "/v1/bridge/commands?session_id=default&after=0", "", h.config.BridgeToken, nil)
+	if bridge.Code != http.StatusOK || !strings.Contains(bridge.Body.String(), `"continuity_verb":"send"`) || !strings.Contains(bridge.Body.String(), `"continuity_adapter":"url_handler"`) {
+		t.Fatalf("continuity provenance missing from durable command = %d %s", bridge.Code, bridge.Body.String())
+	}
+
+	unsafeBody := fmt.Sprintf(`{"verb":"send","adapter":"native_ui","session_id":"default","expected_revision":%d,"expires_at":%q,"url":"https://example.test/?access_token=secret"}`, session.Revision+1, expires)
+	unsafe := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/continuity", "continuity-unsafe", lease.Token, strings.NewReader(unsafeBody))
+	if unsafe.Code != http.StatusBadRequest || !strings.Contains(unsafe.Body.String(), "unsafe_url") {
+		t.Fatalf("unsafe send = %d %s", unsafe.Code, unsafe.Body.String())
+	}
+	expiredBody := fmt.Sprintf(`{"verb":"send","adapter":"native_ui","session_id":"default","expected_revision":%d,"expires_at":%q,"url":"https://example.test"}`, session.Revision+1, now.Add(-time.Second).Format(time.RFC3339))
+	expired := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/continuity", "continuity-expired", lease.Token, strings.NewReader(expiredBody))
+	if expired.Code != http.StatusBadRequest {
+		t.Fatalf("expired send = %d %s", expired.Code, expired.Body.String())
+	}
+
+	current = doJSON(t, h, http.MethodGet, "/v1/sessions/default", "", "", nil)
+	decodeRecorder(t, current, &session)
+	resumeBody := fmt.Sprintf(`{"verb":"resume","adapter":"native_ui","session_id":"default","expected_revision":%d,"expires_at":%q,"space_id":%q}`, session.Revision, expires, space.ID)
+	resumed := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/continuity", "continuity-resume", lease.Token, strings.NewReader(resumeBody))
+	var resumeReceipt ContinuityIntentReceipt
+	decodeRecorder(t, resumed, &resumeReceipt)
+	if resumed.Code != http.StatusAccepted || resumeReceipt.Verb != "resume" || resumeReceipt.Space == nil || resumeReceipt.Space.ID != space.ID || resumeReceipt.Command.Type != "restore_space" || resumeReceipt.Command.SpaceID != space.ID {
+		t.Fatalf("resume receipt = %d %#v", resumed.Code, resumeReceipt)
+	}
+
+	browseMutation := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/continuity", "continuity-browse", lease.Token, strings.NewReader(fmt.Sprintf(`{"verb":"browse","adapter":"native_ui","session_id":"default","expected_revision":%d,"expires_at":%q}`, session.Revision+1, expires)))
+	if browseMutation.Code != http.StatusBadRequest {
+		t.Fatalf("browse mutation = %d %s", browseMutation.Code, browseMutation.Body.String())
+	}
+	directMetadata := doJSON(t, h, http.MethodPost, "/v1/sessions/default/commands", "forged-continuity", lease.Token, strings.NewReader(fmt.Sprintf(`{"type":"create_tab","url":"https://example.test","expected_revision":%d,"continuity_verb":"send"}`, session.Revision+1)))
+	if directMetadata.Code != http.StatusBadRequest {
+		t.Fatalf("forged continuity metadata = %d %s", directMetadata.Code, directMetadata.Body.String())
+	}
+}
+
+func TestTypedContinuityExpiresQueuedIntentServerSide(t *testing.T) {
+	now := time.Date(2026, 8, 13, 20, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+	lease := acquireLease(t, h, "default")
+	current := doJSON(t, h, http.MethodGet, "/v1/sessions/default", "", "", nil)
+	var session BrowserSession
+	decodeRecorder(t, current, &session)
+	body := fmt.Sprintf(`{"verb":"send","adapter":"share","session_id":"default","expected_revision":%d,"expires_at":%q,"url":"https://example.test/shared"}`, session.Revision, now.Add(5*time.Minute).Format(time.RFC3339))
+	queued := doJSON(t, h, http.MethodPost, "/v1/workspaces/default/continuity", "continuity-expiry", lease.Token, strings.NewReader(body))
+	if queued.Code != http.StatusAccepted {
+		t.Fatalf("queue expiring continuity = %d %s", queued.Code, queued.Body.String())
+	}
+
+	now = now.Add(6 * time.Minute)
+	current = doJSON(t, h, http.MethodGet, "/v1/sessions/default", "", "", nil)
+	decodeRecorder(t, current, &session)
+	if len(session.CommandReceipts) != 1 || session.CommandReceipts[0].State != "failed" || session.CommandReceipts[0].ErrorCode != "continuity_intent_expired" || session.CommandReceipts[0].CompletedAt == nil {
+		t.Fatalf("expired continuity receipt = %#v", session.CommandReceipts)
+	}
+	commands := doJSON(t, h, http.MethodGet, "/v1/bridge/commands?session_id=default&after=0", "", h.config.BridgeToken, nil)
+	if commands.Code != http.StatusOK || strings.Contains(commands.Body.String(), `"continuity_verb":"send"`) {
+		t.Fatalf("expired continuity remained executable = %d %s", commands.Code, commands.Body.String())
+	}
+}
+
 func TestSchemaFiveMigrationRollsBackNativeClientBinding(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")

@@ -277,10 +277,8 @@ final class SessionViewModel: ObservableObject {
                 defaults.set(browser.id, forKey: Self.sessionIDKey)
                 apply(browser)
                 await loadWorkspacePreferences(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
-                await loadChromeHandoffs(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
-                await loadChromeLibrary(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
+                await loadContinuity(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 await loadChromeDevices(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
-                await loadActivitySpaces(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 guard owns(runID) else { return }
                 startEvents(at: origin, apiToken: authorizationToken, sessionID: browser.id, runID: runID)
                 startChromeSync(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID, runID: runID)
@@ -556,7 +554,7 @@ final class SessionViewModel: ObservableObject {
     func retryFailedCommand() {
         guard let failedSubmission, canControl else { return }
         if !failedSubmissionIsTerminal {
-            submit(failedSubmission)
+            if failedSubmission.continuity != nil { submitContinuity(failedSubmission) } else { submit(failedSubmission) }
             return
         }
         let failedCommand = failedSubmission.command
@@ -567,11 +565,15 @@ final class SessionViewModel: ObservableObject {
             attachmentID: failedCommand.attachmentID,
             expectedRevision: session?.revision ?? failedCommand.expectedRevision
         )
-        submit(CommandSubmission(
+        let submission = CommandSubmission(
             idempotencyKey: UUID().uuidString.lowercased(),
             command: retry,
-            handoffID: failedSubmission.handoffID
-        ))
+            handoffID: failedSubmission.handoffID,
+            continuity: failedSubmission.continuity.map {
+                ContinuitySubmission(verb: $0.verb, adapter: $0.adapter, expiresAt: now().addingTimeInterval(5 * 60), spaceID: $0.spaceID, url: $0.url)
+            }
+        )
+        if submission.continuity != nil { submitContinuity(submission) } else { submit(submission) }
     }
 
     func navigate() {
@@ -613,15 +615,11 @@ final class SessionViewModel: ObservableObject {
               !openingChromeHandoffIDs.contains(handoff.id),
               WorkspacePreferences.safeRecentURL(handoff.url) != nil else { return }
         openingChromeHandoffIDs.insert(handoff.id)
-        let command = BrowserCommand(
-            type: .newTab,
-            url: handoff.url,
-            expectedRevision: session?.revision ?? 0
-        )
-        submit(CommandSubmission(
+        submitContinuity(CommandSubmission(
             idempotencyKey: "chrome-handoff-\(handoff.id)",
-            command: command,
-            handoffID: handoff.id
+            command: BrowserCommand(type: .newTab, url: handoff.url, expectedRevision: session?.revision ?? 0),
+            handoffID: handoff.id,
+            continuity: ContinuitySubmission(verb: .send, adapter: .chromeExtension, expiresAt: now().addingTimeInterval(5 * 60), spaceID: nil, url: handoff.url)
         ))
     }
 
@@ -632,9 +630,10 @@ final class SessionViewModel: ObservableObject {
     func openChromeLibraryItem(_ item: ChromeLibraryItem) {
         guard let url = item.url,
               WorkspacePreferences.safeRecentURL(url) != nil else { return }
-        submit(CommandSubmission(
+        submitContinuity(CommandSubmission(
             idempotencyKey: "chrome-library-\(UUID().uuidString)",
-            command: BrowserCommand(type: .newTab, url: url, expectedRevision: session?.revision ?? 0)
+            command: BrowserCommand(type: .newTab, url: url, expectedRevision: session?.revision ?? 0),
+            continuity: ContinuitySubmission(verb: .send, adapter: .nativeUI, expiresAt: now().addingTimeInterval(5 * 60), spaceID: nil, url: url)
         ))
     }
 
@@ -672,17 +671,26 @@ final class SessionViewModel: ObservableObject {
     }
 
     func activateActivitySpace(_ space: ActivitySpace) async {
-        guard let context = activitySpaceContext else { return }
-        do {
-            let activation = try await client.activateActivitySpace(
-                at: context.origin, apiToken: context.apiToken, workspaceID: context.workspaceID,
-                spaceID: space.id, sessionID: context.sessionID, leaseToken: context.leaseToken,
-                idempotencyKey: "space-activate-\(UUID().uuidString.lowercased())", expectedRevision: context.revision
-            )
-            accept(activation.command, submission: nil)
-        } catch {
-            commandError = error.localizedDescription
+        guard let session else { return }
+        submitContinuity(CommandSubmission(
+            idempotencyKey: "continuity-resume-\(UUID().uuidString.lowercased())",
+            command: BrowserCommand(type: .restoreSpace, expectedRevision: session.revision),
+            continuity: ContinuitySubmission(verb: .resume, adapter: .nativeUI, expiresAt: now().addingTimeInterval(5 * 60), spaceID: space.id, url: nil)
+        ))
+    }
+
+    func handleExternalURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "ghostlight", url.host?.lowercased() == "send",
+              let value = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "url" })?.value,
+              let safeURL = WorkspacePreferences.safeRecentURL(value), let session else {
+            commandError = "Ghostlight links must contain one safe HTTP or HTTPS destination."
+            return
         }
+        submitContinuity(CommandSubmission(
+            idempotencyKey: "continuity-url-\(UUID().uuidString.lowercased())",
+            command: BrowserCommand(type: .newTab, url: safeURL, expectedRevision: session.revision),
+            continuity: ContinuitySubmission(verb: .send, adapter: .urlHandler, expiresAt: now().addingTimeInterval(5 * 60), spaceID: nil, url: safeURL)
+        ))
     }
 
     func refreshChromeDevices() async {
@@ -917,6 +925,43 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    private func submitContinuity(_ submission: CommandSubmission) {
+        guard let continuity = submission.continuity, let context = activitySpaceContext else { return }
+        commandError = nil
+        failedSubmission = nil
+        failedSubmissionIsTerminal = false
+        submissionsByKey[submission.idempotencyKey] = submission
+        updateCommandStatus()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let receipt = try await client.submitContinuity(
+                    at: context.origin,
+                    apiToken: context.apiToken,
+                    workspaceID: context.workspaceID,
+                    sessionID: context.sessionID,
+                    leaseToken: context.leaseToken,
+                    idempotencyKey: submission.idempotencyKey,
+                    verb: continuity.verb,
+                    adapter: continuity.adapter,
+                    expiresAt: continuity.expiresAt,
+                    expectedRevision: submission.command.expectedRevision,
+                    spaceID: continuity.spaceID,
+                    url: continuity.url
+                )
+                accept(receipt.command, submission: submission)
+            } catch {
+                if removeEnrolledCredentialIfRejected(error, at: context.origin) { return }
+                if let handoffID = submission.handoffID { openingChromeHandoffIDs.remove(handoffID) }
+                submissionsByKey.removeValue(forKey: submission.idempotencyKey)
+                failedSubmission = submission
+                failedSubmissionIsTerminal = false
+                commandError = error.localizedDescription
+                commandStatus = .failed(code: "request_failed", message: error.localizedDescription)
+            }
+        }
+    }
+
     private func accept(_ receipt: CommandReceipt, submission: CommandSubmission?) {
         let previousState = receiptsByID[receipt.id]?.state
         let resolvedSubmission = submission ?? submissionsByReceiptID[receipt.id]
@@ -1005,37 +1050,14 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
-    private func loadChromeHandoffs(at origin: URL, apiToken: String, workspaceID: String) async {
+    private func loadContinuity(at origin: URL, apiToken: String, workspaceID: String) async {
         do {
-            let values = try await client.listChromeHandoffs(
-                at: origin,
-                apiToken: apiToken,
-                workspaceID: workspaceID
-            )
+            let overview = try await client.getContinuity(at: origin, apiToken: apiToken, workspaceID: workspaceID)
             guard session?.workspaceID == workspaceID else { return }
-            chromeHandoffs = values
-            chromeSyncError = nil
-        } catch is CancellationError {
-            return
-        } catch {
-            guard session?.workspaceID == workspaceID else { return }
-            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
-            chromeSyncError = error.localizedDescription
-        }
-    }
-
-    private func loadChromeLibrary(at origin: URL, apiToken: String, workspaceID: String) async {
-        do {
-            async let bookmarks = client.listChromeLibrary(
-                at: origin, apiToken: apiToken, workspaceID: workspaceID, kind: "bookmark"
-            )
-            async let readingList = client.listChromeLibrary(
-                at: origin, apiToken: apiToken, workspaceID: workspaceID, kind: "reading_list"
-            )
-            let (bookmarkValues, readingValues) = try await (bookmarks, readingList)
-            guard session?.workspaceID == workspaceID else { return }
-            chromeBookmarks = bookmarkValues.filter { $0.url != nil }
-            chromeReadingList = readingValues.filter { $0.url != nil }
+            activitySpaces = overview.resume
+            chromeBookmarks = overview.browse.bookmarks.filter { $0.url != nil }
+            chromeReadingList = overview.browse.readingList.filter { $0.url != nil }
+            chromeHandoffs = overview.send
             chromeSyncError = nil
         } catch is CancellationError {
             return
@@ -1062,19 +1084,6 @@ final class SessionViewModel: ObservableObject {
             guard session?.workspaceID == workspaceID else { return }
             if removeEnrolledCredentialIfRejected(error, at: origin) { return }
             chromeSyncError = error.localizedDescription
-        }
-    }
-
-    private func loadActivitySpaces(at origin: URL, apiToken: String, workspaceID: String) async {
-        do {
-            let values = try await client.listActivitySpaces(at: origin, apiToken: apiToken, workspaceID: workspaceID)
-            guard session?.workspaceID == workspaceID else { return }
-            activitySpaces = values
-        } catch is CancellationError {
-            return
-        } catch {
-            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
-            commandError = error.localizedDescription
         }
     }
 
@@ -1209,11 +1218,9 @@ final class SessionViewModel: ObservableObject {
             while owns(runID), !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard owns(runID), !Task.isCancelled else { return }
-                await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: workspaceID)
-                await loadActivitySpaces(at: origin, apiToken: apiToken, workspaceID: workspaceID)
                 refreshCount += 1
-                if refreshCount.isMultiple(of: 4) {
-                    await loadChromeLibrary(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+                if refreshCount == 1 || refreshCount.isMultiple(of: 4) {
+                    await loadContinuity(at: origin, apiToken: apiToken, workspaceID: workspaceID)
                 }
             }
         }
@@ -1312,10 +1319,20 @@ private struct CommandSubmission: Equatable {
     let idempotencyKey: String
     let command: BrowserCommand
     let handoffID: String?
+    let continuity: ContinuitySubmission?
 
-    init(idempotencyKey: String, command: BrowserCommand, handoffID: String? = nil) {
+    init(idempotencyKey: String, command: BrowserCommand, handoffID: String? = nil, continuity: ContinuitySubmission? = nil) {
         self.idempotencyKey = idempotencyKey
         self.command = command
         self.handoffID = handoffID
+        self.continuity = continuity
     }
+}
+
+private struct ContinuitySubmission: Equatable {
+    let verb: ContinuityVerb
+    let adapter: ContinuityAdapter
+    let expiresAt: Date
+    let spaceID: String?
+    let url: String?
 }

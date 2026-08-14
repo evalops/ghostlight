@@ -39,6 +39,7 @@ Startup applies the same validation to the viewer URL and an explicit health URL
 | `GET, POST /v1/workspaces/{id}/spaces` | `200`, `201` | Lists Spaces or captures the current safe HTTP/HTTPS tab destinations under a lease and revision fence. |
 | `POST /v1/workspaces/{id}/spaces/{space}/park` | `200` | Refreshes a Space from the authoritative browser snapshot and marks it parked. |
 | `POST /v1/workspaces/{id}/spaces/{space}/activate` | `202` | Queues an idempotent browser-extension restore; the Space becomes active only after an applied command receipt. |
+| `GET, POST /v1/workspaces/{id}/continuity` | `200`, `202` | Lists typed Resume, Browse, and Send sources or accepts an expiring Resume/Send intent under a lease, revision fence, and idempotency key. |
 | `GET, POST /v1/sessions` | `200` | Lists or idempotently ensures the single durable browser session. |
 | `GET /v1/sessions/{id}` | `200` | Returns authoritative session, tab, lease, and stream state. |
 | `GET /v1/sessions/{id}/events` | `200, 204` | Returns a newer revision or no content. |
@@ -66,6 +67,8 @@ Unknown paths return `404`. A known path with a method other than `GET` returns 
 `GET /v1/viewer` remains a stateless compatibility route. Product routes require the API bearer token. Lease renewal, release, commands, and attachment upload also require the lease token returned only when a client acquires a lease. Bridge routes use the separate bridge bearer token. Chrome pairing redemption uses a one-time capability; handoff writes use the resulting `handoff:write` device credential. Request bodies reject unknown JSON fields; session ensure, command, and Chrome handoff requests require `Idempotency-Key`. The bridge records command completion before acknowledging it, and control retains terminal status so a lost response retries the acknowledgment without replaying the browser action.
 
 Spaces contain names, ordered credential-free HTTP/HTTPS destinations, active position, Home preference ownership, and opaque pending-handoff IDs. They do not contain titles, page content, cookies, credentials, history, incognito state, or Chromium profile data. Restores run through the extension command path and become authoritative only after the command is applied.
+
+Continuity has three contracts. Resume restores an authoritative Space. Browse returns Chrome-owned bookmark and Reading List snapshots without mutating either browser. Send accepts one credential-free destination and queues it through the command receipt path. Resume and Send require an adapter name, a lease, an expected session revision, an idempotency key, and an expiry no more than 10 minutes ahead. Their adapter and expiry remain attached to the durable command receipt.
 
 ## Network boundary
 

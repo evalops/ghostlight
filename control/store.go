@@ -973,10 +973,13 @@ func (s *sqliteStore) createCommand(ctx context.Context, sessionID, token, key, 
 	}
 	now := s.now().UTC()
 	payload, err := json.Marshal(struct {
-		SpaceID        string   `json:"space_id,omitempty"`
-		Destinations   []string `json:"destinations,omitempty"`
-		ActivePosition int      `json:"active_position,omitempty"`
-	}{input.SpaceID, input.Destinations, input.ActivePosition})
+		SpaceID           string     `json:"space_id,omitempty"`
+		Destinations      []string   `json:"destinations,omitempty"`
+		ActivePosition    int        `json:"active_position,omitempty"`
+		ContinuityVerb    string     `json:"continuity_verb,omitempty"`
+		ContinuityAdapter string     `json:"continuity_adapter,omitempty"`
+		ContinuityExpiry  *time.Time `json:"continuity_expires_at,omitempty"`
+	}{input.SpaceID, input.Destinations, input.ActivePosition, input.ContinuityVerb, input.ContinuityAdapter, input.ContinuityExpiry})
 	if err != nil {
 		return BrowserCommand{}, false, err
 	}
@@ -1018,11 +1021,7 @@ func scanCommand(row *sql.Row) (BrowserCommand, error) {
 		return BrowserCommand{}, err
 	}
 	c.CreatedAt, _ = parseTime(created)
-	if err := json.Unmarshal([]byte(payload), &struct {
-		SpaceID        *string   `json:"space_id"`
-		Destinations   *[]string `json:"destinations"`
-		ActivePosition *int      `json:"active_position"`
-	}{&c.SpaceID, &c.Destinations, &c.ActivePosition}); err != nil {
+	if err := decodeCommandPayload(&c, payload); err != nil {
 		return BrowserCommand{}, err
 	}
 	if result != "" {
@@ -1041,6 +1040,17 @@ func scanCommand(row *sql.Row) (BrowserCommand, error) {
 		c.ResultingRevision = &value
 	}
 	return c, nil
+}
+
+func decodeCommandPayload(c *BrowserCommand, payload string) error {
+	return json.Unmarshal([]byte(payload), &struct {
+		SpaceID           *string     `json:"space_id"`
+		Destinations      *[]string   `json:"destinations"`
+		ActivePosition    *int        `json:"active_position"`
+		ContinuityVerb    *string     `json:"continuity_verb"`
+		ContinuityAdapter *string     `json:"continuity_adapter"`
+		ContinuityExpiry  **time.Time `json:"continuity_expires_at"`
+	}{&c.SpaceID, &c.Destinations, &c.ActivePosition, &c.ContinuityVerb, &c.ContinuityAdapter, &c.ContinuityExpiry})
 }
 
 func (s *sqliteStore) getCommand(ctx context.Context, sessionID, id string) (BrowserCommand, error) {
@@ -1065,11 +1075,7 @@ func (s *sqliteStore) recentCommandReceipts(ctx context.Context, sessionID strin
 		if err := rows.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &payload, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &resultJSON, &resultingRevision, &acknowledged, &completed, &created); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(payload), &struct {
-			SpaceID        *string   `json:"space_id"`
-			Destinations   *[]string `json:"destinations"`
-			ActivePosition *int      `json:"active_position"`
-		}{&c.SpaceID, &c.Destinations, &c.ActivePosition}); err != nil {
+		if err := decodeCommandPayload(&c, payload); err != nil {
 			return nil, err
 		}
 		c.CreatedAt, _ = parseTime(created)
@@ -1115,11 +1121,7 @@ func (s *sqliteStore) listCommands(ctx context.Context, sessionID string, after 
 		if err := rows.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &payload, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &resultJSON, &resultingRevision, &acknowledged, &completed, &created); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(payload), &struct {
-			SpaceID        *string   `json:"space_id"`
-			Destinations   *[]string `json:"destinations"`
-			ActivePosition *int      `json:"active_position"`
-		}{&c.SpaceID, &c.Destinations, &c.ActivePosition}); err != nil {
+		if err := decodeCommandPayload(&c, payload); err != nil {
 			return nil, err
 		}
 		c.CreatedAt, _ = parseTime(created)
@@ -1149,20 +1151,48 @@ func (s *sqliteStore) terminalizeExpiredCommands(ctx context.Context, sessionID 
 		return err
 	}
 	defer tx.Rollback()
-	now := formatTime(s.now())
-	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM commands c WHERE c.session_id=? AND c.state='queued' AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.session_id=c.session_id AND l.epoch=c.lease_epoch AND l.expires_at>?)`, sessionID, now).Scan(&count); err != nil {
+	nowTime := s.now().UTC()
+	now := formatTime(nowTime)
+	rows, err := tx.QueryContext(ctx, `SELECT c.id,c.payload_json,EXISTS(SELECT 1 FROM leases l WHERE l.session_id=c.session_id AND l.epoch=c.lease_epoch AND l.expires_at>?) FROM commands c WHERE c.session_id=? AND c.state='queued'`, now, sessionID)
+	if err != nil {
 		return err
 	}
-	if count == 0 {
+	type expiration struct {
+		id, code, message string
+	}
+	expired := []expiration{}
+	for rows.Next() {
+		var id, payload string
+		var leaseValid bool
+		if err := rows.Scan(&id, &payload, &leaseValid); err != nil {
+			rows.Close()
+			return err
+		}
+		var command BrowserCommand
+		if err := decodeCommandPayload(&command, payload); err != nil {
+			rows.Close()
+			return err
+		}
+		if command.ContinuityExpiry != nil && !command.ContinuityExpiry.After(nowTime) {
+			expired = append(expired, expiration{id, "continuity_intent_expired", "Continuity intent expired before the command completed."})
+		} else if !leaseValid {
+			expired = append(expired, expiration{id, "lease_expired", "Controller lease expired before the command completed."})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(expired) == 0 {
 		return tx.Commit()
 	}
 	var nextRevision int64
 	if err := tx.QueryRowContext(ctx, `SELECT revision+1 FROM sessions WHERE id=?`, sessionID).Scan(&nextRevision); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE commands SET state='failed',error_code='lease_expired',error='Controller lease expired before the command completed.',resulting_revision=?,completed_at=? WHERE session_id=? AND state='queued' AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.session_id=commands.session_id AND l.epoch=commands.lease_epoch AND l.expires_at>?)`, nextRevision, now, sessionID, now); err != nil {
-		return err
+	for _, value := range expired {
+		if _, err := tx.ExecContext(ctx, `UPDATE commands SET state='failed',error_code=?,error=?,resulting_revision=?,completed_at=? WHERE id=? AND session_id=? AND state='queued'`, value.code, value.message, nextRevision, now, value.id, sessionID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET revision=?,updated_at=? WHERE id=?`, nextRevision, now, sessionID); err != nil {
 		return err

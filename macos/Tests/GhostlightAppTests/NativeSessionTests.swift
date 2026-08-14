@@ -117,6 +117,60 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(activation.command.type, .restoreSpace)
     }
 
+    func testTypedContinuityUsesOneInventoryAndExpiringIntentEndpoint() async throws {
+        var requests: [URLRequest] = []
+        NativeSessionURLProtocol.requestHandler = { request in
+            requests.append(request)
+            if request.httpMethod == "GET" {
+                let body = #"{"resume":[\#(Self.activitySpaceJSON)],"browse":{"authority":"chrome_snapshot","bookmarks":[],"reading_list":[]},"send":[\#(Self.chromeHandoffJSON)],"generated_at":"2026-08-13T12:00:00Z"}"#
+                return (Self.response(for: request), Data(body.utf8))
+            }
+            let command = Self.commandJSON
+                .replacingOccurrences(of: #""type":"navigate""#, with: #""type":"create_tab""#)
+                .replacingOccurrences(of: #""expected_revision":7"#, with: #""continuity_verb":"send","continuity_adapter":"url_handler","continuity_expires_at":"2026-08-13T12:05:00Z","expected_revision":7"#)
+            let body = #"{"verb":"send","adapter":"url_handler","authority":"ghostlight_session","expires_at":"2026-08-13T12:05:00Z","command":\#(command)}"#
+            return (Self.response(for: request, status: 202), Data(body.utf8))
+        }
+        let client = SessionClient(session: makeSession())
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+
+        let overview = try await client.getContinuity(at: origin, apiToken: "api-secret", workspaceID: "default")
+        let receipt = try await client.submitContinuity(
+            at: origin, apiToken: "api-secret", workspaceID: "default", sessionID: "session-1",
+            leaseToken: "lease-secret", idempotencyKey: "intent-1", verb: .send,
+            adapter: .urlHandler, expiresAt: Date(timeIntervalSince1970: 1_976_022_300),
+            expectedRevision: 7, spaceID: nil, url: "https://example.test/sent"
+        )
+
+        XCTAssertEqual(overview.resume.map(\.id), ["space-1"])
+        XCTAssertEqual(overview.browse.authority, "chrome_snapshot")
+        XCTAssertEqual(overview.send.map(\.id), ["handoff-1"])
+        XCTAssertEqual(receipt.command.continuityVerb, .send)
+        XCTAssertEqual(receipt.command.continuityAdapter, .urlHandler)
+        XCTAssertEqual(requests.map { $0.url?.path }, Array(repeating: "/base/v1/workspaces/default/continuity", count: 2))
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "X-Ghostlight-Lease-Token"), "lease-secret")
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Idempotency-Key"), "intent-1")
+        let requestBody = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(Self.bodyData(from: requests[1]))) as? [String: Any])
+        XCTAssertEqual(requestBody["verb"] as? String, "send")
+        XCTAssertEqual(requestBody["adapter"] as? String, "url_handler")
+        XCTAssertEqual(requestBody["url"] as? String, "https://example.test/sent")
+    }
+
+    @MainActor
+    func testGhostlightSendURLRejectsCredentialsAndSubmitsSafeDestination() async throws {
+        let service = NativeSessionServiceStub(receipts: [Self.receipt(id: "continuity-send", type: .newTab, state: .queued, url: "https://example.test/sent")])
+        let viewModel = try makeControllingViewModel(service: service)
+
+        viewModel.handleExternalURL(try XCTUnwrap(URL(string: "ghostlight://send?url=https%3A%2F%2Fexample.test%2Fsent")))
+        await service.waitForCommandCount(1)
+        XCTAssertEqual(service.commandSubmissions.first?.command.url, "https://example.test/sent")
+
+        viewModel.handleExternalURL(try XCTUnwrap(URL(string: "ghostlight://send?url=https%3A%2F%2Fexample.test%2F%3Ftoken%3Dsecret")))
+        await Task.yield()
+        XCTAssertEqual(service.commandSubmissions.count, 1)
+        XCTAssertNotNil(viewModel.commandError)
+    }
+
     func testWorkspaceListDecodesTopLevelArray() async throws {
         NativeSessionURLProtocol.requestHandler = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")

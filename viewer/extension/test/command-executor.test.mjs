@@ -86,3 +86,19 @@ test("executor rejects unsupported commands and unsafe navigation", async () => 
   await assert.rejects(executeCommand({ type: "navigate", url: "file:///etc/passwd" }, tabs, async () => ({})), /HTTP or HTTPS/);
   await assert.rejects(executeCommand({ type: "execute_script" }, tabs, async () => ({})), /unsupported/);
 });
+
+test("executor rejects an expired continuity intent before changing tabs", async () => {
+  let creates = 0;
+  const tabs = {
+    create: async () => { creates += 1; },
+  };
+  await assert.rejects(
+    executeCommand({
+      type: "create_tab", url: "https://example.test",
+      continuity_verb: "send", continuity_adapter: "url_handler",
+      continuity_expires_at: "2026-08-13T12:00:00Z",
+    }, tabs, async () => ({}), () => Date.parse("2026-08-13T12:00:01Z")),
+    /expired before execution/,
+  );
+  assert.equal(creates, 0);
+});

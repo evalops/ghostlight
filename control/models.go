@@ -122,6 +122,28 @@ type ActivitySpaceActivation struct {
 	Command BrowserCommand `json:"command"`
 }
 
+type ContinuityOverview struct {
+	Resume      []ActivitySpace  `json:"resume"`
+	Browse      ContinuityBrowse `json:"browse"`
+	Send        []ChromeHandoff  `json:"send"`
+	GeneratedAt time.Time        `json:"generated_at"`
+}
+
+type ContinuityBrowse struct {
+	Authority   string              `json:"authority"`
+	Bookmarks   []ChromeLibraryItem `json:"bookmarks"`
+	ReadingList []ChromeLibraryItem `json:"reading_list"`
+}
+
+type ContinuityIntentReceipt struct {
+	Verb      string         `json:"verb"`
+	Adapter   string         `json:"adapter"`
+	Authority string         `json:"authority"`
+	ExpiresAt time.Time      `json:"expires_at"`
+	Space     *ActivitySpace `json:"space,omitempty"`
+	Command   BrowserCommand `json:"command"`
+}
+
 type NativeClientEnrollment struct {
 	PairingCapability string    `json:"pairing_capability,omitempty"`
 	ClientName        string    `json:"client_name"`
@@ -218,6 +240,9 @@ type BrowserCommand struct {
 	SpaceID           string          `json:"space_id,omitempty"`
 	Destinations      []string        `json:"destinations,omitempty"`
 	ActivePosition    int             `json:"active_position,omitempty"`
+	ContinuityVerb    string          `json:"continuity_verb,omitempty"`
+	ContinuityAdapter string          `json:"continuity_adapter,omitempty"`
+	ContinuityExpiry  *time.Time      `json:"continuity_expires_at,omitempty"`
 	ExpectedRevision  int64           `json:"expected_revision"`
 	LeaseEpoch        int64           `json:"lease_epoch"`
 	State             string          `json:"state"`

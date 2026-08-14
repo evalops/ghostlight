@@ -9,6 +9,7 @@ const allowedCommandTypes = new Set([
   "stage_attachment",
   "restore_space",
 ]);
+const continuityAdapters = new Set(["native_ui", "url_handler", "share", "chrome_extension"]);
 
 function normalizeTab(tab) {
   return {
@@ -44,6 +45,17 @@ function validateCommand(command) {
   }
   if (!allowedCommandTypes.has(command.type)) {
     throw new Error(`unsupported command type: ${String(command.type)}`);
+  }
+  const hasContinuity = command.continuity_verb !== undefined
+    || command.continuity_adapter !== undefined || command.continuity_expires_at !== undefined;
+  if (hasContinuity) {
+    const expectedType = command.continuity_verb === "resume" ? "restore_space"
+      : command.continuity_verb === "send" ? "create_tab" : "";
+    if (command.type !== expectedType || !continuityAdapters.has(command.continuity_adapter)
+      || typeof command.continuity_expires_at !== "string"
+      || !Number.isFinite(Date.parse(command.continuity_expires_at))) {
+      throw new Error("continuity command requires a matching verb, adapter, and expiry");
+    }
   }
   if (command.type === "restore_space") {
     if (typeof command.space_id !== "string" || command.space_id === "" || !Array.isArray(command.destinations)
