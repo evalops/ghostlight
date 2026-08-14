@@ -172,6 +172,17 @@ assert_contains "$REPO_DIR/viewer/Dockerfile" 'COPY browser-agent-external.json 
 assert_contains "$REPO_DIR/viewer/Dockerfile" '16af7aa8968c328434526b4c06d8e542571e1600d90d2cedd0349516c96be21b  /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/Dockerfile" 'rm /etc/chromium.d/extensions'
 assert_contains "$REPO_DIR/viewer/browser-agent-external.json" '"external_crx": "/opt/ghostlight/browser-agent.crx"'
+python3 - "$REPO_DIR/viewer/extension/manifest.json" "$REPO_DIR/viewer/browser-agent-external.json" "$REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0-external.json" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+external = json.load(open(sys.argv[2], encoding="utf-8"))
+upgrade_source = json.load(open(sys.argv[3], encoding="utf-8"))
+assert manifest["version"] == "0.1.1"
+assert external["external_version"] == manifest["version"]
+assert upgrade_source["external_version"] == "0.1.0"
+PY
 assert_not_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'fixtures/chromium.conf:/etc/neko/supervisord/chromium.conf'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'chromium-cdp-flags:/etc/chromium.d/zz-ghostlight-acceptance:ro'
 assert_contains "$REPO_DIR/tests/acceptance/fixtures/chromium-cdp-flags" '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=*'
@@ -183,6 +194,20 @@ assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '${phase}-
 # shellcheck disable=SC2016
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '${phase}-browser-agent-installation.txt'
 assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'test ! -e /etc/chromium.d/extensions'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'verify_browser_agent_bridge before'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'verify_browser_agent_bridge after'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation upgrade-source 0.1.0'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation before 0.1.1'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" 'record_browser_agent_installation after 0.1.1'
+assert_contains "$REPO_DIR/tests/acceptance/run-linux-persistence.sh" '/usr/local/bin/ghostlight-native-host'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'parse_time(value["last_heartbeat"]) > phase_started'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("state") == "applied"'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("acknowledged_at")'
+assert_contains "$REPO_DIR/tests/acceptance/verify-browser-agent.py" 'value.get("completed_at")'
+assert_contains "$REPO_DIR/viewer/extension/service-worker.js" 'alarm.name === reconnectAlarm'
+assert_not_contains "$REPO_DIR/viewer/extension/service-worker.js" 'heartbeatAlarm && !nativePort'
+echo "74c3b8320852f203ad6d725ded2270b7b70940f438264d95d5538f9df42e7742  $REPO_DIR/tests/acceptance/fixtures/browser-agent-0.1.0.crx" \
+  | shasum -a 256 --check --status
 [[ ! -e "$REPO_DIR/tests/acceptance/fixtures/chromium.conf" ]] || fail "acceptance must use the baked default Chromium Supervisor config"
 for chromium_config in \
   "$REPO_DIR/viewer/chromium.conf" \
