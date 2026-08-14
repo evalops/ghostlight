@@ -7,6 +7,7 @@ const allowedCommandTypes = new Set([
   "forward",
   "reload",
   "stage_attachment",
+  "restore_space",
 ]);
 
 function normalizeTab(tab) {
@@ -43,6 +44,15 @@ function validateCommand(command) {
   }
   if (!allowedCommandTypes.has(command.type)) {
     throw new Error(`unsupported command type: ${String(command.type)}`);
+  }
+  if (command.type === "restore_space") {
+    if (typeof command.space_id !== "string" || command.space_id === "" || !Array.isArray(command.destinations)
+      || command.destinations.length < 1 || command.destinations.length > 50
+      || !Number.isInteger(command.active_position) || command.active_position < 0
+      || command.active_position >= command.destinations.length) {
+      throw new Error("restore_space requires bounded destinations and active_position");
+    }
+    command.destinations.forEach(validateNavigationURL);
   }
   return command;
 }

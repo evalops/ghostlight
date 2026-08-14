@@ -167,8 +167,8 @@ func TestSchemaFourMigratesNativeClientEnrollment(t *testing.T) {
 		}
 	}
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 6 {
-		t.Fatalf("migrated version = %d, %v; want 6", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("migrated version = %d, %v; want %d", version, err, schemaVersion)
 	}
 }
 
@@ -219,8 +219,139 @@ func TestSchemaFiveMigratesViewerCapabilityNativeClientBinding(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT value FROM metadata WHERE key='schema_version'`).Scan(&recordedVersion); err != nil {
 		t.Fatal(err)
 	}
-	if userVersion != 6 || recordedVersion != "6" {
-		t.Fatalf("migrated versions = %d/%q, want 6/6", userVersion, recordedVersion)
+	if userVersion != schemaVersion || recordedVersion != fmt.Sprint(schemaVersion) {
+		t.Fatalf("migrated versions = %d/%q, want %d", userVersion, recordedVersion, schemaVersion)
+	}
+}
+
+func TestSchemaSixMigratesActivitySpacesWithoutBrowserProfileData(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(stateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO metadata(key,value) VALUES('schema_version','6')`,
+		`CREATE TABLE commands (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, type TEXT NOT NULL, url TEXT NOT NULL, tab_id TEXT NOT NULL, attachment_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, lease_epoch INTEGER NOT NULL, state TEXT NOT NULL, error_code TEXT NOT NULL, error TEXT NOT NULL, result_json TEXT NOT NULL, resulting_revision INTEGER, acknowledged_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, UNIQUE(session_id,idempotency_key))`,
+		`CREATE TABLE chrome_handoffs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, device_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(device_id,idempotency_key))`,
+		`PRAGMA user_version = 6`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("migrate schema six: %v", err)
+	}
+	defer store.close()
+	for _, table := range []string{"activity_spaces", "space_idempotency"} {
+		var name string
+		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			t.Fatalf("migrated table %s: %v", table, err)
+		}
+	}
+	for table, columns := range map[string][]string{
+		"commands":        {"payload_json"},
+		"chrome_handoffs": {"space_id"},
+	} {
+		for _, column := range columns {
+			var count int
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, table, column).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("migrated %s.%s = %d, %v", table, column, count, err)
+			}
+		}
+	}
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("migrated version = %d, %v; want %d", version, err, schemaVersion)
+	}
+}
+
+func TestActivitySpacesCaptureParkActivateAndAuthorization(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	lease := acquireLease(t, h, "default")
+	heartbeat := doJSON(t, h, http.MethodPost, "/v1/bridge/heartbeat", "", h.config.BridgeToken, strings.NewReader(`{"session_id":"default","sequence":1,"agent_version":"test","tabs":[{"id":"safe","title":"Private title must not persist","url":"https://example.test/work","active":true,"loading":false,"audible":false,"discarded":false,"window_id":1,"index":0},{"id":"internal","title":"Settings","url":"chrome://settings","active":false,"loading":false,"audible":false,"discarded":false,"window_id":1,"index":1}],"active_tab_id":"safe","runtime_state":"ready"}`))
+	var session BrowserSession
+	decodeRecorder(t, heartbeat, &session)
+	directRestore := doJSON(t, h, http.MethodPost, "/v1/sessions/default/commands", "direct-restore", lease.Token, strings.NewReader(fmt.Sprintf(`{"type":"restore_space","space_id":"made-up","destinations":["https://example.test"],"active_position":0,"expected_revision":%d}`, session.Revision)))
+	if directRestore.Code != http.StatusBadRequest {
+		t.Fatalf("direct restore command = %d %s", directRestore.Code, directRestore.Body.String())
+	}
+
+	path := "/v1/workspaces/default/spaces"
+	unauthorized := doBearerRequest(h, http.MethodGet, path, "wrong", nil)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized spaces = %d %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	createBody := fmt.Sprintf(`{"name":"Launch","session_id":"default","expected_revision":%d}`, session.Revision)
+	created := doJSON(t, h, http.MethodPost, path, "space-create", lease.Token, strings.NewReader(createBody))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create space = %d %s", created.Code, created.Body.String())
+	}
+	var space ActivitySpace
+	decodeRecorder(t, created, &space)
+	if space.Name != "Launch" || space.State != "active" || space.HomePreferencesWorkspaceID != "default" || space.ActivePosition != 0 || len(space.Tabs) != 1 || space.Tabs[0].URL != "https://example.test/work" {
+		t.Fatalf("created space = %#v", space)
+	}
+	if strings.Contains(created.Body.String(), "Private title") || strings.Contains(created.Body.String(), "chrome://") || strings.Contains(created.Body.String(), "cookie") {
+		t.Fatalf("space exposed unsafe browser state: %s", created.Body.String())
+	}
+	retry := doJSON(t, h, http.MethodPost, path, "space-create", lease.Token, strings.NewReader(createBody))
+	var retried ActivitySpace
+	decodeRecorder(t, retry, &retried)
+	if retry.Code != http.StatusOK || retried.ID != space.ID {
+		t.Fatalf("idempotent create = %d %#v", retry.Code, retried)
+	}
+
+	current := doJSON(t, h, http.MethodGet, "/v1/sessions/default", "", "", nil)
+	decodeRecorder(t, current, &session)
+	parkBody := fmt.Sprintf(`{"session_id":"default","expected_revision":%d}`, session.Revision)
+	parked := doJSON(t, h, http.MethodPost, path+"/"+space.ID+"/park", "space-park", lease.Token, strings.NewReader(parkBody))
+	decodeRecorder(t, parked, &space)
+	if parked.Code != http.StatusOK || space.State != "parked" {
+		t.Fatalf("park space = %d %#v", parked.Code, space)
+	}
+
+	stale := doJSON(t, h, http.MethodPost, path+"/"+space.ID+"/activate", "space-activate-stale", lease.Token, strings.NewReader(parkBody))
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "stale_revision") {
+		t.Fatalf("stale activation = %d %s", stale.Code, stale.Body.String())
+	}
+	current = doJSON(t, h, http.MethodGet, "/v1/sessions/default", "", "", nil)
+	decodeRecorder(t, current, &session)
+	activateBody := fmt.Sprintf(`{"session_id":"default","expected_revision":%d}`, session.Revision)
+	activated := doJSON(t, h, http.MethodPost, path+"/"+space.ID+"/activate", "space-activate", lease.Token, strings.NewReader(activateBody))
+	if activated.Code != http.StatusAccepted {
+		t.Fatalf("activate space = %d %s", activated.Code, activated.Body.String())
+	}
+	var activation ActivitySpaceActivation
+	decodeRecorder(t, activated, &activation)
+	if activation.Space.State != "parked" || activation.Command.Type != "restore_space" || activation.Command.SpaceID != space.ID || len(activation.Command.Destinations) != 1 || activation.Command.Destinations[0] != "https://example.test/work" {
+		t.Fatalf("activation = %#v", activation)
+	}
+	listed := doJSON(t, h, http.MethodGet, "/v1/bridge/commands?session_id=default&after=0", "", h.config.BridgeToken, nil)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"type":"restore_space"`) {
+		t.Fatalf("restore command not delivered through bridge = %d %s", listed.Code, listed.Body.String())
+	}
+	acked := doJSON(t, h, http.MethodPost, "/v1/bridge/commands/"+activation.Command.ID+"/ack", "", h.config.BridgeToken, strings.NewReader(`{"status":"ok","result":{"restored_tabs":1}}`))
+	if acked.Code != http.StatusOK {
+		t.Fatalf("ack activation = %d %s", acked.Code, acked.Body.String())
+	}
+	spaces := doJSON(t, h, http.MethodGet, path, "", "", nil)
+	var values []ActivitySpace
+	decodeRecorder(t, spaces, &values)
+	if len(values) != 1 || values[0].State != "active" {
+		t.Fatalf("spaces after activation = %#v", values)
 	}
 }
 

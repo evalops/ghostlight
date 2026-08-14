@@ -167,6 +167,40 @@ public struct WorkspacePreferences: Codable, Equatable, Sendable {
     }
 }
 
+public struct ActivitySpaceTab: Codable, Equatable, Sendable {
+    public let url: String
+    public let position: Int
+}
+
+public struct ActivitySpace: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let workspaceID: String
+    public let name: String
+    public let state: String
+    public let revision: Int
+    public let tabs: [ActivitySpaceTab]
+    public let activePosition: Int
+    public let homePreferencesWorkspaceID: String
+    public let pendingHandoffIDs: [String]
+    public let createdAt: Date
+    public let updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, state, revision, tabs
+        case workspaceID = "workspace_id"
+        case activePosition = "active_position"
+        case homePreferencesWorkspaceID = "home_preferences_workspace_id"
+        case pendingHandoffIDs = "pending_handoff_ids"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct ActivitySpaceActivation: Codable, Equatable, Sendable {
+    public let space: ActivitySpace
+    public let command: CommandReceipt
+}
+
 public struct ChromePairing: Codable, Equatable, Sendable {
     public let pairingCode: String
     public let workspaceID: String
@@ -394,6 +428,7 @@ public enum BrowserCommandType: String, Codable, Sendable {
     case closeTab = "close_tab"
     case activateTab = "activate_tab"
     case attach = "stage_attachment"
+    case restoreSpace = "restore_space"
 }
 
 public struct BrowserCommand: Codable, Equatable, Sendable {

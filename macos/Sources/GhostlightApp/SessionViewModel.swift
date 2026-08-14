@@ -90,6 +90,7 @@ final class SessionViewModel: ObservableObject {
     @Published private(set) var chromeBookmarks: [ChromeLibraryItem] = []
     @Published private(set) var chromeReadingList: [ChromeLibraryItem] = []
     @Published private(set) var chromeDevices: [ChromeDevice] = []
+    @Published private(set) var activitySpaces: [ActivitySpace] = []
     @Published private(set) var chromePairing: ChromePairing?
     @Published private(set) var chromeSyncError: String?
     @Published private(set) var openingChromeHandoffIDs: Set<String> = []
@@ -224,6 +225,7 @@ final class SessionViewModel: ObservableObject {
         chromeBookmarks = []
         chromeReadingList = []
         chromeDevices = []
+        activitySpaces = []
         chromePairing = nil
         chromeSyncError = nil
         preferencesError = nil
@@ -278,6 +280,7 @@ final class SessionViewModel: ObservableObject {
                 await loadChromeHandoffs(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 await loadChromeLibrary(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 await loadChromeDevices(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
+                await loadActivitySpaces(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID)
                 guard owns(runID) else { return }
                 startEvents(at: origin, apiToken: authorizationToken, sessionID: browser.id, runID: runID)
                 startChromeSync(at: origin, apiToken: authorizationToken, workspaceID: browser.workspaceID, runID: runID)
@@ -469,6 +472,7 @@ final class SessionViewModel: ObservableObject {
         chromeBookmarks = []
         chromeReadingList = []
         chromeDevices = []
+        activitySpaces = []
         chromePairing = nil
         chromeSyncError = nil
         preferencesError = nil
@@ -632,6 +636,53 @@ final class SessionViewModel: ObservableObject {
             idempotencyKey: "chrome-library-\(UUID().uuidString)",
             command: BrowserCommand(type: .newTab, url: url, expectedRevision: session?.revision ?? 0)
         ))
+    }
+
+    func createActivitySpace(named input: String) async -> Bool {
+        let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.unicodeScalars.count <= 80, let context = activitySpaceContext else { return false }
+        do {
+            let value = try await client.createActivitySpace(
+                at: context.origin, apiToken: context.apiToken, workspaceID: context.workspaceID,
+                sessionID: context.sessionID, leaseToken: context.leaseToken,
+                idempotencyKey: "space-create-\(UUID().uuidString.lowercased())", name: name,
+                expectedRevision: context.revision
+            )
+            activitySpaces.removeAll { $0.id == value.id }
+            activitySpaces.insert(value, at: 0)
+            return true
+        } catch {
+            commandError = error.localizedDescription
+            return false
+        }
+    }
+
+    func parkActivitySpace(_ space: ActivitySpace) async {
+        guard let context = activitySpaceContext else { return }
+        do {
+            let value = try await client.parkActivitySpace(
+                at: context.origin, apiToken: context.apiToken, workspaceID: context.workspaceID,
+                spaceID: space.id, sessionID: context.sessionID, leaseToken: context.leaseToken,
+                idempotencyKey: "space-park-\(UUID().uuidString.lowercased())", expectedRevision: context.revision
+            )
+            replaceActivitySpace(value)
+        } catch {
+            commandError = error.localizedDescription
+        }
+    }
+
+    func activateActivitySpace(_ space: ActivitySpace) async {
+        guard let context = activitySpaceContext else { return }
+        do {
+            let activation = try await client.activateActivitySpace(
+                at: context.origin, apiToken: context.apiToken, workspaceID: context.workspaceID,
+                spaceID: space.id, sessionID: context.sessionID, leaseToken: context.leaseToken,
+                idempotencyKey: "space-activate-\(UUID().uuidString.lowercased())", expectedRevision: context.revision
+            )
+            accept(activation.command, submission: nil)
+        } catch {
+            commandError = error.localizedDescription
+        }
     }
 
     func refreshChromeDevices() async {
@@ -1014,6 +1065,32 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    private func loadActivitySpaces(at origin: URL, apiToken: String, workspaceID: String) async {
+        do {
+            let values = try await client.listActivitySpaces(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+            guard session?.workspaceID == workspaceID else { return }
+            activitySpaces = values
+        } catch is CancellationError {
+            return
+        } catch {
+            if removeEnrolledCredentialIfRejected(error, at: origin) { return }
+            commandError = error.localizedDescription
+        }
+    }
+
+    private var activitySpaceContext: (origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, revision: Int)? {
+        guard let origin = try? ControlPlaneURLValidator.validate(controlOrigin), let session, let leaseToken = lease?.token, canControl else { return nil }
+        return (origin, authorizationToken, session.workspaceID, session.id, leaseToken, session.revision)
+    }
+
+    private func replaceActivitySpace(_ value: ActivitySpace) {
+        if let index = activitySpaces.firstIndex(where: { $0.id == value.id }) {
+            activitySpaces[index] = value
+        } else {
+            activitySpaces.append(value)
+        }
+    }
+
     private func resolveChromeHandoff(_ handoffID: String, state: String) {
         guard let session,
               let origin = try? ControlPlaneURLValidator.validate(controlOrigin) else { return }
@@ -1133,6 +1210,7 @@ final class SessionViewModel: ObservableObject {
                 try? await Task.sleep(for: .seconds(2))
                 guard owns(runID), !Task.isCancelled else { return }
                 await loadChromeHandoffs(at: origin, apiToken: apiToken, workspaceID: workspaceID)
+                await loadActivitySpaces(at: origin, apiToken: apiToken, workspaceID: workspaceID)
                 refreshCount += 1
                 if refreshCount.isMultiple(of: 4) {
                     await loadChromeLibrary(at: origin, apiToken: apiToken, workspaceID: workspaceID)

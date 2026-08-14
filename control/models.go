@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 type Workspace struct {
 	ID        string    `json:"id"`
@@ -94,6 +94,32 @@ type WorkspacePreferences struct {
 	Shortcuts   []WorkspaceShortcut `json:"shortcuts"`
 	RecentURLs  []string            `json:"recent_urls"`
 	UpdatedAt   time.Time           `json:"updated_at"`
+}
+
+// ActivitySpace stores only safe destinations and product metadata. Website
+// identity and page state remain owned by the single Chromium profile.
+type ActivitySpace struct {
+	ID                         string             `json:"id"`
+	WorkspaceID                string             `json:"workspace_id"`
+	Name                       string             `json:"name"`
+	State                      string             `json:"state"`
+	Revision                   int64              `json:"revision"`
+	Tabs                       []ActivitySpaceTab `json:"tabs"`
+	ActivePosition             int                `json:"active_position"`
+	HomePreferencesWorkspaceID string             `json:"home_preferences_workspace_id"`
+	PendingHandoffIDs          []string           `json:"pending_handoff_ids"`
+	CreatedAt                  time.Time          `json:"created_at"`
+	UpdatedAt                  time.Time          `json:"updated_at"`
+}
+
+type ActivitySpaceTab struct {
+	URL      string `json:"url"`
+	Position int    `json:"position"`
+}
+
+type ActivitySpaceActivation struct {
+	Space   ActivitySpace  `json:"space"`
+	Command BrowserCommand `json:"command"`
 }
 
 type NativeClientEnrollment struct {
@@ -189,6 +215,9 @@ type BrowserCommand struct {
 	URL               string          `json:"url,omitempty"`
 	TabID             string          `json:"tab_id,omitempty"`
 	AttachmentID      string          `json:"attachment_id,omitempty"`
+	SpaceID           string          `json:"space_id,omitempty"`
+	Destinations      []string        `json:"destinations,omitempty"`
+	ActivePosition    int             `json:"active_position,omitempty"`
 	ExpectedRevision  int64           `json:"expected_revision"`
 	LeaseEpoch        int64           `json:"lease_epoch"`
 	State             string          `json:"state"`

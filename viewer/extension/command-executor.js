@@ -25,6 +25,26 @@ async function executeCommand(command, tabs, nativeRequest) {
       return {};
     case "stage_attachment":
       return nativeRequest({ operation: "stage_attachment", attachment_id: command.attachment_id });
+    case "restore_space": {
+      const destinations = command.destinations.map(validateNavigationURL);
+      const existing = (await tabs.query({})).sort((left, right) => left.index - right.index);
+      const restored = [];
+      if (existing.length > 0) {
+        restored.push(await tabs.update(existing[0].id, { url: destinations[0], active: false }));
+      } else {
+        restored.push(await tabs.create({ url: destinations[0], active: false }));
+      }
+      for (const destination of destinations.slice(1)) {
+        restored.push(await tabs.create({ url: destination, active: false }));
+      }
+      if (existing.length > 1) {
+        await tabs.remove(existing.slice(1).map((tab) => tab.id));
+      }
+      const activeID = restored[command.active_position]?.id;
+      if (!Number.isInteger(activeID)) throw new Error("restored tab omitted its id");
+      await tabs.update(activeID, { active: true });
+      return { restored_tabs: restored.length, active_position: command.active_position };
+    }
     default:
       throw new Error(`unsupported command type: ${command.type}`);
   }

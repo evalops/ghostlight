@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -108,7 +109,7 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, client_id TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL, expires_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS streams (id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, url TEXT NOT NULL, state TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS session_idempotency (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id))`,
-		`CREATE TABLE IF NOT EXISTS commands (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, type TEXT NOT NULL, url TEXT NOT NULL, tab_id TEXT NOT NULL, attachment_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, lease_epoch INTEGER NOT NULL, state TEXT NOT NULL, error_code TEXT NOT NULL, error TEXT NOT NULL, result_json TEXT NOT NULL, resulting_revision INTEGER, acknowledged_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, UNIQUE(session_id, idempotency_key))`,
+		`CREATE TABLE IF NOT EXISTS commands (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, type TEXT NOT NULL, url TEXT NOT NULL, tab_id TEXT NOT NULL, attachment_id TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', expected_revision INTEGER NOT NULL, lease_epoch INTEGER NOT NULL, state TEXT NOT NULL, error_code TEXT NOT NULL, error TEXT NOT NULL, result_json TEXT NOT NULL, resulting_revision INTEGER, acknowledged_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, UNIQUE(session_id, idempotency_key))`,
 		`CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, filename TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS viewer_capabilities (token_hash TEXT PRIMARY KEY, stream_id TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, client_id TEXT NOT NULL, native_client_id TEXT REFERENCES native_clients(id), expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS workspace_preferences (workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE, search_url TEXT NOT NULL, shortcuts_json TEXT NOT NULL, recent_urls_json TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -116,7 +117,10 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS native_clients (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, scope TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT)`,
 		`CREATE TABLE IF NOT EXISTS chrome_pairings (token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, device_name TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS chrome_devices (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, scope TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT)`,
-		`CREATE TABLE IF NOT EXISTS chrome_handoffs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(device_id,idempotency_key))`,
+		`CREATE TABLE IF NOT EXISTS activity_spaces (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL, tabs_json TEXT NOT NULL, active_position INTEGER NOT NULL, home_preferences_workspace_id TEXT NOT NULL REFERENCES workspaces(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS one_active_space_per_workspace ON activity_spaces(workspace_id) WHERE state='active'`,
+		`CREATE TABLE IF NOT EXISTS space_idempotency (workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, key TEXT NOT NULL, request_hash TEXT NOT NULL, operation TEXT NOT NULL, space_id TEXT NOT NULL REFERENCES activity_spaces(id) ON DELETE CASCADE, command_id TEXT, PRIMARY KEY(workspace_id,key))`,
+		`CREATE TABLE IF NOT EXISTS chrome_handoffs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0, space_id TEXT REFERENCES activity_spaces(id) ON DELETE SET NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(device_id,idempotency_key))`,
 		`CREATE TABLE IF NOT EXISTS chrome_library_snapshots (device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, kind TEXT NOT NULL, revision INTEGER NOT NULL, request_hash TEXT NOT NULL, item_count INTEGER NOT NULL, received_at TEXT NOT NULL, PRIMARY KEY(device_id,kind))`,
 		`CREATE TABLE IF NOT EXISTS chrome_library_items (device_id TEXT NOT NULL REFERENCES chrome_devices(id) ON DELETE CASCADE, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, kind TEXT NOT NULL, external_id TEXT NOT NULL, parent_external_id TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, position INTEGER NOT NULL, is_read INTEGER NOT NULL, PRIMARY KEY(device_id,kind,external_id))`,
 	}
@@ -137,6 +141,7 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 			{"error_code", `ALTER TABLE commands ADD COLUMN error_code TEXT NOT NULL DEFAULT ''`},
 			{"resulting_revision", `ALTER TABLE commands ADD COLUMN resulting_revision INTEGER`},
 			{"completed_at", `ALTER TABLE commands ADD COLUMN completed_at TEXT`},
+			{"payload_json", `ALTER TABLE commands ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'`},
 		} {
 			if columns[migration.column] {
 				continue
@@ -155,6 +160,7 @@ func (s *sqliteStore) initialize(ctx context.Context) error {
 		for _, migration := range []struct{ column, statement string }{
 			{"group_id", `ALTER TABLE chrome_handoffs ADD COLUMN group_id TEXT NOT NULL DEFAULT ''`},
 			{"position", `ALTER TABLE chrome_handoffs ADD COLUMN position INTEGER NOT NULL DEFAULT 0`},
+			{"space_id", `ALTER TABLE chrome_handoffs ADD COLUMN space_id TEXT REFERENCES activity_spaces(id) ON DELETE SET NULL`},
 		} {
 			if !chromeColumns[migration.column] {
 				if _, err := tx.ExecContext(ctx, migration.statement); err != nil {
@@ -236,6 +242,225 @@ func (s *sqliteStore) listWorkspaces(ctx context.Context) ([]Workspace, error) {
 		result = append(result, w)
 	}
 	return result, rows.Err()
+}
+
+func scanActivitySpace(row interface{ Scan(...any) error }) (ActivitySpace, error) {
+	var value ActivitySpace
+	var tabsJSON, created, updated string
+	err := row.Scan(&value.ID, &value.WorkspaceID, &value.Name, &value.State, &value.Revision, &tabsJSON, &value.ActivePosition, &value.HomePreferencesWorkspaceID, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ActivitySpace{}, errNotFound
+	}
+	if err != nil {
+		return ActivitySpace{}, err
+	}
+	if err := json.Unmarshal([]byte(tabsJSON), &value.Tabs); err != nil {
+		return ActivitySpace{}, err
+	}
+	value.CreatedAt, _ = parseTime(created)
+	value.UpdatedAt, _ = parseTime(updated)
+	return value, nil
+}
+
+const activitySpaceSelect = `SELECT id,workspace_id,name,state,revision,tabs_json,active_position,home_preferences_workspace_id,created_at,updated_at FROM activity_spaces`
+
+func (s *sqliteStore) hydrateSpaceHandoffs(ctx context.Context, value *ActivitySpace) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM chrome_handoffs WHERE workspace_id=? AND state='pending' AND space_id=? ORDER BY created_at,id`, value.WorkspaceID, value.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		value.PendingHandoffIDs = append(value.PendingHandoffIDs, id)
+	}
+	return rows.Err()
+}
+
+func (s *sqliteStore) getActivitySpace(ctx context.Context, workspaceID, id string) (ActivitySpace, error) {
+	value, err := scanActivitySpace(s.db.QueryRowContext(ctx, activitySpaceSelect+` WHERE workspace_id=? AND id=?`, workspaceID, id))
+	if err == nil {
+		err = s.hydrateSpaceHandoffs(ctx, &value)
+	}
+	return value, err
+}
+
+func (s *sqliteStore) listActivitySpaces(ctx context.Context, workspaceID string) ([]ActivitySpace, error) {
+	rows, err := s.db.QueryContext(ctx, activitySpaceSelect+` WHERE workspace_id=? ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END,updated_at DESC,id`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []ActivitySpace{}
+	for rows.Next() {
+		value, err := scanActivitySpace(rows)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range values {
+		if err := s.hydrateSpaceHandoffs(ctx, &values[index]); err != nil {
+			return nil, err
+		}
+	}
+	return values, nil
+}
+
+func capturedSpaceTabs(tabs []BrowserTab, activeTabID string) ([]ActivitySpaceTab, int) {
+	tabs = append([]BrowserTab(nil), tabs...)
+	sort.SliceStable(tabs, func(left, right int) bool {
+		if tabs[left].WindowID != tabs[right].WindowID {
+			return tabs[left].WindowID < tabs[right].WindowID
+		}
+		return tabs[left].Index < tabs[right].Index
+	})
+	result := []ActivitySpaceTab{}
+	seen := map[string]bool{}
+	activePosition := 0
+	for _, tab := range tabs {
+		if len(result) == 50 || !validRecentURL(tab.URL) || seen[tab.URL] {
+			continue
+		}
+		seen[tab.URL] = true
+		if tab.ID == activeTabID {
+			activePosition = len(result)
+		}
+		result = append(result, ActivitySpaceTab{URL: tab.URL, Position: len(result)})
+	}
+	return result, activePosition
+}
+
+func (s *sqliteStore) createActivitySpace(ctx context.Context, workspaceID, sessionID, name string, expectedRevision int64, token, key, requestHash string) (ActivitySpace, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ActivitySpace{}, false, err
+	}
+	defer tx.Rollback()
+	var oldHash, oldID string
+	err = tx.QueryRowContext(ctx, `SELECT request_hash,space_id FROM space_idempotency WHERE workspace_id=? AND key=?`, workspaceID, key).Scan(&oldHash, &oldID)
+	if err == nil {
+		if oldHash != requestHash {
+			return ActivitySpace{}, false, errIdempotencyKey
+		}
+		value, err := scanActivitySpace(tx.QueryRowContext(ctx, activitySpaceSelect+` WHERE id=? AND workspace_id=?`, oldID, workspaceID))
+		return value, false, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return ActivitySpace{}, false, err
+	}
+	if _, _, err := s.findLeaseByTokenTx(ctx, tx, sessionID, token); err != nil {
+		return ActivitySpace{}, false, err
+	}
+	session, err := s.getSessionQuery(ctx, tx, sessionID)
+	if err != nil || session.WorkspaceID != workspaceID {
+		if err == nil {
+			err = errNotFound
+		}
+		return ActivitySpace{}, false, err
+	}
+	if session.Revision != expectedRevision {
+		return ActivitySpace{}, false, errStaleRevision
+	}
+	tabs, active := capturedSpaceTabs(session.Tabs, session.ActiveTabID)
+	if len(tabs) == 0 {
+		return ActivitySpace{}, false, errNotFound
+	}
+	id, err := randomID(16)
+	if err != nil {
+		return ActivitySpace{}, false, err
+	}
+	encoded, _ := json.Marshal(tabs)
+	now := s.now().UTC()
+	stamp := formatTime(now)
+	if _, err = tx.ExecContext(ctx, `UPDATE activity_spaces SET state='parked',updated_at=? WHERE workspace_id=? AND state='active'`, stamp, workspaceID); err != nil {
+		return ActivitySpace{}, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO activity_spaces(id,workspace_id,name,state,revision,tabs_json,active_position,home_preferences_workspace_id,created_at,updated_at) VALUES(?,?,?,'active',1,?,?,?,?,?)`, id, workspaceID, name, string(encoded), active, workspaceID, stamp, stamp); err != nil {
+		return ActivitySpace{}, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE chrome_handoffs SET space_id=? WHERE workspace_id=? AND state='pending' AND space_id IS NULL`, id, workspaceID); err != nil {
+		return ActivitySpace{}, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO space_idempotency(workspace_id,key,request_hash,operation,space_id) VALUES(?,?,?,'create',?)`, workspaceID, key, requestHash, id); err != nil {
+		return ActivitySpace{}, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, stamp, sessionID); err != nil {
+		return ActivitySpace{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ActivitySpace{}, false, err
+	}
+	value, err := s.getActivitySpace(ctx, workspaceID, id)
+	return value, true, err
+}
+
+func (s *sqliteStore) parkActivitySpace(ctx context.Context, workspaceID, id, sessionID string, expectedRevision int64, token, key, requestHash string) (ActivitySpace, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ActivitySpace{}, err
+	}
+	defer tx.Rollback()
+	var oldHash, oldID string
+	err = tx.QueryRowContext(ctx, `SELECT request_hash,space_id FROM space_idempotency WHERE workspace_id=? AND key=?`, workspaceID, key).Scan(&oldHash, &oldID)
+	if err == nil {
+		if oldHash != requestHash || oldID != id {
+			return ActivitySpace{}, errIdempotencyKey
+		}
+		value, err := scanActivitySpace(tx.QueryRowContext(ctx, activitySpaceSelect+` WHERE id=? AND workspace_id=?`, id, workspaceID))
+		return value, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return ActivitySpace{}, err
+	}
+	if _, _, err := s.findLeaseByTokenTx(ctx, tx, sessionID, token); err != nil {
+		return ActivitySpace{}, err
+	}
+	session, err := s.getSessionQuery(ctx, tx, sessionID)
+	if err != nil || session.WorkspaceID != workspaceID {
+		if err == nil {
+			err = errNotFound
+		}
+		return ActivitySpace{}, err
+	}
+	if session.Revision != expectedRevision {
+		return ActivitySpace{}, errStaleRevision
+	}
+	tabs, active := capturedSpaceTabs(session.Tabs, session.ActiveTabID)
+	if len(tabs) == 0 {
+		return ActivitySpace{}, errNotFound
+	}
+	encoded, _ := json.Marshal(tabs)
+	now := formatTime(s.now().UTC())
+	result, err := tx.ExecContext(ctx, `UPDATE activity_spaces SET state='parked',revision=revision+1,tabs_json=?,active_position=?,updated_at=? WHERE id=? AND workspace_id=?`, string(encoded), active, now, id, workspaceID)
+	if err != nil {
+		return ActivitySpace{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return ActivitySpace{}, errNotFound
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE chrome_handoffs SET space_id=? WHERE workspace_id=? AND state='pending' AND space_id IS NULL`, id, workspaceID); err != nil {
+		return ActivitySpace{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO space_idempotency(workspace_id,key,request_hash,operation,space_id) VALUES(?,?,?,'park',?)`, workspaceID, key, requestHash, id); err != nil {
+		return ActivitySpace{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, now, sessionID); err != nil {
+		return ActivitySpace{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ActivitySpace{}, err
+	}
+	return s.getActivitySpace(ctx, workspaceID, id)
 }
 
 func defaultWorkspacePreferences(workspaceID string, now time.Time) WorkspacePreferences {
@@ -747,7 +972,15 @@ func (s *sqliteStore) createCommand(ctx context.Context, sessionID, token, key, 
 		return BrowserCommand{}, false, err
 	}
 	now := s.now().UTC()
-	result, err := tx.ExecContext(ctx, `INSERT INTO commands(id,session_id,idempotency_key,request_hash,type,url,tab_id,attachment_id,expected_revision,lease_epoch,state,error_code,error,result_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, sessionID, key, requestHash, input.Type, input.URL, input.TabID, input.AttachmentID, input.ExpectedRevision, epoch, "queued", "", "", "", formatTime(now))
+	payload, err := json.Marshal(struct {
+		SpaceID        string   `json:"space_id,omitempty"`
+		Destinations   []string `json:"destinations,omitempty"`
+		ActivePosition int      `json:"active_position,omitempty"`
+	}{input.SpaceID, input.Destinations, input.ActivePosition})
+	if err != nil {
+		return BrowserCommand{}, false, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO commands(id,session_id,idempotency_key,request_hash,type,url,tab_id,attachment_id,payload_json,expected_revision,lease_epoch,state,error_code,error,result_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, sessionID, key, requestHash, input.Type, input.URL, input.TabID, input.AttachmentID, string(payload), input.ExpectedRevision, epoch, "queued", "", "", "", formatTime(now))
 	if err != nil {
 		return BrowserCommand{}, false, err
 	}
@@ -770,14 +1003,14 @@ func (s *sqliteStore) createCommand(ctx context.Context, sessionID, token, key, 
 	return input, true, nil
 }
 
-const commandSelect = `SELECT id,sequence,session_id,type,url,tab_id,attachment_id,expected_revision,lease_epoch,state,error_code,error,result_json,resulting_revision,acknowledged_at,completed_at,created_at FROM commands`
+const commandSelect = `SELECT id,sequence,session_id,type,url,tab_id,attachment_id,payload_json,expected_revision,lease_epoch,state,error_code,error,result_json,resulting_revision,acknowledged_at,completed_at,created_at FROM commands`
 
 func scanCommand(row *sql.Row) (BrowserCommand, error) {
 	var c BrowserCommand
-	var created, result string
+	var created, result, payload string
 	var acknowledged, completed sql.NullString
 	var resultingRevision sql.NullInt64
-	err := row.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &result, &resultingRevision, &acknowledged, &completed, &created)
+	err := row.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &payload, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &result, &resultingRevision, &acknowledged, &completed, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BrowserCommand{}, errNotFound
 	}
@@ -785,6 +1018,13 @@ func scanCommand(row *sql.Row) (BrowserCommand, error) {
 		return BrowserCommand{}, err
 	}
 	c.CreatedAt, _ = parseTime(created)
+	if err := json.Unmarshal([]byte(payload), &struct {
+		SpaceID        *string   `json:"space_id"`
+		Destinations   *[]string `json:"destinations"`
+		ActivePosition *int      `json:"active_position"`
+	}{&c.SpaceID, &c.Destinations, &c.ActivePosition}); err != nil {
+		return BrowserCommand{}, err
+	}
 	if result != "" {
 		c.Result = json.RawMessage(result)
 	}
@@ -819,10 +1059,17 @@ func (s *sqliteStore) recentCommandReceipts(ctx context.Context, sessionID strin
 	receipts := []BrowserCommand{}
 	for rows.Next() {
 		var c BrowserCommand
-		var created, resultJSON string
+		var created, resultJSON, payload string
 		var acknowledged, completed sql.NullString
 		var resultingRevision sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &resultJSON, &resultingRevision, &acknowledged, &completed, &created); err != nil {
+		if err := rows.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &payload, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &resultJSON, &resultingRevision, &acknowledged, &completed, &created); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(payload), &struct {
+			SpaceID        *string   `json:"space_id"`
+			Destinations   *[]string `json:"destinations"`
+			ActivePosition *int      `json:"active_position"`
+		}{&c.SpaceID, &c.Destinations, &c.ActivePosition}); err != nil {
 			return nil, err
 		}
 		c.CreatedAt, _ = parseTime(created)
@@ -850,7 +1097,7 @@ func (s *sqliteStore) listCommands(ctx context.Context, sessionID string, after 
 	if err := s.terminalizeExpiredCommands(ctx, sessionID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.sequence,c.session_id,c.type,c.url,c.tab_id,c.attachment_id,c.expected_revision,c.lease_epoch,c.state,c.error_code,c.error,c.result_json,c.resulting_revision,c.acknowledged_at,c.completed_at,c.created_at
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.sequence,c.session_id,c.type,c.url,c.tab_id,c.attachment_id,c.payload_json,c.expected_revision,c.lease_epoch,c.state,c.error_code,c.error,c.result_json,c.resulting_revision,c.acknowledged_at,c.completed_at,c.created_at
 		FROM commands c
 		JOIN leases l ON l.session_id=c.session_id AND l.epoch=c.lease_epoch
 		WHERE c.session_id=? AND c.sequence>? AND c.state='queued' AND l.expires_at>?
@@ -862,10 +1109,17 @@ func (s *sqliteStore) listCommands(ctx context.Context, sessionID string, after 
 	result := []BrowserCommand{}
 	for rows.Next() {
 		var c BrowserCommand
-		var created, resultJSON string
+		var created, resultJSON, payload string
 		var acknowledged, completed sql.NullString
 		var resultingRevision sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &resultJSON, &resultingRevision, &acknowledged, &completed, &created); err != nil {
+		if err := rows.Scan(&c.ID, &c.Sequence, &c.SessionID, &c.Type, &c.URL, &c.TabID, &c.AttachmentID, &payload, &c.ExpectedRevision, &c.LeaseEpoch, &c.State, &c.ErrorCode, &c.Error, &resultJSON, &resultingRevision, &acknowledged, &completed, &created); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(payload), &struct {
+			SpaceID        *string   `json:"space_id"`
+			Destinations   *[]string `json:"destinations"`
+			ActivePosition *int      `json:"active_position"`
+		}{&c.SpaceID, &c.Destinations, &c.ActivePosition}); err != nil {
 			return nil, err
 		}
 		c.CreatedAt, _ = parseTime(created)
@@ -933,6 +1187,18 @@ func (s *sqliteStore) ackCommand(ctx context.Context, id, status, errorCode, fai
 	resultJSON := ""
 	if len(result) != 0 {
 		resultJSON = string(result)
+	}
+	if command.Type == "restore_space" && status == "applied" {
+		if _, err = tx.ExecContext(ctx, `UPDATE activity_spaces SET state='parked',updated_at=? WHERE workspace_id=(SELECT workspace_id FROM activity_spaces WHERE id=?) AND state='active'`, formatTime(now), command.SpaceID); err != nil {
+			return BrowserCommand{}, err
+		}
+		updated, updateErr := tx.ExecContext(ctx, `UPDATE activity_spaces SET state='active',revision=revision+1,updated_at=? WHERE id=?`, formatTime(now), command.SpaceID)
+		if updateErr != nil {
+			return BrowserCommand{}, updateErr
+		}
+		if rows, _ := updated.RowsAffected(); rows != 1 {
+			return BrowserCommand{}, errNotFound
+		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?`, formatTime(now), command.SessionID); err != nil {
 		return BrowserCommand{}, err

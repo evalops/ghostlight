@@ -86,6 +86,16 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleWorkspacePreferences(w, r, parts[2])
+	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "spaces":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handleActivitySpaces(w, r, parts[2])
+	case len(parts) == 6 && parts[1] == "workspaces" && parts[3] == "spaces":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
+		h.handleActivitySpaceAction(w, r, parts[2], parts[4], parts[5])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-pairings":
 		if !requirePrincipalScope(w, principal, nativeClientScope) {
 			return
@@ -129,6 +139,96 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (h *handler) handleActivitySpaces(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	switch r.Method {
+	case http.MethodGet:
+		spaces, err := h.store.listActivitySpaces(r.Context(), workspaceID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, spaces)
+	case http.MethodPost:
+		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		if key == "" || len(key) > 200 || leaseToken(r) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "Idempotency-Key and lease token are required")
+			return
+		}
+		var input struct {
+			Name             string `json:"name"`
+			SessionID        string `json:"session_id"`
+			ExpectedRevision int64  `json:"expected_revision"`
+		}
+		body, err := decodeStrictJSON(r, &input)
+		input.Name = strings.TrimSpace(input.Name)
+		if err != nil || input.Name == "" || utf8.RuneCountInString(input.Name) > 80 || input.SessionID == "" || input.ExpectedRevision < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_request", "space name, session_id, and expected_revision are required")
+			return
+		}
+		digest := sha256.Sum256(body)
+		space, created, err := h.store.createActivitySpace(r.Context(), workspaceID, input.SessionID, input.Name, input.ExpectedRevision, leaseToken(r), key, hex.EncodeToString(digest[:]))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		writeJSON(w, status, space)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+	}
+}
+
+func (h *handler) handleActivitySpaceAction(w http.ResponseWriter, r *http.Request, workspaceID, spaceID, action string) {
+	if r.Method != http.MethodPost || (action != "park" && action != "activate") {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 200 || leaseToken(r) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Idempotency-Key and lease token are required")
+		return
+	}
+	var input struct {
+		SessionID        string `json:"session_id"`
+		ExpectedRevision int64  `json:"expected_revision"`
+	}
+	body, err := decodeStrictJSON(r, &input)
+	if err != nil || input.SessionID == "" || input.ExpectedRevision < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "session_id and expected_revision are required")
+		return
+	}
+	digest := sha256.Sum256([]byte(action + "\x00" + spaceID + "\x00" + string(body)))
+	hash := hex.EncodeToString(digest[:])
+	if action == "park" {
+		space, err := h.store.parkActivitySpace(r.Context(), workspaceID, spaceID, input.SessionID, input.ExpectedRevision, leaseToken(r), key, hash)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, space)
+		return
+	}
+	space, err := h.store.getActivitySpace(r.Context(), workspaceID, spaceID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	destinations := make([]string, len(space.Tabs))
+	for index, tab := range space.Tabs {
+		destinations[index] = tab.URL
+	}
+	command := BrowserCommand{Type: "restore_space", SpaceID: space.ID, Destinations: destinations, ActivePosition: space.ActivePosition, ExpectedRevision: input.ExpectedRevision}
+	queued, _, err := h.store.createCommand(r.Context(), input.SessionID, leaseToken(r), key, hash, command)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, ActivitySpaceActivation{Space: space, Command: queued})
 }
 
 func (h *handler) handleWorkspacePreferences(w http.ResponseWriter, r *http.Request, workspaceID string) {

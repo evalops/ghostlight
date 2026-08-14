@@ -36,6 +36,9 @@ Startup applies the same validation to the viewer URL and an explicit health URL
 | `GET /readyz` | `200 {"status":"ok","viewer":"ready"}` | The viewer returns a `2xx` response from `/health` within the two-second client timeout. |
 | `GET /v1/viewer` | `200 {"viewer_url":"<configured-url>"}` | The configured value is available in process memory. |
 | `GET /v1/workspaces` | `200` | Returns the durable workspace catalog. |
+| `GET, POST /v1/workspaces/{id}/spaces` | `200`, `201` | Lists Spaces or captures the current safe HTTP/HTTPS tab destinations under a lease and revision fence. |
+| `POST /v1/workspaces/{id}/spaces/{space}/park` | `200` | Refreshes a Space from the authoritative browser snapshot and marks it parked. |
+| `POST /v1/workspaces/{id}/spaces/{space}/activate` | `202` | Queues an idempotent browser-extension restore; the Space becomes active only after an applied command receipt. |
 | `GET, POST /v1/sessions` | `200` | Lists or idempotently ensures the single durable browser session. |
 | `GET /v1/sessions/{id}` | `200` | Returns authoritative session, tab, lease, and stream state. |
 | `GET /v1/sessions/{id}/events` | `200, 204` | Returns a newer revision or no content. |
@@ -61,6 +64,8 @@ Viewer network failure, timeout, redirect, or a response outside `200` through `
 Unknown paths return `404`. A known path with a method other than `GET` returns `405`, an `Allow: GET` header, and a JSON error body. The service does not read request bodies.
 
 `GET /v1/viewer` remains a stateless compatibility route. Product routes require the API bearer token. Lease renewal, release, commands, and attachment upload also require the lease token returned only when a client acquires a lease. Bridge routes use the separate bridge bearer token. Chrome pairing redemption uses a one-time capability; handoff writes use the resulting `handoff:write` device credential. Request bodies reject unknown JSON fields; session ensure, command, and Chrome handoff requests require `Idempotency-Key`. The bridge records command completion before acknowledging it, and control retains terminal status so a lost response retries the acknowledgment without replaying the browser action.
+
+Spaces contain names, ordered credential-free HTTP/HTTPS destinations, active position, Home preference ownership, and opaque pending-handoff IDs. They do not contain titles, page content, cookies, credentials, history, incognito state, or Chromium profile data. Restores run through the extension command path and become authoritative only after the command is applied.
 
 ## Network boundary
 

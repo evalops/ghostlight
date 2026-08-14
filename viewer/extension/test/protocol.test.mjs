@@ -43,10 +43,19 @@ test("validateCommand accepts the bounded command enum", () => {
     "forward",
     "reload",
     "stage_attachment",
+    "restore_space",
   ]) {
-    assert.equal(protocol.validateCommand({ id: "command-1", type }).type, type);
+    const command = type === "restore_space"
+      ? { id: "command-1", type, space_id: "space-1", destinations: ["https://example.test/"], active_position: 0 }
+      : { id: "command-1", type };
+    assert.equal(protocol.validateCommand(command).type, type);
   }
   assert.throws(() => protocol.validateCommand({ id: "command-1", type: "execute_script" }), /unsupported/);
+});
+
+test("restore space validation fails before browser mutation", () => {
+  assert.throws(() => protocol.validateCommand({ id: "command-1", type: "restore_space", space_id: "space-1", destinations: ["chrome://settings"], active_position: 0 }), /HTTP or HTTPS/);
+  assert.throws(() => protocol.validateCommand({ id: "command-1", type: "restore_space", space_id: "space-1", destinations: [], active_position: 0 }), /bounded/);
 });
 
 test("navigation URLs are restricted to HTTP and HTTPS", () => {
