@@ -74,6 +74,8 @@ steps:
         timeout_in_minutes: 60
         command: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes tesseract-ocr
           npm ci --ignore-scripts --prefix tests/acceptance
           command -v tesseract >/dev/null
           node --check tests/acceptance/persistence.mjs
