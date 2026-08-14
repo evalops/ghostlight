@@ -88,3 +88,23 @@ export function hostPermission(controlOrigin) {
   const url = new URL(normalizeControlOrigin(controlOrigin));
   return `${url.origin}/*`;
 }
+
+export async function pendingDelivery(storage, path, body, randomUUID = () => crypto.randomUUID()) {
+  const encoded = new TextEncoder().encode(`${path}\n${JSON.stringify(body)}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
+  const fingerprint = [...digest].map((value) => value.toString(16).padStart(2, "0")).join("");
+  const { pendingHandoffDelivery } = await storage.get("pendingHandoffDelivery");
+  if (pendingHandoffDelivery?.fingerprint === fingerprint && pendingHandoffDelivery?.key) {
+    return pendingHandoffDelivery;
+  }
+  const delivery = { fingerprint, key: randomUUID() };
+  await storage.set({ pendingHandoffDelivery: delivery });
+  return delivery;
+}
+
+export async function clearPendingDelivery(storage, delivery) {
+  const { pendingHandoffDelivery } = await storage.get("pendingHandoffDelivery");
+  if (pendingHandoffDelivery?.fingerprint === delivery.fingerprint && pendingHandoffDelivery?.key === delivery.key) {
+    await storage.remove("pendingHandoffDelivery");
+  }
+}

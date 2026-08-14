@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bookmarkItems, endpoint, hostPermission, normalizeControlOrigin, readingListItems, safeHandoff, safeHandoffs } from "../sync-core.js";
+import { bookmarkItems, clearPendingDelivery, endpoint, hostPermission, normalizeControlOrigin, pendingDelivery, readingListItems, safeHandoff, safeHandoffs } from "../sync-core.js";
 
 test("normalizes a scoped control origin", () => {
   assert.equal(normalizeControlOrigin(" https://ghostlight.test/base/ "), "https://ghostlight.test/base");
@@ -42,4 +42,23 @@ test("preserves bookmark hierarchy and Reading List state", () => {
   ]);
   assert.equal(bookmarkItems([{ id: "unsafe", url: "chrome://settings" }]).length, 0);
   assert.equal(readingListItems([{ url: "https://later.test/?token=secret" }]).length, 0);
+});
+
+test("reuses an idempotency key until a delivery receives a response", async () => {
+  const values = {};
+  const storage = {
+    async get(key) { return { [key]: values[key] }; },
+    async set(update) { Object.assign(values, update); },
+    async remove(key) { delete values[key]; }
+  };
+  const body = { title: "Work", url: "https://example.test/continue" };
+  const first = await pendingDelivery(storage, "v1/chrome-handoffs", body, () => "first-key");
+  const retry = await pendingDelivery(storage, "v1/chrome-handoffs", body, () => "second-key");
+  assert.deepEqual(retry, first);
+  assert.doesNotMatch(first.fingerprint, /Work|example/);
+
+  await clearPendingDelivery(storage, first);
+  const next = await pendingDelivery(storage, "v1/chrome-handoffs", body, () => "next-key");
+  assert.equal(next.key, "next-key");
+  assert.notEqual(next.key, first.key);
 });
