@@ -22,6 +22,22 @@ final class ViewerWebViewTests: XCTestCase {
         XCTAssertTrue(cookie.isHTTPOnly)
     }
 
+    func testNekoLoginCredentialInjectsScopedTokenWithoutPuttingItInTheURL() throws {
+        let configuration = WKWebViewConfiguration()
+        let credential = ViewerCredential(
+            type: "neko_login", name: "ghostlight-scoped", value: "scoped-token", path: nil,
+            secure: false, httpOnly: false, sameSite: nil, expiresAt: Date().addingTimeInterval(30)
+        )
+
+        ViewerWebView.configureViewerCredential(credential, in: configuration)
+
+        let script = try XCTUnwrap(configuration.userContentController.userScripts.first?.source)
+        XCTAssertTrue(script.contains("scoped-token"))
+        XCTAssertTrue(script.contains("ghostlight-scoped"))
+        XCTAssertFalse(script.contains("?pwd="))
+        XCTAssertFalse(script.contains("location.href"))
+    }
+
     func testNavigationOriginRequiresMatchingSchemeHostAndEffectivePort() throws {
         let origin = try XCTUnwrap(URL(string: "https://viewer.example.test"))
 
