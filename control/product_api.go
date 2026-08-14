@@ -44,31 +44,81 @@ func (h *handler) handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
-	if !authorized(r, h.config.APIToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "a valid API token is required")
+	principal, err := h.authenticateAPI(r)
+	if err != nil {
+		if errors.Is(err, errUnauthorized) {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "a valid API token is required")
+		} else {
+			writeStoreError(w, err)
+		}
 		return
 	}
 	parts := splitPath(r.URL.Path)
 	switch {
+	case len(parts) == 2 && parts[1] == "native-client-enrollments":
+		if !requireOperatorPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClientEnrollments(w, r)
+	case len(parts) == 2 && parts[1] == "native-clients":
+		if !requireOperatorPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClients(w, r)
+	case len(parts) == 3 && parts[1] == "native-clients":
+		if !requireOperatorPrincipal(w, principal) {
+			return
+		}
+		h.handleNativeClient(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "workspaces":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaces(w, r)
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "preferences":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspacePreferences(w, r, parts[2])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-pairings":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleChromePairings(w, r, parts[2])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-devices":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleChromeDevices(w, r, parts[2])
 	case len(parts) == 5 && parts[1] == "workspaces" && parts[3] == "chrome-devices":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleChromeDevice(w, r, parts[2], parts[4])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-handoffs":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaceChromeHandoffs(w, r, parts[2], "")
 	case len(parts) == 5 && parts[1] == "workspaces" && parts[3] == "chrome-handoffs":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaceChromeHandoffs(w, r, parts[2], parts[4])
 	case len(parts) == 4 && parts[1] == "workspaces" && parts[3] == "chrome-library":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleWorkspaceChromeLibrary(w, r, parts[2])
 	case len(parts) == 2 && parts[1] == "sessions":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleSessions(w, r)
 	case len(parts) >= 3 && parts[1] == "sessions":
+		if !requirePrincipalScope(w, principal, nativeClientScope) {
+			return
+		}
 		h.handleSessionResource(w, r, parts[2], parts[3:])
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")

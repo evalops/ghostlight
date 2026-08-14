@@ -131,6 +131,47 @@ func TestSchemaThreeMigratesChromeWindowAndLibraryState(t *testing.T) {
 	}
 }
 
+func TestSchemaFourMigratesNativeClientEnrollment(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attachments := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(stateDir, databaseFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO metadata(key,value) VALUES('schema_version','4')`,
+		`PRAGMA user_version = 4`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openSQLiteStore(stateDir, attachments, time.Now)
+	if err != nil {
+		t.Fatalf("migrate schema four: %v", err)
+	}
+	defer store.close()
+	for _, table := range []string{"native_client_enrollments", "native_clients"} {
+		var name string
+		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			t.Fatalf("migrated table %s: %v", table, err)
+		}
+	}
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 5 {
+		t.Fatalf("migrated version = %d, %v; want 5", version, err)
+	}
+}
+
 func TestSchemaMigrationRollsBackAndRestartsCleanly(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")
@@ -168,6 +209,12 @@ func TestSchemaMigrationRollsBackAndRestartsCleanly(t *testing.T) {
 	for _, column := range []string{"error_code", "resulting_revision", "completed_at"} {
 		if columns[column] {
 			t.Fatalf("failed migration left column %q behind", column)
+		}
+	}
+	for _, table := range []string{"native_client_enrollments", "native_clients"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed migration left table %q behind: count=%d err=%v", table, count, err)
 		}
 	}
 	var version int
@@ -813,6 +860,243 @@ func TestStoreCommandAcceptsLeaseAfterHeartbeat(t *testing.T) {
 	}
 }
 
+func TestNativeClientEnrollmentHappyPathAndPrincipalBoundary(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+
+	issued := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", h.config.APIToken, strings.NewReader(`{"client_name":"Jonathan's Mac"}`))
+	if issued.Code != http.StatusCreated {
+		t.Fatalf("issue = %d %s", issued.Code, issued.Body.String())
+	}
+	var enrollment struct {
+		PairingCapability string    `json:"pairing_capability"`
+		ClientName        string    `json:"client_name"`
+		ExpiresAt         time.Time `json:"expires_at"`
+	}
+	decodeRecorder(t, issued, &enrollment)
+	if len(enrollment.PairingCapability) < 40 || enrollment.ClientName != "Jonathan's Mac" || enrollment.ExpiresAt.Sub(now) != 10*time.Minute {
+		t.Fatalf("enrollment = %#v", enrollment)
+	}
+	if strings.Contains(issued.Body.String(), "client_token") || strings.Contains(issued.Body.String(), "token_hash") {
+		t.Fatalf("issuance exposed non-pairing secret material: %s", issued.Body.String())
+	}
+
+	redeemed := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", enrollment.PairingCapability, strings.NewReader(`{"client_name":"Jonathan's Mac"}`))
+	if redeemed.Code != http.StatusCreated {
+		t.Fatalf("redeem = %d %s", redeemed.Code, redeemed.Body.String())
+	}
+	var credential struct {
+		Client struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Scope string `json:"scope"`
+		} `json:"client"`
+		ClientToken string `json:"client_token"`
+	}
+	decodeRecorder(t, redeemed, &credential)
+	if len(credential.Client.ID) < 16 || credential.Client.Name != "Jonathan's Mac" || credential.Client.Scope != "browser:use" || len(credential.ClientToken) < 40 {
+		t.Fatalf("credential = %#v", credential)
+	}
+	if strings.Contains(redeemed.Body.String(), enrollment.PairingCapability) || strings.Contains(redeemed.Body.String(), "pairing_capability") || strings.Contains(redeemed.Body.String(), "token_hash") {
+		t.Fatalf("redemption repeated or exposed secret material: %s", redeemed.Body.String())
+	}
+
+	sessions := doBearerRequest(h, http.MethodGet, "/v1/sessions", credential.ClientToken, nil)
+	if sessions.Code != http.StatusOK {
+		t.Fatalf("native product API = %d %s", sessions.Code, sessions.Body.String())
+	}
+	lease := doBearerRequest(h, http.MethodPost, "/v1/sessions/default/leases", credential.ClientToken, strings.NewReader(`{"client_id":"native-mac"}`))
+	if lease.Code != http.StatusCreated {
+		t.Fatalf("native product mutation = %d %s", lease.Code, lease.Body.String())
+	}
+	operatorOnly := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", credential.ClientToken, strings.NewReader(`{"client_name":"Escalated"}`))
+	if operatorOnly.Code != http.StatusForbidden || !strings.Contains(operatorOnly.Body.String(), "scope_denied") {
+		t.Fatalf("native operator API = %d %s", operatorOnly.Code, operatorOnly.Body.String())
+	}
+	bridge := doBearerRequest(h, http.MethodGet, "/v1/bridge/bootstrap", credential.ClientToken, nil)
+	if bridge.Code != http.StatusUnauthorized {
+		t.Fatalf("native bridge API = %d %s", bridge.Code, bridge.Body.String())
+	}
+	chrome := doBearerRequest(h, http.MethodPost, "/v1/chrome-handoffs", credential.ClientToken, strings.NewReader(`{"title":"Page","url":"https://example.test"}`))
+	if chrome.Code != http.StatusUnauthorized {
+		t.Fatalf("native Chrome API = %d %s", chrome.Code, chrome.Body.String())
+	}
+}
+
+func TestNativeClientEnrollmentExpiresAndRejectsReplayAndWrongClient(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), func() time.Time { return now })
+
+	issue := func(name string) string {
+		t.Helper()
+		response := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", h.config.APIToken, strings.NewReader(fmt.Sprintf(`{"client_name":%q}`, name)))
+		var enrollment struct {
+			PairingCapability string `json:"pairing_capability"`
+		}
+		decodeRecorder(t, response, &enrollment)
+		if response.Code != http.StatusCreated || enrollment.PairingCapability == "" {
+			t.Fatalf("issue %q = %d %s", name, response.Code, response.Body.String())
+		}
+		return enrollment.PairingCapability
+	}
+
+	capability := issue("Bound Mac")
+	missing := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", "", strings.NewReader(`{"client_name":"Bound Mac"}`))
+	if missing.Code != http.StatusUnauthorized || !strings.Contains(missing.Body.String(), "enrollment_invalid") {
+		t.Fatalf("missing capability = %d %s", missing.Code, missing.Body.String())
+	}
+	wrong := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", capability, strings.NewReader(`{"client_name":"Other Mac"}`))
+	if wrong.Code != http.StatusUnauthorized || !strings.Contains(wrong.Body.String(), "enrollment_invalid") {
+		t.Fatalf("wrong client = %d %s", wrong.Code, wrong.Body.String())
+	}
+	correct := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", capability, strings.NewReader(`{"client_name":"Bound Mac"}`))
+	if correct.Code != http.StatusCreated {
+		t.Fatalf("correct client after mismatch = %d %s", correct.Code, correct.Body.String())
+	}
+	replay := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", capability, strings.NewReader(`{"client_name":"Bound Mac"}`))
+	if replay.Code != http.StatusConflict || !strings.Contains(replay.Body.String(), "enrollment_used") {
+		t.Fatalf("replay = %d %s", replay.Code, replay.Body.String())
+	}
+
+	expiredCapability := issue("Expired Mac")
+	now = now.Add(10 * time.Minute)
+	expired := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", expiredCapability, strings.NewReader(`{"client_name":"Expired Mac"}`))
+	if expired.Code != http.StatusUnauthorized || !strings.Contains(expired.Body.String(), "enrollment_expired") {
+		t.Fatalf("expired = %d %s", expired.Code, expired.Body.String())
+	}
+}
+
+func TestConcurrentNativeClientEnrollmentRedeemsOnlyOnce(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	issued := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", h.config.APIToken, strings.NewReader(`{"client_name":"Concurrent Mac"}`))
+	var enrollment struct {
+		PairingCapability string `json:"pairing_capability"`
+	}
+	decodeRecorder(t, issued, &enrollment)
+
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", enrollment.PairingCapability, strings.NewReader(`{"client_name":"Concurrent Mac"}`))
+		}()
+	}
+	close(start)
+	statuses := map[int]int{}
+	for range 2 {
+		response := <-results
+		statuses[response.Code]++
+		if response.Code == http.StatusConflict && !strings.Contains(response.Body.String(), "enrollment_used") {
+			t.Fatalf("losing redemption = %d %s", response.Code, response.Body.String())
+		}
+	}
+	if statuses[http.StatusCreated] != 1 || statuses[http.StatusConflict] != 1 {
+		t.Fatalf("concurrent redemption statuses = %#v", statuses)
+	}
+}
+
+func TestNativeClientRevocationScopeDenialAndReEnrollment(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	first := enrollNativeClient(t, h, "Daily Driver")
+
+	if _, err := h.store.db.Exec(`UPDATE native_clients SET scope='browser:read' WHERE id=?`, first.Client.ID); err != nil {
+		t.Fatal(err)
+	}
+	denied := doBearerRequest(h, http.MethodGet, "/v1/sessions", first.ClientToken, nil)
+	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "scope_denied") {
+		t.Fatalf("wrong scope = %d %s", denied.Code, denied.Body.String())
+	}
+	if _, err := h.store.db.Exec(`UPDATE native_clients SET scope='browser:use' WHERE id=?`, first.Client.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked := doBearerRequest(h, http.MethodDelete, "/v1/native-clients/"+first.Client.ID, h.config.APIToken, nil)
+	if revoked.Code != http.StatusNoContent {
+		t.Fatalf("revoke = %d %s", revoked.Code, revoked.Body.String())
+	}
+	afterRevoke := doBearerRequest(h, http.MethodGet, "/v1/sessions", first.ClientToken, nil)
+	if afterRevoke.Code != http.StatusUnauthorized {
+		t.Fatalf("after revoke = %d %s", afterRevoke.Code, afterRevoke.Body.String())
+	}
+
+	second := enrollNativeClient(t, h, "Daily Driver")
+	if second.Client.ID != first.Client.ID || second.ClientToken == first.ClientToken {
+		t.Fatalf("re-enrollment = %#v after %#v", second, first)
+	}
+	if response := doBearerRequest(h, http.MethodGet, "/v1/sessions", second.ClientToken, nil); response.Code != http.StatusOK {
+		t.Fatalf("re-enrolled client = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestNativeClientAuthenticationReportsStorageFailure(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	credential := enrollNativeClient(t, h, "Storage Failure Mac")
+	if err := h.store.close(); err != nil {
+		t.Fatal(err)
+	}
+	response := doBearerRequest(h, http.MethodGet, "/v1/sessions", credential.ClientToken, nil)
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "internal_error") {
+		t.Fatalf("storage failure = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestNativeClientSecretsAreHashStoredAndReturnedOnlyOnce(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	issued := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", h.config.APIToken, strings.NewReader(`{"client_name":"Secretless Mac"}`))
+	var enrollment struct {
+		PairingCapability string `json:"pairing_capability"`
+	}
+	decodeRecorder(t, issued, &enrollment)
+	credential := redeemNativeClient(t, h, enrollment.PairingCapability, "Secretless Mac")
+
+	var enrollmentHash, credentialHash string
+	if err := h.store.db.QueryRow(`SELECT token_hash FROM native_client_enrollments`).Scan(&enrollmentHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.db.QueryRow(`SELECT token_hash FROM native_clients WHERE id=?`, credential.Client.ID).Scan(&credentialHash); err != nil {
+		t.Fatal(err)
+	}
+	if enrollmentHash == enrollment.PairingCapability || credentialHash == credential.ClientToken || enrollmentHash != hashSecret(enrollment.PairingCapability) || credentialHash != hashSecret(credential.ClientToken) {
+		t.Fatalf("stored hashes = %q %q", enrollmentHash, credentialHash)
+	}
+	listed := doBearerRequest(h, http.MethodGet, "/v1/native-clients", h.config.APIToken, nil)
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), enrollment.PairingCapability) || strings.Contains(listed.Body.String(), credential.ClientToken) || strings.Contains(listed.Body.String(), "token_hash") {
+		t.Fatalf("client listing exposed secret = %d %s", listed.Code, listed.Body.String())
+	}
+	databasePath := filepath.Join(h.config.StateDir, databaseFileName)
+	for _, path := range []string{databasePath, databasePath + "-wal", databasePath + "-shm"} {
+		database, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(database, []byte(enrollment.PairingCapability)) || bytes.Contains(database, []byte(credential.ClientToken)) {
+			t.Fatalf("native enrollment or client bearer secret was persisted in plaintext at %s", path)
+		}
+	}
+}
+
+func TestGlobalAPITokenRemainsCompatibleWithNativeClientEnrollment(t *testing.T) {
+	h := newProductTestHandler(t, productTestConfig(t.TempDir()), time.Now)
+	for _, path := range []string{"/v1/workspaces", "/v1/sessions"} {
+		response := doBearerRequest(h, http.MethodGet, path, h.config.APIToken, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("global token %s = %d %s", path, response.Code, response.Body.String())
+		}
+	}
+	issued := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", h.config.APIToken, strings.NewReader(`{"client_name":"Compatibility Mac"}`))
+	if issued.Code != http.StatusCreated {
+		t.Fatalf("global token enrollment = %d %s", issued.Code, issued.Body.String())
+	}
+	wrong := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", "wrong", strings.NewReader(`{"client_name":"Denied Mac"}`))
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong operator token = %d %s", wrong.Code, wrong.Body.String())
+	}
+}
+
 func TestChromeHandoffPairingConsentSafetyAndRevocation(t *testing.T) {
 	clock := func() time.Time { return time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC) }
 	h := newProductTestHandler(t, productTestConfig(t.TempDir()), clock)
@@ -1035,6 +1319,38 @@ func pairChromeDevice(t *testing.T, h *handler, name, deviceID string) ChromeDev
 	return credential
 }
 
+type nativeClientTestCredential struct {
+	Client struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"client"`
+	ClientToken string `json:"client_token"`
+}
+
+func enrollNativeClient(t *testing.T, h *handler, name string) nativeClientTestCredential {
+	t.Helper()
+	issued := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments", h.config.APIToken, strings.NewReader(fmt.Sprintf(`{"client_name":%q}`, name)))
+	var enrollment struct {
+		PairingCapability string `json:"pairing_capability"`
+	}
+	decodeRecorder(t, issued, &enrollment)
+	if issued.Code != http.StatusCreated || enrollment.PairingCapability == "" {
+		t.Fatalf("issue = %d %s", issued.Code, issued.Body.String())
+	}
+	return redeemNativeClient(t, h, enrollment.PairingCapability, name)
+}
+
+func redeemNativeClient(t *testing.T, h *handler, capability, name string) nativeClientTestCredential {
+	t.Helper()
+	response := doBearerRequest(h, http.MethodPost, "/v1/native-client-enrollments/redeem", capability, strings.NewReader(fmt.Sprintf(`{"client_name":%q}`, name)))
+	var credential nativeClientTestCredential
+	decodeRecorder(t, response, &credential)
+	if response.Code != http.StatusCreated || credential.ClientToken == "" {
+		t.Fatalf("redeem = %d %s", response.Code, response.Body.String())
+	}
+	return credential
+}
+
 func productTestConfig(root string) Config {
 	return Config{
 		ViewerURL:       "https://viewer.example.test",
@@ -1094,6 +1410,19 @@ func doChromeRequest(h http.Handler, method, path, token, idempotencyKey string,
 	}
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func doBearerRequest(h http.Handler, method, path, token string, body io.Reader) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "http://ghostlight.test"+path, body)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	recorder := httptest.NewRecorder()
 	h.ServeHTTP(recorder, request)
