@@ -63,6 +63,10 @@ protocol SessionServicing: Sendable {
     func updateChromeHandoff(at origin: URL, apiToken: String, workspaceID: String, handoffID: String, state: String) async throws -> ChromeHandoff
     func listChromeDevices(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ChromeDevice]
     func revokeChromeDevice(at origin: URL, apiToken: String, workspaceID: String, deviceID: String) async throws
+    func listActivitySpaces(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ActivitySpace]
+    func createActivitySpace(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, name: String, expectedRevision: Int) async throws -> ActivitySpace
+    func parkActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpace
+    func activateActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpaceActivation
     func getSession(at origin: URL, apiToken: String, sessionID: String) async throws -> BrowserSession
     func createSession(at origin: URL, apiToken: String, idempotencyKey: String) async throws -> BrowserSession
     func sessionEvents(at origin: URL, apiToken: String, sessionID: String, afterRevision: Int, waitMilliseconds: Int) async throws -> BrowserSession?
@@ -73,6 +77,13 @@ protocol SessionServicing: Sendable {
     func uploadAttachment(at origin: URL, apiToken: String, sessionID: String, token: String, fileURL: URL) async throws -> Attachment
     func createStream(at origin: URL, apiToken: String, sessionID: String, clientID: String) async throws -> StreamConnection
     func redeemViewerCapability(at origin: URL, capability: String, clientID: String) async throws -> ViewerBootstrap
+}
+
+extension SessionServicing {
+    func listActivitySpaces(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ActivitySpace] { [] }
+    func createActivitySpace(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, name: String, expectedRevision: Int) async throws -> ActivitySpace { throw SessionClientError.invalidResponse }
+    func parkActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpace { throw SessionClientError.invalidResponse }
+    func activateActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpaceActivation { throw SessionClientError.invalidResponse }
 }
 
 public final class SessionClient: SessionServicing, @unchecked Sendable {
@@ -270,6 +281,34 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
             path: ["v1", "sessions"],
             headers: Self.apiBearer(apiToken).merging(["Idempotency-Key": idempotencyKey]) { _, new in new },
             body: try SessionJSON.encoder.encode(CreateSessionRequest(workspaceID: "default"))
+        )
+    }
+
+    public func listActivitySpaces(at origin: URL, apiToken: String, workspaceID: String) async throws -> [ActivitySpace] {
+        try await send(.get, origin: origin, path: ["v1", "workspaces", workspaceID, "spaces"], headers: Self.apiBearer(apiToken))
+    }
+
+    public func createActivitySpace(at origin: URL, apiToken: String, workspaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, name: String, expectedRevision: Int) async throws -> ActivitySpace {
+        try await send(
+            .post, origin: origin, path: ["v1", "workspaces", workspaceID, "spaces"],
+            headers: Self.spaceHeaders(apiToken: apiToken, leaseToken: leaseToken, idempotencyKey: idempotencyKey),
+            body: try SessionJSON.encoder.encode(ActivitySpaceCaptureRequest(name: name, sessionID: sessionID, expectedRevision: expectedRevision))
+        )
+    }
+
+    public func parkActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpace {
+        try await send(
+            .post, origin: origin, path: ["v1", "workspaces", workspaceID, "spaces", spaceID, "park"],
+            headers: Self.spaceHeaders(apiToken: apiToken, leaseToken: leaseToken, idempotencyKey: idempotencyKey),
+            body: try SessionJSON.encoder.encode(ActivitySpaceActionRequest(sessionID: sessionID, expectedRevision: expectedRevision))
+        )
+    }
+
+    public func activateActivitySpace(at origin: URL, apiToken: String, workspaceID: String, spaceID: String, sessionID: String, leaseToken: String, idempotencyKey: String, expectedRevision: Int) async throws -> ActivitySpaceActivation {
+        try await send(
+            .post, origin: origin, path: ["v1", "workspaces", workspaceID, "spaces", spaceID, "activate"],
+            headers: Self.spaceHeaders(apiToken: apiToken, leaseToken: leaseToken, idempotencyKey: idempotencyKey),
+            body: try SessionJSON.encoder.encode(ActivitySpaceActionRequest(sessionID: sessionID, expectedRevision: expectedRevision))
         )
     }
 
@@ -486,6 +525,10 @@ public final class SessionClient: SessionServicing, @unchecked Sendable {
     private static func authorized(apiToken: String, leaseToken: String) -> [String: String] {
         ["Authorization": "Bearer \(apiToken)", "X-Ghostlight-Lease-Token": leaseToken]
     }
+
+    private static func spaceHeaders(apiToken: String, leaseToken: String, idempotencyKey: String) -> [String: String] {
+        authorized(apiToken: apiToken, leaseToken: leaseToken).merging(["Idempotency-Key": idempotencyKey]) { _, new in new }
+    }
 }
 
 private enum HTTPMethod: String { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
@@ -494,6 +537,17 @@ private struct NativeClientEnrollmentRequest: Encodable {
     enum CodingKeys: String, CodingKey { case clientName = "client_name" }
 }
 private struct CreateSessionRequest: Encodable { let workspaceID: String; enum CodingKeys: String, CodingKey { case workspaceID = "workspace_id" } }
+private struct ActivitySpaceCaptureRequest: Encodable {
+    let name: String
+    let sessionID: String
+    let expectedRevision: Int
+    enum CodingKeys: String, CodingKey { case name; case sessionID = "session_id"; case expectedRevision = "expected_revision" }
+}
+private struct ActivitySpaceActionRequest: Encodable {
+    let sessionID: String
+    let expectedRevision: Int
+    enum CodingKeys: String, CodingKey { case sessionID = "session_id"; case expectedRevision = "expected_revision" }
+}
 private struct AcquireLeaseRequest: Encodable { let clientID: String; enum CodingKeys: String, CodingKey { case clientID = "client_id" } }
 private struct ChromePairingRequest: Encodable { let deviceName: String; enum CodingKeys: String, CodingKey { case deviceName = "device_name" } }
 private struct ChromeHandoffUpdate: Encodable { let state: String }

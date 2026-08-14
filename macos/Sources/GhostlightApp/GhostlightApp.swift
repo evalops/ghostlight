@@ -64,6 +64,7 @@ struct ContentView: View {
     @State private var showingChromePairing = false
     @State private var showingHome = true
     @State private var homeQuery = ""
+    @State private var newSpaceName = ""
     @State private var nativeClientName = Host.current().localizedName ?? "This Mac"
 
     var body: some View {
@@ -528,6 +529,49 @@ struct ContentView: View {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.red)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Spaces")
+                            .font(.headline)
+                        Spacer()
+                        TextField("New space", text: $newSpaceName)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 180)
+                        Button("Save current tabs") {
+                            let name = newSpaceName
+                            Task {
+                                if await viewModel.createActivitySpace(named: name) { newSpaceName = "" }
+                            }
+                        }
+                        .disabled(!viewModel.canControl || newSpaceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    ForEach(viewModel.activitySpaces) { space in
+                        HStack {
+                            Image(systemName: space.state == "active" ? "square.stack.3d.up.fill" : "square.stack.3d.up")
+                                .foregroundStyle(space.state == "active" ? Color.accentColor : .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(space.name)
+                                Text("\(space.tabs.count) tabs · \(space.state.capitalized)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if space.state == "active" {
+                                Button("Update") { Task { await viewModel.parkActivitySpace(space) } }
+                            } else {
+                                Button("Open") {
+                                    Task { await viewModel.activateActivitySpace(space) }
+                                    showingHome = false
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                        .padding(10)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                 }
 

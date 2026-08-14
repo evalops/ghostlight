@@ -85,6 +85,38 @@ final class NativeSessionTests: XCTestCase {
         XCTAssertEqual(body, ["workspace_id": "default"] as NSDictionary)
     }
 
+    func testActivitySpacesUseScopedLeaseProtectedLifecycleEndpoints() async throws {
+        var requests: [URLRequest] = []
+        NativeSessionURLProtocol.requestHandler = { request in
+            requests.append(request)
+            if request.url?.path.hasSuffix("/activate") == true {
+                let command = Self.commandJSON.replacingOccurrences(of: #""type":"navigate""#, with: #""type":"restore_space""#)
+                return (Self.response(for: request, status: 202), Data(#"{"space":\#(Self.activitySpaceJSON),"command":\#(command)}"#.utf8))
+            }
+            if request.httpMethod == "GET" {
+                return (Self.response(for: request), Data("[\(Self.activitySpaceJSON)]".utf8))
+            }
+            return (Self.response(for: request), Data(Self.activitySpaceJSON.utf8))
+        }
+        let client = SessionClient(session: makeSession())
+        let origin = try XCTUnwrap(URL(string: "https://control.example.test/base"))
+
+        _ = try await client.listActivitySpaces(at: origin, apiToken: "api-secret", workspaceID: "default")
+        _ = try await client.createActivitySpace(at: origin, apiToken: "api-secret", workspaceID: "default", sessionID: "session-1", leaseToken: "lease-secret", idempotencyKey: "create-1", name: "Launch", expectedRevision: 7)
+        _ = try await client.parkActivitySpace(at: origin, apiToken: "api-secret", workspaceID: "default", spaceID: "space-1", sessionID: "session-1", leaseToken: "lease-secret", idempotencyKey: "park-1", expectedRevision: 8)
+        let activation = try await client.activateActivitySpace(at: origin, apiToken: "api-secret", workspaceID: "default", spaceID: "space-1", sessionID: "session-1", leaseToken: "lease-secret", idempotencyKey: "activate-1", expectedRevision: 9)
+
+        XCTAssertEqual(requests.map { $0.url?.path }, [
+            "/base/v1/workspaces/default/spaces",
+            "/base/v1/workspaces/default/spaces",
+            "/base/v1/workspaces/default/spaces/space-1/park",
+            "/base/v1/workspaces/default/spaces/space-1/activate",
+        ])
+        XCTAssertEqual(requests.dropFirst().map { $0.value(forHTTPHeaderField: "X-Ghostlight-Lease-Token") }, Array(repeating: "lease-secret", count: 3))
+        XCTAssertEqual(requests.dropFirst().compactMap { $0.value(forHTTPHeaderField: "Idempotency-Key") }, ["create-1", "park-1", "activate-1"])
+        XCTAssertEqual(activation.command.type, .restoreSpace)
+    }
+
     func testWorkspaceListDecodesTopLevelArray() async throws {
         NativeSessionURLProtocol.requestHandler = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer api-secret")
@@ -1394,6 +1426,15 @@ final class NativeSessionTests: XCTestCase {
       "id":"command-1","sequence":1,"session_id":"session-1","type":"navigate",
       "url":"https://example.com","tab_id":"tab-1","expected_revision":7,
       "lease_epoch":2,"state":"queued","created_at":"2026-08-13T12:00:02Z"
+    }
+    """#
+
+    private static let activitySpaceJSON = #"""
+    {
+      "id":"space-1","workspace_id":"default","name":"Launch","state":"parked","revision":2,
+      "tabs":[{"url":"https://example.test/work","position":0}],"active_position":0,
+      "home_preferences_workspace_id":"default","pending_handoff_ids":[],
+      "created_at":"2026-08-13T12:00:00Z","updated_at":"2026-08-13T12:00:01Z"
     }
     """#
 

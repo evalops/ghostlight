@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -17,28 +18,26 @@ func TestRunShutsDownOnSignal(t *testing.T) {
 	t.Setenv(bridgeTokenEnvironment, "bridge-test-token")
 	t.Setenv(viewerPasswordEnvironment, "viewer-test-secret")
 
+	signals := make(chan os.Signal, 1)
+	ready := make(chan struct{})
 	runErrors := make(chan error, 1)
-	go func() { runErrors <- run() }()
-
-	// signal.Notify is registered before Serve starts, so a short delay is
-	// enough to guarantee the signal is caught instead of killing the test.
-	time.Sleep(250 * time.Millisecond)
+	go func() { runErrors <- runWithSignals(signals, ready) }()
 	select {
+	case <-ready:
 	case err := <-runErrors:
-		t.Fatalf("run() exited before signal: %v", err)
-	default:
+		t.Fatalf("runWithSignals() exited before ready: %v", err)
+	case <-time.After(2 * shutdownTimeout):
+		t.Fatal("runWithSignals() did not become ready")
 	}
-	if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatalf("send SIGTERM: %v", err)
-	}
+	signals <- syscall.SIGTERM
 
 	select {
 	case err := <-runErrors:
 		if err != nil {
-			t.Fatalf("run() after SIGTERM error = %v, want nil", err)
+			t.Fatalf("runWithSignals() after SIGTERM error = %v, want nil", err)
 		}
 	case <-time.After(2 * shutdownTimeout):
-		t.Fatal("run() did not exit after SIGTERM")
+		t.Fatal("runWithSignals() did not exit after SIGTERM")
 	}
 }
 
