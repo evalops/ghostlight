@@ -11,6 +11,15 @@ steps:
       - label: ":broom: Repository hygiene"
         key: "hygiene"
         timeout_in_minutes: 20
+        concurrency: 2
+        concurrency_group: "ghostlight-linux"
+        retry:
+          automatic:
+            - exit_status: -1
+              signal_reason: none
+              limit: 1
+            - signal_reason: agent_stop
+              limit: 1
         command: |
           bash scripts/check-repo-hygiene.sh
           bash scripts/test-repo-hygiene.sh
@@ -21,6 +30,15 @@ steps:
       - label: ":docker: Shell, Compose, and runtime"
         key: "runtime"
         timeout_in_minutes: 45
+        concurrency: 2
+        concurrency_group: "ghostlight-linux"
+        retry:
+          automatic:
+            - exit_status: -1
+              signal_reason: none
+              limit: 1
+            - signal_reason: agent_stop
+              limit: 1
         command: |
           set -euo pipefail
           command -v shellcheck >/dev/null
@@ -33,6 +51,15 @@ steps:
       - label: ":go: Go control and browser bridge"
         key: "go-tests"
         timeout_in_minutes: 45
+        concurrency: 2
+        concurrency_group: "ghostlight-linux"
+        retry:
+          automatic:
+            - exit_status: -1
+              signal_reason: none
+              limit: 1
+            - signal_reason: agent_stop
+              limit: 1
         command: |
           set -euo pipefail
           go_archive="$$(mktemp)"
@@ -57,6 +84,15 @@ steps:
       - label: ":chrome: Browser surfaces"
         key: "browser-tests"
         timeout_in_minutes: 30
+        concurrency: 2
+        concurrency_group: "ghostlight-linux"
+        retry:
+          automatic:
+            - exit_status: -1
+              signal_reason: none
+              limit: 1
+            - signal_reason: agent_stop
+              limit: 1
         command: |
           set -euo pipefail
           for package in viewer/extension companion/chrome; do
@@ -72,6 +108,15 @@ steps:
       - label: ":test_tube: Deterministic harnesses"
         key: "harnesses"
         timeout_in_minutes: 60
+        concurrency: 2
+        concurrency_group: "ghostlight-linux"
+        retry:
+          automatic:
+            - exit_status: -1
+              signal_reason: none
+              limit: 1
+            - signal_reason: agent_stop
+              limit: 1
         command: |
           set -euo pipefail
           npm ci --ignore-scripts --prefix tests/acceptance
