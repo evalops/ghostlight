@@ -202,7 +202,7 @@ grep -Fq -- 'queue: "hetzner-linux-heavy"' "$buildkite_pipeline" || {
   exit 1
 }
 linux_buildkite_pipeline="$(sed '/key: "macos-dormant"/,$d' "$buildkite_pipeline")"
-if [[ "$(grep -Fc -- 'concurrency_group: "ghostlight-linux"' <<<"$linux_buildkite_pipeline")" != 5 ]] ||
+if [[ "$(grep -Fc -- 'concurrency_group: "hetzner-linux-heavy-workloads"' <<<"$linux_buildkite_pipeline")" != 5 ]] ||
    [[ "$(grep -Fc -- 'concurrency: 2' <<<"$linux_buildkite_pipeline")" != 5 ]]; then
   printf 'Buildkite Linux validation must leave one shared heavy worker available\n' >&2
   exit 1
