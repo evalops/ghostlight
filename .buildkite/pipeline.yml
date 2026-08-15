@@ -12,7 +12,7 @@ steps:
         key: "hygiene"
         timeout_in_minutes: 20
         concurrency: 2
-        concurrency_group: "ghostlight-linux"
+        concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
             - exit_status: -1
@@ -31,7 +31,7 @@ steps:
         key: "runtime"
         timeout_in_minutes: 45
         concurrency: 2
-        concurrency_group: "ghostlight-linux"
+        concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
             - exit_status: -1
@@ -52,7 +52,7 @@ steps:
         key: "go-tests"
         timeout_in_minutes: 45
         concurrency: 2
-        concurrency_group: "ghostlight-linux"
+        concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
             - exit_status: -1
@@ -85,7 +85,7 @@ steps:
         key: "browser-tests"
         timeout_in_minutes: 30
         concurrency: 2
-        concurrency_group: "ghostlight-linux"
+        concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
             - exit_status: -1
@@ -109,7 +109,7 @@ steps:
         key: "harnesses"
         timeout_in_minutes: 60
         concurrency: 2
-        concurrency_group: "ghostlight-linux"
+        concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
             - exit_status: -1
