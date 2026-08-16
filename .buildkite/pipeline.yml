@@ -11,7 +11,7 @@ steps:
       - label: ":broom: Repository hygiene"
         key: "hygiene"
         timeout_in_minutes: 20
-        concurrency: 2
+        concurrency: 3
         concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
@@ -30,7 +30,7 @@ steps:
       - label: ":docker: Shell, Compose, and runtime"
         key: "runtime"
         timeout_in_minutes: 45
-        concurrency: 2
+        concurrency: 3
         concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
@@ -51,7 +51,7 @@ steps:
       - label: ":go: Go control and browser bridge"
         key: "go-tests"
         timeout_in_minutes: 45
-        concurrency: 2
+        concurrency: 3
         concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
@@ -84,7 +84,7 @@ steps:
       - label: ":chrome: Browser surfaces"
         key: "browser-tests"
         timeout_in_minutes: 30
-        concurrency: 2
+        concurrency: 3
         concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
@@ -108,7 +108,7 @@ steps:
       - label: ":test_tube: Deterministic harnesses"
         key: "harnesses"
         timeout_in_minutes: 60
-        concurrency: 2
+        concurrency: 3
         concurrency_group: "hetzner-linux-heavy-workloads"
         retry:
           automatic:
