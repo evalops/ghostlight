@@ -201,6 +201,14 @@ grep -Fq -- 'queue: "hetzner-linux-heavy"' "$buildkite_pipeline" || {
   printf 'Buildkite Linux validation does not target the self-hosted heavy queue\n' >&2
   exit 1
 }
+grep -Fq -- 'image: "evalops-platform-ci-v6"' "$buildkite_pipeline" || {
+  printf 'Buildkite Linux validation does not target the connected v6 worker image\n' >&2
+  exit 1
+}
+if grep -Fq -- 'evalops-platform-ci-v3' "$buildkite_pipeline"; then
+  printf 'Buildkite Linux validation still targets the retired v3 worker image\n' >&2
+  exit 1
+fi
 linux_buildkite_pipeline="$(sed '/key: "macos-dormant"/,$d' "$buildkite_pipeline")"
 if [[ "$(grep -Fc -- 'concurrency_group: "hetzner-linux-heavy-workloads"' <<<"$linux_buildkite_pipeline")" != 5 ]] ||
    [[ "$(grep -Fc -- 'concurrency: 3' <<<"$linux_buildkite_pipeline")" != 5 ]]; then

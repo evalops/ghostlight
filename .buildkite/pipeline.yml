@@ -1,6 +1,6 @@
 agents:
   queue: "hetzner-linux-heavy"
-  image: "evalops-platform-ci-v3"
+  image: "evalops-platform-ci-v6"
 
 env:
   CI: "true"
