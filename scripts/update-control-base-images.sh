@@ -62,23 +62,28 @@ resolve_digest() {
   printf '%s\n' "$digest"
 }
 
-go_candidate=golang:1.26.6-alpine
-alpine_candidate=alpine:3.24
+# control/Dockerfile is the source of truth for which base tags this repository
+# builds from. Deriving the candidates from it lets a reviewed tag bump (for
+# example a Dependabot Docker update) flow through without editing this script,
+# while the shape checks below still require an immutable digest pin on the
+# expected image families.
+go_current=$(awk '$1 == "FROM" && $2 ~ /^golang:/ { print $2; exit }' "$dockerfile")
+alpine_current=$(awk '$1 == "FROM" && $2 ~ /^alpine:/ { print $2; exit }' "$dockerfile")
+[[ "$go_current" =~ ^golang:[0-9]+\.[0-9]+(\.[0-9]+)?-alpine@sha256:[0-9a-f]{64}$ ]] || {
+  printf 'unexpected Go build base reference: %s\n' "$go_current" >&2
+  exit 1
+}
+[[ "$alpine_current" =~ ^alpine:[0-9]+\.[0-9]+(\.[0-9]+)?@sha256:[0-9a-f]{64}$ ]] || {
+  printf 'unexpected Alpine runtime base reference: %s\n' "$alpine_current" >&2
+  exit 1
+}
+
+go_candidate=${go_current%@*}
+alpine_candidate=${alpine_current%@*}
 go_digest=$(resolve_digest "$go_candidate" "${GHOSTLIGHT_GO_BASE_RESOLVED_DIGEST:-}")
 alpine_digest=$(resolve_digest "$alpine_candidate" "${GHOSTLIGHT_ALPINE_BASE_RESOLVED_DIGEST:-}")
 go_new="$go_candidate@$go_digest"
 alpine_new="$alpine_candidate@$alpine_digest"
-
-go_current=$(awk '$1 == "FROM" && $2 ~ /^golang:/ { print $2; exit }' "$dockerfile")
-alpine_current=$(awk '$1 == "FROM" && $2 ~ /^alpine:/ { print $2; exit }' "$dockerfile")
-[[ "$go_current" =~ ^golang:1\.26\.6-alpine@sha256:[0-9a-f]{64}$ ]] || {
-  printf 'unexpected Go build base reference: %s\n' "$go_current" >&2
-  exit 1
-}
-[[ "$alpine_current" =~ ^alpine:3\.24@sha256:[0-9a-f]{64}$ ]] || {
-  printf 'unexpected Alpine runtime base reference: %s\n' "$alpine_current" >&2
-  exit 1
-}
 
 if [[ "$go_current" != "$go_new" || "$alpine_current" != "$alpine_new" ]]; then
   GO_CURRENT="$go_current" GO_NEW="$go_new" ALPINE_CURRENT="$alpine_current" ALPINE_NEW="$alpine_new" \
