@@ -6,8 +6,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 CONTROL_DIR="$ROOT_DIR/control"
 neko_candidate="${GHOSTLIGHT_NEKO_CANDIDATE_IMAGE:-ghcr.io/m1k1o/neko/chromium:latest}"
-go_candidate="${GHOSTLIGHT_GO_BASE_CANDIDATE:-golang:1.26.6-alpine}"
-alpine_candidate="${GHOSTLIGHT_ALPINE_BASE_CANDIDATE:-alpine:3.24}"
+# Default the drift candidates to the tags control/Dockerfile already pins, so a
+# reviewed tag bump does not turn into permanent phantom drift against a tag the
+# repository no longer builds from.
+go_candidate="${GHOSTLIGHT_GO_BASE_CANDIDATE:-$(awk '$1 == "FROM" && $2 ~ /^golang:/ { image = $2; sub(/@.*$/, "", image); print image; exit }' "$CONTROL_DIR/Dockerfile")}"
+alpine_candidate="${GHOSTLIGHT_ALPINE_BASE_CANDIDATE:-$(awk '$1 == "FROM" && $2 ~ /^alpine:/ { image = $2; sub(/@.*$/, "", image); print image; exit }' "$CONTROL_DIR/Dockerfile")}"
 # The deployed NEKO_IMAGE pin tracks the hardened ghostlight-viewer rebuild, so
 # upstream drift is measured against the base the hardened viewer builds from.
 neko_pinned="$(awk '$1 == "FROM" && $2 ~ /^ghcr\.io\/m1k1o\/neko\/chromium@/ { image = $2; sub(/^[^@]*@/, "", image); print image; exit }' "$ROOT_DIR/viewer/Dockerfile")"
